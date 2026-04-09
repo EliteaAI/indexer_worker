@@ -1,0 +1,7 @@
+event_node:
+  type: MockEventNode
+
+task_limit: null
+
+nltk_data: /tmp/nltk_data
+tasknode_tmp: /tmp/tasknode

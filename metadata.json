@@ -1,0 +1,14 @@
+{
+  "name": "Datasources indexer: worker",
+  "version": "0.787",
+  "depends_on": [
+    "worker_core"
+  ],
+  "init_after": [
+    "sdk_plugin"
+  ],
+  "order_weight": 9999,
+  "version_requirements": {
+    "pylon": ">= 1.2.19"
+  }
+}

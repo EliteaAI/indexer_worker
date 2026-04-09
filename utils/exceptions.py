@@ -1,0 +1,2 @@
+class InternalSDKError(Exception):
+    pass

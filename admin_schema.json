@@ -1,0 +1,24 @@
+{
+  "$schema": "https://elitea.ai/admin-config-schema/v1",
+  "plugin": "indexer_worker",
+  "properties": {
+    "sdk_dev_reload": {
+      "type": "boolean",
+      "title": "SDK Hot Reload",
+      "description": "When enabled, the SDK is reloaded from disk on every agent run instead of using cached modules. Useful during SDK development to pick up code changes instantly without restarting the service. Keep disabled in production for better performance.",
+      "path": "sdk_dev_reload",
+      "section": "runtime",
+      "default": false,
+      "requires_restart": false
+    },
+    "mcp_servers": {
+      "type": "object",
+      "title": "MCP Server Definitions",
+      "description": "Pre-configured MCP servers that appear as selectable toolkits. Supports stdio (local subprocess) and http (remote) server types.",
+      "path": "mcp_servers",
+      "section": "mcp_servers",
+      "default": {},
+      "requires_restart": true
+    }
+  }
+}

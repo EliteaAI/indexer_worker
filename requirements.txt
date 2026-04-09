@@ -1,0 +1,5 @@
+# elitea-sdk is now managed as a pylon plugin (elitea-sdk) — do not pin here
+
+azure-identity==1.16.0
+
+langfuse>=3.0.0
