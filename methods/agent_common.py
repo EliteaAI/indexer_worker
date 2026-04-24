@@ -584,6 +584,14 @@ class EliteACallback(BaseCallbackHandler):
         tool_run_id = str(run_id)
         # Use JSON serialization for non-string types to preserve proper formatting
         raw_output = args[0]
+        # LangChain wraps tool results in a ToolMessage (BaseMessage) when a
+        # tool_call_id is provided (e.g. via LangGraph's ToolNode for published
+        # agents with toolkits). Extract the actual content, otherwise the
+        # non-serializable ToolMessage falls back to its pydantic __str__
+        # ("content='...' name='...' tool_call_id='...'") and is surfaced to
+        # the end user / LLM context instead of the plain tool result.
+        if isinstance(raw_output, BaseMessage):
+            raw_output = raw_output.content
         tool_output = (
             raw_output
             if isinstance(raw_output, str)
