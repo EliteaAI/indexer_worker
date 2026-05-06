@@ -27,6 +27,23 @@ import arbiter  # pylint: disable=E0401
 from tools import worker_core  # pylint: disable=E0401
 
 
+REQUIRED_NLTK_PATHS = (
+    os.path.join("tokenizers", "punkt_tab", "english", "collocations.tab"),
+    os.path.join(
+        "taggers",
+        "averaged_perceptron_tagger_eng",
+        "averaged_perceptron_tagger_eng.weights.json",
+    ),
+)
+
+
+def _has_required_nltk_data(nltk_data_target):
+    return all(
+        os.path.exists(os.path.join(nltk_data_target, relative_path))
+        for relative_path in REQUIRED_NLTK_PATHS
+    )
+
+
 class Module(module.ModuleModel):  # pylint: disable=R0902
     """ Pylon module """
 
@@ -61,9 +78,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             #
             def _install_needed(*_args, **_kwargs):
                 try:
-                    return not os.path.exists(
-                        os.path.join(nltk_data_target, "tokenizers/punkt/english.pickle")
-                    )
+                    return not _has_required_nltk_data(nltk_data_target)
                 except:  # pylint: disable=W0702
                     return True
             #
@@ -182,9 +197,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             #
             def _install_needed(*_args, **_kwargs):
                 try:
-                    return not os.path.exists(
-                        os.path.join(nltk_data_target, "tokenizers/punkt/english.pickle")
-                    )
+                    return not _has_required_nltk_data(nltk_data_target)
                 except:  # pylint: disable=W0702
                     return True
             #
@@ -195,6 +208,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 extract_target=nltk_data_target,
                 extract_cleanup=False,
             )
+            if not _has_required_nltk_data(nltk_data_target):
+                raise RuntimeError("Required NLTK resources missing after bundle extraction")
         except:  # pylint: disable=W0702
             from elitea_sdk.runtime.langchain.tools.utils import download_nltk  # pylint: disable=C0415,E0401
             download_nltk(nltk_data_target)
