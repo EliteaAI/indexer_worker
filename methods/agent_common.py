@@ -536,6 +536,13 @@ class EliteACallback(BaseCallbackHandler):
             )
             tool_metadata["toolkit_type"] = self.cached_toolkit_type
 
+        # Fallback: get agent_type from tool's serialized metadata if not in execution metadata
+        if not tool_metadata.get("agent_type"):
+            serialized_agent_type = tool_meta.get("metadata", {}).get("agent_type")
+            if serialized_agent_type:
+                log.debug(f"[METADATA] Adding agent_type from serialized metadata: {serialized_agent_type}")
+                tool_metadata["agent_type"] = serialized_agent_type
+
         # For MCP tools, construct metadata from serialized fields if not already present
         if not tool_metadata.get("mcp_session_id"):
             session_id = args[0].get("session_id") if args else None
