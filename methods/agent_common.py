@@ -862,7 +862,7 @@ class EliteACallback(BaseCallbackHandler):
                             and item.get("text")
                         ]
                         if text_items:
-                            content = "".join(text_items)
+                            content = "\n".join(text_items)
                     # Extract thinking items (extended thinking / reasoning)
                     thinking_items = []
                     for item in msg_content:
