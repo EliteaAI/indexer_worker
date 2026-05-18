@@ -382,6 +382,15 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             worker_core.task_node_light.register_task(
                 self.indexer_toolkit_available_tools, "indexer_toolkit_available_tools"
             )
+            worker_core.task_node_light.register_task(
+                self.indexer_tts, "indexer_tts"
+            )
+            worker_core.task_node_light.register_task(
+                self.indexer_asr_whisper, "indexer_asr_whisper"
+            )
+            worker_core.task_node_light.register_task(
+                self.indexer_asr_realtime, "indexer_asr_realtime"
+            )
             self.agent_task_node.register_task(
                 self.indexer_test_toolkit_tool, "indexer_test_toolkit_tool"
             )
@@ -433,6 +442,15 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             )
             worker_core.task_node_light.unregister_task(
                 self.indexer_toolkit_available_tools, "indexer_toolkit_available_tools"
+            )
+            worker_core.task_node_light.unregister_task(
+                self.indexer_tts, "indexer_tts"
+            )
+            worker_core.task_node_light.unregister_task(
+                self.indexer_asr_whisper, "indexer_asr_whisper"
+            )
+            worker_core.task_node_light.unregister_task(
+                self.indexer_asr_realtime, "indexer_asr_realtime"
             )
             self.agent_task_node.unregister_task(
                 self.indexer_test_toolkit_tool, "indexer_test_toolkit_tool"
