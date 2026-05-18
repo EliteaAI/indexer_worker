@@ -67,6 +67,10 @@ class Method:
             if isinstance(exc, _req.HTTPError) and exc.response is not None and exc.response.status_code == 429:
                 # Rate-limited — drop this chunk silently so recording stays alive
                 log.debug("indexer_asr_whisper: rate-limited (429) for sid=%s, dropping chunk", sid)
+            elif isinstance(exc, (_req.Timeout, _req.ConnectionError)):
+                # Proxy timeout — usually caused by LiteLLM retrying a rate-limited Azure request
+                # internally until our read timeout expires. Drop silently so recording stays alive.
+                log.warning("indexer_asr_whisper: proxy timeout for sid=%s, dropping chunk", sid)
             else:
                 log.error("indexer_asr_whisper: transcription error for sid=%s: %s", sid, exc)
                 local_event_node.emit(_EN_ASR_ERROR, {"sid": sid, "error": str(exc)})
