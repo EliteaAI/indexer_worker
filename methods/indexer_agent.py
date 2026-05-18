@@ -298,6 +298,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Resolve filepath: image URLs in current turn — single S3 read per image
             user_input, image_thumbnails = resolve_filepath_images(user_input, client)
 
+            # Extract pipeline attachment filepaths from user_input chunks before LLM invocation.
+            # The 'attachment_filepath' key is a structural marker set by pipeline_process() in
+            # pylon_main attachments.py. Strip it here so clean {type, text} dicts reach the
+            # model API, then inject filepaths into the pipeline graph state as input_attachments.
+            attachment_filepaths = []
+            if isinstance(user_input, list):
+                for chunk in user_input:
+                    if isinstance(chunk, dict) and 'attachment_filepath' in chunk:
+                        attachment_filepaths.append(chunk.pop('attachment_filepath'))
+
             user_message_content = hitl_value if hitl_resume and hitl_action == 'edit' else user_input
             user_message = HumanMessage(content=user_message_content or '')
             log.debug(f'invoke payload thread_id={thread_id}')
@@ -316,6 +326,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 model_name=client_args.get('model', ''),
                 supports_vision=supports_vision,
             )
+
+            if attachment_filepaths:
+                invoke_input['input_attachments'] = attachment_filepaths
+                
             invoke_config = {
                 'callbacks': callbacks,
                 'configurable': {'thread_id': thread_id},
