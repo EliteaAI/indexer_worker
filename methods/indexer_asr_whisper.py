@@ -66,9 +66,9 @@ class Method:
             import requests as _req
             if isinstance(exc, _req.HTTPError) and exc.response is not None and exc.response.status_code == 429:
                 # Rate-limited — drop this chunk silently so recording stays alive
-                log.warning(f"indexer_asr_whisper: rate-limited (429) for sid={sid}, dropping chunk")
+                log.debug("indexer_asr_whisper: rate-limited (429) for sid=%s, dropping chunk", sid)
             else:
-                log.error(f"indexer_asr_whisper: transcription error for sid={sid}: {exc}")
+                log.error("indexer_asr_whisper: transcription error for sid=%s: %s", sid, exc)
                 local_event_node.emit(_EN_ASR_ERROR, {"sid": sid, "error": str(exc)})
 
 

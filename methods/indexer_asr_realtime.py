@@ -32,9 +32,12 @@ Architecture:
 
 import json
 import threading
+import time
 
 from pylon.core.tools import log, web
 from tools import worker_core
+
+_REALTIME_RETRY_DELAY_S = 2.0
 
 # Internal event-node channel names (indexer → pylon_main)
 _EN_ASR_TRANSCRIPT_DELTA = "voice_asr_transcript_delta"
@@ -84,10 +87,13 @@ class Method:
         ws_headers = [f"Authorization: Bearer {project_llm_key}", "OpenAI-Beta: realtime=v1"]
 
         stop_event = threading.Event()
+        # Tracks whether the stop came from the user (asr_stop) vs a WS error.
+        # Used to avoid retrying on an explicit user stop.
+        user_stop_event = threading.Event()
         audio_input_channel = f"{_EN_ASR_AUDIO_INPUT_PREFIX}{sid}"
         stop_channel = f"{_EN_ASR_STOP_PREFIX}{sid}"
 
-        # WebSocket state
+        # WebSocket state — reset between retries
         ws_state = {"ws": None, "connected": False, "lock": threading.Lock(), "queue": []}
 
         def _on_audio_input(event, payload, *a):
@@ -108,9 +114,10 @@ class Method:
                         "audio": audio_b64,
                     }))
                 except Exception as exc:
-                    log.warning(f"indexer_asr_realtime: send error for sid={sid}: {exc}")
+                    log.warning("indexer_asr_realtime: send error for sid=%s: %s", sid, exc)
 
         def _on_stop(event, payload, *a):
+            user_stop_event.set()
             stop_event.set()
             ws = ws_state.get("ws")
             if ws:
@@ -123,10 +130,31 @@ class Method:
         local_event_node.subscribe(stop_channel, _on_stop)
 
         try:
-            _run_realtime_ws(
-                local_event_node, sid, ws_url, ws_headers or [],
-                model_name, language, ws_state, stop_event,
-            )
+            for attempt in range(2):  # one initial attempt + one retry
+                if attempt > 0:
+                    if user_stop_event.is_set():
+                        break
+                    log.info(
+                        "indexer_asr_realtime: WS dropped, retrying in %gs (sid=%s)",
+                        _REALTIME_RETRY_DELAY_S, sid,
+                    )
+                    time.sleep(_REALTIME_RETRY_DELAY_S)
+                    stop_event.clear()
+                    with ws_state["lock"]:
+                        ws_state["ws"] = None
+                        ws_state["connected"] = False
+                        # Keep queued audio accumulated during the reconnect window
+
+                _run_realtime_ws(
+                    local_event_node, sid, ws_url, ws_headers or [],
+                    model_name, language, ws_state, stop_event,
+                    suppress_error_emit=(attempt == 0),
+                )
+
+                if user_stop_event.is_set():
+                    break
+                # If stop_event is set here but not by the user, a WS error occurred.
+                # attempt == 0 → loop continues to retry; attempt == 1 → error already emitted.
         finally:
             local_event_node.unsubscribe(audio_input_channel, _on_audio_input)
             local_event_node.unsubscribe(stop_channel, _on_stop)
@@ -141,6 +169,7 @@ def _run_realtime_ws(
     language: str,
     ws_state: dict,
     stop_event: threading.Event,
+    suppress_error_emit: bool = False,
 ) -> None:
     import websocket as ws_lib  # websocket-client
 
@@ -177,7 +206,7 @@ def _run_realtime_ws(
         event_type = msg.get("type", "")
 
         if event_type == "error":
-            log.error(f"indexer_asr_realtime: provider error for sid={sid}: {msg.get('error')}")
+            log.error("indexer_asr_realtime: provider error for sid=%s: %s", sid, msg.get("error"))
             return
 
         if event_type in (
@@ -197,8 +226,13 @@ def _run_realtime_ws(
 
     def _on_error(ws, error):
         if not stop_event.is_set():
-            log.error(f"indexer_asr_realtime: WS error for sid={sid}: {error}")
-            local_event_node.emit(_EN_ASR_ERROR, {"sid": sid, "error": str(error)})
+            if suppress_error_emit:
+                log.warning(
+                    "indexer_asr_realtime: WS error for sid=%s (will retry): %s", sid, error,
+                )
+            else:
+                log.error("indexer_asr_realtime: WS error for sid=%s: %s", sid, error)
+                local_event_node.emit(_EN_ASR_ERROR, {"sid": sid, "error": str(error)})
         stop_event.set()
 
     def _on_close(ws, code, reason):
