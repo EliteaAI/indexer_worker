@@ -23,12 +23,13 @@ import threading
 from pylon.core.tools import log, web
 from tools import worker_core
 
+from ..utils.voice_router import register as voice_register, unregister as voice_unregister
+from ..utils.voice_router import TTS_CANCEL
+
 # Internal event-node channel names (indexer → pylon_main)
 _EN_TTS_AUDIO_CHUNK = "voice_tts_audio_chunk"
 _EN_TTS_DONE = "voice_tts_done"
 _EN_TTS_ERROR = "voice_tts_error"
-# Cancel channel: pylon_main emits this when the browser sends tts_stop
-_EN_TTS_CANCEL_PREFIX = "voice_tts_cancel_"
 
 # Sentence boundary: period/exclamation/question followed by whitespace, or one+ newlines.
 # Splitting here lets the frontend receive exact audio-to-text anchor points (char_end waypoints).
@@ -107,19 +108,18 @@ class Method:
         local_event_node = worker_core.event_node
 
         cancel_event = threading.Event()
-        cancel_channel = f"{_EN_TTS_CANCEL_PREFIX}{sid}"
 
-        def _on_cancel(event, payload, *a):
+        def _on_cancel(payload):
             cancel_event.set()
 
-        local_event_node.subscribe(cancel_channel, _on_cancel)
+        voice_register(local_event_node, sid, TTS_CANCEL, _on_cancel)
         try:
             _run_tts_stream(
                 local_event_node, sid, project_id, project_llm_key,
                 model_name, text, voice, speed, cancel_event, voice_instructions,
             )
         finally:
-            local_event_node.unsubscribe(cancel_channel, _on_cancel)
+            voice_unregister(sid, TTS_CANCEL)
 
 
 _LITELLM_TTS_URL = "http://127.0.0.1:8081/v1/audio/speech"

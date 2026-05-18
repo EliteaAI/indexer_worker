@@ -37,16 +37,15 @@ import time
 from pylon.core.tools import log, web
 from tools import worker_core
 
+from ..utils.voice_router import register as voice_register, unregister as voice_unregister
+from ..utils.voice_router import ASR_AUDIO_INPUT, ASR_STOP
+
 _REALTIME_RETRY_DELAY_S = 2.0
 
 # Internal event-node channel names (indexer → pylon_main)
 _EN_ASR_TRANSCRIPT_DELTA = "voice_asr_transcript_delta"
 _EN_ASR_TRANSCRIPT_DONE = "voice_asr_transcript_done"
 _EN_ASR_ERROR = "voice_asr_error"
-
-# Internal event-node channel names (pylon_main → indexer)
-_EN_ASR_AUDIO_INPUT_PREFIX = "voice_asr_audio_input_"
-_EN_ASR_STOP_PREFIX = "voice_asr_stop_"
 
 
 class Method:
@@ -90,13 +89,11 @@ class Method:
         # Tracks whether the stop came from the user (asr_stop) vs a WS error.
         # Used to avoid retrying on an explicit user stop.
         user_stop_event = threading.Event()
-        audio_input_channel = f"{_EN_ASR_AUDIO_INPUT_PREFIX}{sid}"
-        stop_channel = f"{_EN_ASR_STOP_PREFIX}{sid}"
 
         # WebSocket state — reset between retries
         ws_state = {"ws": None, "connected": False, "lock": threading.Lock(), "queue": []}
 
-        def _on_audio_input(event, payload, *a):
+        def _on_audio_input(payload):
             import base64 as _b64
             pcm_bytes = payload.get("audio", b"")
             if not pcm_bytes:
@@ -116,7 +113,7 @@ class Method:
                 except Exception as exc:
                     log.warning("indexer_asr_realtime: send error for sid=%s: %s", sid, exc)
 
-        def _on_stop(event, payload, *a):
+        def _on_stop(payload):
             user_stop_event.set()
             stop_event.set()
             ws = ws_state.get("ws")
@@ -126,8 +123,8 @@ class Method:
                 except Exception:
                     pass
 
-        local_event_node.subscribe(audio_input_channel, _on_audio_input)
-        local_event_node.subscribe(stop_channel, _on_stop)
+        voice_register(local_event_node, sid, ASR_AUDIO_INPUT, _on_audio_input)
+        voice_register(local_event_node, sid, ASR_STOP, _on_stop)
 
         try:
             for attempt in range(2):  # one initial attempt + one retry
@@ -156,8 +153,7 @@ class Method:
                 # If stop_event is set here but not by the user, a WS error occurred.
                 # attempt == 0 → loop continues to retry; attempt == 1 → error already emitted.
         finally:
-            local_event_node.unsubscribe(audio_input_channel, _on_audio_input)
-            local_event_node.unsubscribe(stop_channel, _on_stop)
+            voice_unregister(sid, ASR_AUDIO_INPUT, ASR_STOP)
 
 
 def _run_realtime_ws(
