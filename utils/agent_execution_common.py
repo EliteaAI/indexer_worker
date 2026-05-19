@@ -154,44 +154,31 @@ def extract_response_content(response: Dict[str, Any], response_format: str = 'm
     """
     Extract and normalize content from agent response.
 
+    All SDK agent types (LangGraphAgentRunnable, SwarmResultAdapter, Application)
+    now return a standardized format with 'output' key always present.
+
     Args:
         response: The raw response from agent invocation
         response_format: Either 'messages' (for predict_agent) or 'output' (for application agent)
+                        Note: Both formats now support 'output' key as primary source.
 
     Returns:
         Normalized string content
     """
-    if response_format == 'messages':
-        # Predict agent format: {"messages": [...]}
+    # Primary extraction: use 'output' key (always present in standardized SDK responses)
+    content = response.get("output", "")
+
+    # Fallback for legacy responses that may only have 'messages' key
+    if not content and "messages" in response:
         messages = response.get("messages", [])
         if isinstance(messages, list) and len(messages) > 0:
             last_message = messages[-1]
-            # Handle both dict and message object
             if hasattr(last_message, 'content'):
                 content = last_message.content
             elif isinstance(last_message, dict):
                 content = last_message.get('content', '')
             else:
                 content = str(last_message)
-        else:
-            # Fallback: swarm responses from SwarmResultAdapter have {"output": ...} but no "messages"
-            # When predict agent runs in swarm mode, extract output directly
-            if "output" in response and response.get("output"):
-                content = response["output"]
-            else:
-                content = str(response)
-    else:
-        # Application agent format: {"output": ...}
-        content = response.get("output", "")
-        # Fallback: swarm responses may have messages but no output key
-        if not content and "messages" in response:
-            messages = response["messages"]
-            if isinstance(messages, list) and len(messages) > 0:
-                from langchain_core.messages import HumanMessage
-                for msg in reversed(messages):
-                    if hasattr(msg, 'content') and not isinstance(msg, HumanMessage):
-                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        break
 
     return normalize_response_content(content)
 
