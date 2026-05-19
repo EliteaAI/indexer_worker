@@ -591,6 +591,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             success = clean_test_result.get("success", False)
             tool_result = clean_test_result.get("result")
             error_message = clean_test_result.get("error", "")
+            debug_error = clean_test_result.get("debug_error", error_message)
             execution_time = clean_test_result.get("execution_time_seconds", 0.0)
             log.debug(f"Tool clean result: {clean_test_result}")
             final_result = tool_result if success else error_message
@@ -635,7 +636,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             else:
                 node_interface.emit(
                     type=EventTypes.agent_exception,
-                    content=error_message
+                    content=debug_error
                 )
 
                 # Check if index_data status event is missing and emit it if needed
