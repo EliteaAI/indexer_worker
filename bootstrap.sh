@@ -5,13 +5,38 @@ set -x
   echo "Sandbox base: ${SANDBOX_BASE}"
   cd "${SANDBOX_BASE}"
 
+  # Deno and pyodide versions must be pinned together as a tested pair.
+  # Changing one without verifying the other may break pyodide path resolution.
+  EXPECTED_DENO_VERSION="2.5.6"
+  EXPECTED_PYODIDE_VERSION="0.29.3"
+
+  # Auto-heal: wipe mismatched versions so they get reinstalled correctly
+  if [ -f "bin/deno" ]; then
+    CURRENT_DENO=$(bin/deno --version 2>/dev/null | head -1 | awk '{print $2}')
+    if [ "$CURRENT_DENO" != "$EXPECTED_DENO_VERSION" ]; then
+      echo "Deno version mismatch: found $CURRENT_DENO, expected $EXPECTED_DENO_VERSION. Wiping sandbox."
+      rm -rf bin pyodide
+    fi
+  fi
+
+  if [ -d "pyodide" ]; then
+    CURRENT_PYODIDE=""
+    if [ -f "pyodide/package.json" ]; then
+      CURRENT_PYODIDE=$(grep -oP '"version":\s*"\K[^"]+' pyodide/package.json 2>/dev/null | head -1)
+    fi
+    if [ -n "$CURRENT_PYODIDE" ] && [ "$CURRENT_PYODIDE" != "$EXPECTED_PYODIDE_VERSION" ]; then
+      echo "Pyodide version mismatch: found $CURRENT_PYODIDE, expected $EXPECTED_PYODIDE_VERSION. Wiping pyodide dir."
+      rm -rf pyodide
+    fi
+  fi
+
   if [ ! -f "bin/deno" ]; then
     if [ "$(uname -m)" = "aarch64" ]; then
-      curl -LOJ https://github.com/denoland/deno/releases/download/v2.6.8/deno-aarch64-unknown-linux-gnu.zip
+      curl -LOJ "https://github.com/denoland/deno/releases/download/v${EXPECTED_DENO_VERSION}/deno-aarch64-unknown-linux-gnu.zip"
       unzip deno-aarch64-unknown-linux-gnu.zip
       rm deno-aarch64-unknown-linux-gnu.zip
     else
-      curl -LOJ https://github.com/denoland/deno/releases/download/v2.6.8/deno-x86_64-unknown-linux-gnu.zip
+      curl -LOJ "https://github.com/denoland/deno/releases/download/v${EXPECTED_DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip"
       unzip deno-x86_64-unknown-linux-gnu.zip
       rm deno-x86_64-unknown-linux-gnu.zip
     fi
@@ -21,10 +46,17 @@ set -x
   fi
 
   if [ ! -d "pyodide" ]; then
-    curl -LOJ https://github.com/pyodide/pyodide/releases/download/0.29.3/pyodide-0.29.3.tar.bz2
-    tar xf pyodide-0.29.3.tar.bz2
-    rm pyodide-0.29.3.tar.bz2
-    pip3 wheel -w pyodide dill chardet
+    curl -LOJ "https://github.com/pyodide/pyodide/releases/download/${EXPECTED_PYODIDE_VERSION}/pyodide-${EXPECTED_PYODIDE_VERSION}.tar.bz2"
+    tar xf "pyodide-${EXPECTED_PYODIDE_VERSION}.tar.bz2"
+    rm "pyodide-${EXPECTED_PYODIDE_VERSION}.tar.bz2"
+    PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    pip3 download -d pyodide \
+      --only-binary=:all: \
+      --platform any \
+      --python-version "$PY_VER" \
+      --abi none \
+      --implementation py \
+      dill "chardet<6"
   fi
 
   if [ ! -d ".nvm" ]; then
