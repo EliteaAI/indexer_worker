@@ -58,10 +58,12 @@ class Method:
         if not audio_bytes:
             return
 
+        transcript_emitted = False
         try:
             transcript = _call_whisper(project_id, project_llm_key, model_name, language, audio_bytes)
             if transcript:
                 local_event_node.emit(_EN_ASR_TRANSCRIPT_DONE, {"sid": sid, "transcript": transcript})
+                transcript_emitted = True
         except Exception as exc:
             import requests as _req
             if isinstance(exc, _req.HTTPError) and exc.response is not None and exc.response.status_code == 429:
@@ -74,6 +76,12 @@ class Method:
             else:
                 log.error("indexer_asr_whisper: transcription error for sid=%s: %s", sid, exc)
                 local_event_node.emit(_EN_ASR_ERROR, {"sid": sid, "error": str(exc)})
+        finally:
+            if not transcript_emitted:
+                # Balance the speech_started counter on the frontend — a transcript_done
+                # must always follow every speech_started, even when transcription was
+                # skipped (rate-limited, timeout, or empty result).
+                local_event_node.emit(_EN_ASR_TRANSCRIPT_DONE, {"sid": sid, "transcript": ""})
 
 
 def _pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
