@@ -46,6 +46,7 @@ _REALTIME_RETRY_DELAY_S = 2.0
 _EN_ASR_TRANSCRIPT_DELTA = "voice_asr_transcript_delta"
 _EN_ASR_TRANSCRIPT_DONE = "voice_asr_transcript_done"
 _EN_ASR_ERROR = "voice_asr_error"
+_EN_ASR_SPEECH_STARTED = "voice_asr_speech_started"
 
 
 class Method:
@@ -205,6 +206,11 @@ def _run_realtime_ws(
             log.error("indexer_asr_realtime: provider error for sid=%s: %s", sid, msg.get("error"))
             return
 
+        if event_type == "input_audio_buffer.speech_started":
+            log.debug("indexer_asr_realtime: speech_started for sid=%s", sid)
+            local_event_node.emit(_EN_ASR_SPEECH_STARTED, {"sid": sid})
+            return
+
         if event_type in (
             "conversation.item.input_audio_transcription.delta",
             "response.audio_transcript.delta",
@@ -219,6 +225,9 @@ def _run_realtime_ws(
         ):
             transcript = msg.get("transcript", "")
             local_event_node.emit(_EN_ASR_TRANSCRIPT_DONE, {"sid": sid, "transcript": transcript})
+
+        else:
+            log.debug("indexer_asr_realtime: unhandled event type=%s for sid=%s", event_type, sid)
 
     def _on_error(ws, error):
         if not stop_event.is_set():
