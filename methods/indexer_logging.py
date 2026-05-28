@@ -37,10 +37,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     @web.method()
     def indexer_enable_logging(
             self,
-            level=logging.INFO,
+            level=None,
             additional_labels=None,
     ):
         """ Enable streaming to logging_hub """
+        if level is None:
+            configured = self.descriptor.config.get("log_level", "INFO").upper()
+            level = getattr(logging, configured, logging.INFO)
         try:
             import tasknode_task  # pylint: disable=E0401,C0415
             from tools import worker_core  # pylint: disable=E0401,C0415
