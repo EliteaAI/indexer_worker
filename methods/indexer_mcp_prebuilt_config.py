@@ -52,7 +52,7 @@ class Method:
         Returns:
             Dict with MCP server configurations keyed by normalized name.
         """
-        log.info("Received request for MCP prebuilt server configurations")
+        log.debug("Received request for MCP prebuilt server configurations")
         mcp_configs = {}
 
         try:

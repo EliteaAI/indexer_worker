@@ -116,7 +116,7 @@ def _fetch_pgvector_connstr_with_retry(
         try:
             conn_str = client.unsecret(PGVECTOR_PROJECT_CONNSTR_SECRET)
             if conn_str:
-                log.info(
+                log.debug(
                     f"Successfully fetched {PGVECTOR_PROJECT_CONNSTR_SECRET} secret"
                 )
                 return conn_str
@@ -423,17 +423,17 @@ class EliteACallback(BaseCallbackHandler):
     def on_chain_start(self, *args, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_chain_start(%s, %s)", args, kwargs)
+            log.debug("on_chain_start(%s, %s)", args, kwargs)
 
     def on_chain_end(self, *args, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_chain_end(%s, %s)", args, kwargs)
+            log.debug("on_chain_end(%s, %s)", args, kwargs)
 
     def on_chain_error(self, *args, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_chain_error(%s, %s)", args, kwargs)
+            log.debug("on_chain_error(%s, %s)", args, kwargs)
         #
         # exception = args[0]
         # FIXME: should we emit an error here too?
@@ -445,7 +445,7 @@ class EliteACallback(BaseCallbackHandler):
     def on_tool_start(self, *args, run_id: UUID, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_tool_start(%s, %s)", args, kwargs)
+            log.debug("on_tool_start(%s, %s)", args, kwargs)
         tool_name = args[0].get("name")
         tool_metadata_from_kwargs = kwargs.get("metadata", {})
         if (
@@ -587,7 +587,7 @@ class EliteACallback(BaseCallbackHandler):
     def on_tool_end(self, *args, run_id: UUID, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_tool_end(%s, %s)", args, kwargs)
+            log.debug("on_tool_end(%s, %s)", args, kwargs)
         tool_run_id = str(run_id)
         # Use JSON serialization for non-string types to preserve proper formatting
         raw_output = args[0]
@@ -675,7 +675,7 @@ class EliteACallback(BaseCallbackHandler):
     def on_tool_error(self, *args, run_id: UUID, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_tool_error(%s, %s)", args, kwargs)
+            log.debug("on_tool_error(%s, %s)", args, kwargs)
         tool_run_id = str(run_id)
         tool_exception = args[0]
         now = datetime.now(tz=timezone.utc).isoformat()
@@ -763,12 +763,12 @@ class EliteACallback(BaseCallbackHandler):
     def on_agent_action(self, *args, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_agent_action(%s, %s)", args, kwargs)
+            log.debug("on_agent_action(%s, %s)", args, kwargs)
 
     def on_agent_finish(self, *args, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_agent_finish(%s, %s)", args, kwargs)
+            log.debug("on_agent_finish(%s, %s)", args, kwargs)
 
     #
     # LLM
@@ -839,7 +839,7 @@ class EliteACallback(BaseCallbackHandler):
     ):
         """Callback"""
         if self.debug:
-            log.info("on_llm_new_token(%s, %s)", args, kwargs)
+            log.debug("on_llm_new_token(%s, %s)", args, kwargs)
 
         chunk: ChatGenerationChunk = kwargs.get("chunk")
         content = None
@@ -1029,7 +1029,7 @@ class EliteACallback(BaseCallbackHandler):
     def on_llm_error(self, *args, run_id: UUID, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_llm_error(%s, %s)", args, kwargs)
+            log.debug("on_llm_error(%s, %s)", args, kwargs)
 
         # Track tokens consumed before error occurred
         pending = self.pending_llm_requests.get(run_id, {})
@@ -1058,7 +1058,7 @@ class EliteACallback(BaseCallbackHandler):
     def on_text(self, *args, **kwargs):
         """Callback"""
         if self.debug:
-            log.info("on_text(%s, %s)", args, kwargs)
+            log.debug("on_text(%s, %s)", args, kwargs)
 
     def on_llm_end(self, response: LLMResult, run_id: UUID, **kwargs) -> None:
         if self.debug:
