@@ -578,7 +578,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 mcp_tokens=mcp_tokens
             )
 
-            log.info(f"Test result: {test_result}")
+            log.debug(f"Test result: {test_result}")
 
             # Clean the test_result to remove any non-serializable objects (including EliteAClient references)
             clean_test_result = clean_for_json_serialization(
@@ -692,7 +692,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 toolkit_config=toolkit_config,
                 chat_project_id=tasknode_task.meta.get('chat_project_id')
             )
-            log.debug(f"Pre-built MCP toolkit provided_settings [test_toolkit_tool_task]: {auth_metadata}")
+            log.debug(f"Pre-built MCP toolkit provided_settings [test_toolkit_tool_task]: keys={list(auth_metadata.keys()) if auth_metadata else []}")
 
             node_interface.emit(
                 type=EventTypes.mcp_authorization_required,
@@ -815,7 +815,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         project_auth_token = kwargs.get("project_auth_token")
         deployment_url = kwargs.get("deployment_url")
         mcp_tokens = kwargs.get("mcp_tokens")
-        log.info(f"Tokens: {mcp_tokens}")
 
         # Clean toolkit_config to ensure JSON serializability
         clean_toolkit_config = clean_for_json_serialization(
@@ -943,7 +942,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 toolkit_config=toolkit_config,
                 chat_project_id=tasknode_task.meta.get('chat_project_id')
             )
-            log.debug(f"Pre-built MCP toolkit provided_settings [test_mcp_connection]: {auth_metadata}")
+            log.debug(f"Pre-built MCP toolkit provided_settings [test_mcp_connection]: keys={list(auth_metadata.keys()) if auth_metadata else []}")
             node_interface.emit(
                 type=EventTypes.mcp_authorization_required,
                 content=str(e),
