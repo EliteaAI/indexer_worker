@@ -446,8 +446,7 @@ def get_mcp_server_settings(toolkit_name: str) -> Optional[Dict[str, Any]]:
 
         config = module.descriptor.config
         mcp_servers = config.get('mcp_servers', {})
-        log.info(f"Found servers:\n{mcp_servers}")
-        log.debug(f"Found pylon configuration with {len(mcp_servers)} mcp_servers sections")
+        log.info(f"Found {len(mcp_servers)} MCP server(s): {list(mcp_servers.keys())}")
 
         if not mcp_servers:
             log.debug("No mcp_servers configuration found in pylon.yml")

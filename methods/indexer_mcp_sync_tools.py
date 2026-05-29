@@ -133,7 +133,7 @@ class Method:
                         connection_headers['Authorization'] = f'Bearer {access_token}'
                         log.debug(f"Added OAuth token for MCP server: {server_key}")
                     if session_id:
-                        log.debug(f"Using session_id for MCP server: {session_id}")
+                        log.debug(f"Using session_id for MCP server: {server_key}")
                 else:
                     log.warning(f"No token found for server_key: {server_key} or url: {url}")
             
