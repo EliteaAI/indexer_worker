@@ -321,7 +321,8 @@ def create_node_interface(
     local_event_node,
     stream_id: Optional[str],
     message_id: Optional[str],
-    task_meta: Dict[str, Any]
+    task_meta: Dict[str, Any],
+    batch_config: Optional[Dict[str, Any]] = None,
 ) -> NodeEventInterface:
     """
     Create NodeEventInterface for emitting events.
@@ -331,17 +332,28 @@ def create_node_interface(
         stream_id: Stream identifier
         message_id: Message identifier
         task_meta: Task metadata containing sio_event and question_id
+        batch_config: Optional llm_chunk_batching config (enabled/max_chars/max_interval_ms).
+            Missing keys fall back to NodeEventInterface defaults.
 
     Returns:
         Configured NodeEventInterface
     """
+    batch_config = batch_config or {}
+    batch_kwargs = {}
+    if "enabled" in batch_config:
+        batch_kwargs["batch_enabled"] = batch_config["enabled"]
+    if "max_chars" in batch_config:
+        batch_kwargs["batch_max_chars"] = batch_config["max_chars"]
+    if "max_interval_ms" in batch_config:
+        batch_kwargs["batch_max_interval_ms"] = batch_config["max_interval_ms"]
     return NodeEventInterface(
         event_node=local_event_node,
         node_event_name=EVENTNODE_EVENT_NAME,
         stream_id=stream_id,
         message_id=message_id,
         sio_event=task_meta.get("sio_event"),
-        question_id=task_meta.get("question_id")
+        question_id=task_meta.get("question_id"),
+        **batch_kwargs,
     )
 
 

@@ -5,3 +5,11 @@ task_limit: null
 
 nltk_data: /tmp/nltk_data
 tasknode_tmp: /tmp/tasknode
+
+# Coalesce streamed agent_llm_chunk token-deltas into fewer, larger emits.
+# Reduces Redis/pickle/sio/UI work per streamed response. Set enabled: false
+# to revert to per-delta emits.
+llm_chunk_batching:
+  enabled: true
+  max_chars: 64
+  max_interval_ms: 80

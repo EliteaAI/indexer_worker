@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
 import json
+import logging
+import time
 try:
     from enum import StrEnum
 except ImportError:
@@ -139,6 +141,9 @@ class NodeEventInterface:
                  node_event_name: str,
                  stream_id: Optional[str] = None,
                  message_id: Optional[str] = None,
+                 batch_enabled: bool = True,
+                 batch_max_chars: int = 64,
+                 batch_max_interval_ms: int = 80,
                  **kwargs):
         self.event_node = event_node
         self.node_event_name = node_event_name
@@ -146,8 +151,32 @@ class NodeEventInterface:
         self.message_id = message_id
         self.payload_additional_kwargs = kwargs
         self.event_log = []
+        # agent_llm_chunk coalescing: buffer tiny token-deltas into fewer, larger
+        # emits. Keyed by run_id (tool_run_id); separate content/thinking channels.
+        self.batch_enabled = batch_enabled
+        self.batch_max_chars = batch_max_chars
+        self.batch_max_interval_ms = batch_max_interval_ms
+        self._chunk_buffers: dict = {}
 
     def emit(self, **kwargs) -> None:
+        if not self.batch_enabled:
+            self._emit_now(**kwargs)
+            return
+
+        ev_type = kwargs.get("type")
+        ev_type_val = ev_type.value if isinstance(ev_type, EventTypes) else ev_type
+        if ev_type_val == EventTypes.agent_llm_chunk.value:
+            # Buffer streamed token-deltas; flushed by size/time/channel-switch or
+            # by any non-chunk event (below) / final flush().
+            self._buffer_chunk(kwargs)
+            return
+
+        # Any non-chunk event flushes pending streamed text first so ordering is
+        # preserved (text stays ahead of tool calls, agent_llm_end, references, ...).
+        self._flush_all()
+        self._emit_now(**kwargs)
+
+    def _emit_now(self, **kwargs) -> None:
         # Clean all data to ensure JSON serializability
         clean_additional_kwargs = clean_for_json_serialization(
             self.payload_additional_kwargs,
@@ -164,8 +193,7 @@ class NodeEventInterface:
                 message_id=self.message_id,
                 **clean_additional_kwargs,
                 **clean_kwargs
-            ).model_dump_json()
-            e = json.loads(e)
+            ).model_dump(mode="json")
         except Exception as exc:
             # Final fallback: create a minimal event with error information
             log.error(f"Failed to serialize NodeEvent: {exc}")
@@ -176,9 +204,77 @@ class NodeEventInterface:
                 "content": f"Serialization failed: {str(exc)}",
                 "response_metadata": {"serialization_error": True}
             }
-        log.debug(f'NodeEventInterface emit {e=}')
+        if logging.getLogger(__name__).isEnabledFor(logging.DEBUG):
+            log.debug(f'NodeEventInterface emit {e=}')
         self.event_log.append(e)
         self.event_node.emit(self.node_event_name, e)
+
+    def _buffer_chunk(self, kwargs: dict) -> None:
+        rmeta = kwargs.get("response_metadata") or {}
+        run_id = str(rmeta.get("tool_run_id") or "")
+        content = kwargs.get("content") or ""
+        thinking = kwargs.get("thinking") or ""
+        buf = self._chunk_buffers.setdefault(
+            run_id,
+            {"content": {"text": "", "ts": None},
+             "thinking": {"text": "", "ts": None},
+             "meta": rmeta},
+        )
+        buf["meta"] = rmeta
+        now = time.monotonic()
+        if content:
+            # Switching channels: flush the other first to keep arrival order.
+            if buf["thinking"]["text"]:
+                self._flush_channel(run_id, "thinking")
+            self._append_channel(run_id, "content", content, now)
+        if thinking:
+            if buf["content"]["text"]:
+                self._flush_channel(run_id, "content")
+            self._append_channel(run_id, "thinking", thinking, now)
+
+    def _append_channel(self, run_id: str, channel: str, text: str, now: float) -> None:
+        ch = self._chunk_buffers[run_id][channel]
+        if not ch["text"]:
+            ch["ts"] = now
+        ch["text"] += text
+        if (len(ch["text"]) >= self.batch_max_chars
+                or (now - ch["ts"]) * 1000 >= self.batch_max_interval_ms):
+            self._flush_channel(run_id, channel)
+
+    def _flush_channel(self, run_id: str, channel: str) -> None:
+        buf = self._chunk_buffers.get(run_id)
+        if not buf:
+            return
+        ch = buf[channel]
+        text = ch["text"]
+        if not text:
+            return
+        ch["text"] = ""
+        ch["ts"] = None
+        if channel == "content":
+            self._emit_now(type=EventTypes.agent_llm_chunk,
+                           response_metadata=buf["meta"], content=text, thinking="")
+        else:
+            self._emit_now(type=EventTypes.agent_llm_chunk,
+                           response_metadata=buf["meta"], content="", thinking=text)
+
+    def _flush_run(self, run_id: str) -> None:
+        buf = self._chunk_buffers.get(run_id)
+        if not buf:
+            return
+        # Emit in arrival order when both channels hold a trailing partial.
+        channels = [c for c in ("content", "thinking") if buf[c]["text"]]
+        channels.sort(key=lambda c: buf[c]["ts"] or 0)
+        for c in channels:
+            self._flush_channel(run_id, c)
+
+    def _flush_all(self) -> None:
+        for run_id in list(self._chunk_buffers.keys()):
+            self._flush_run(run_id)
+
+    def flush(self) -> None:
+        """Flush any buffered streamed text. Call at stream teardown."""
+        self._flush_all()
 
 
 ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {

@@ -217,7 +217,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             local_event_node,
             stream_id,
             message_id,
-            tasknode_task.meta
+            tasknode_task.meta,
+            batch_config=self.descriptor.config.get("llm_chunk_batching", {}),
         )
 
         node_interface.emit(type=EventTypes.agent_start)
@@ -480,6 +481,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         finally:
+            # Flush any buffered streamed text before tearing down the event node.
+            node_interface.flush()
+
             # Flush Langfuse traces
             flush_langfuse_callback(langfuse_client, langfuse_callback)
 
