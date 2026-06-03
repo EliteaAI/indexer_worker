@@ -24,7 +24,7 @@ from langchain_core.messages import HumanMessage
 from pylon.core.tools import log
 from pylon.core.tools import web
 
-from ..utils.exceptions import InternalSDKError
+from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.node_interface import EventTypes
 
 # Import shared components
@@ -412,6 +412,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 node_interface, user_input, chat_history, f"AssertionError on user input: {user_input}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable="Assertion error occurred while processing your request",
+                execution_start_time=execution_start_time
+            )
+        except PipelineConfigurationError as e:
+            return execution_error(
+                node_interface, user_input, chat_history,
+                f"PipelineConfigurationError: {e}",
+                thread_id, message_id, tasknode_task.meta,
+                human_readable=str(e),
                 execution_start_time=execution_start_time
             )
         except ValueError:
