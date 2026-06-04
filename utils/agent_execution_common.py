@@ -727,7 +727,8 @@ def build_success_result(
     elitea_callback: EliteACallback,
     tokens_in: int,
     tokens_out: int,
-    context_info: Optional[Dict[str, Any]] = None
+    context_info: Optional[Dict[str, Any]] = None,
+    return_chat_history: bool = False,
 ) -> Dict[str, Any]:
     """
     Build successful execution result dict.
@@ -738,13 +739,15 @@ def build_success_result(
         tokens_in: Input token count
         tokens_out: Output token count
         context_info: Optional context info with message/token counts and summarization details
+        return_chat_history: Include chat_history in result (only needed for blocking API callers
+            that call join_task(); socket-based flows never read this field so it defaults to False
+            to avoid serializing potentially large base64 payloads into the task store).
 
     Returns:
         Result dict
     """
     sanitized_steps = json.loads(json.dumps(elitea_callback.thinking_steps, default=str))
     result = {
-        'chat_history': chat_history,
         'error': None,
         'thinking_steps': sanitized_steps,
         'tool_calls': [
@@ -755,6 +758,8 @@ def build_success_result(
         'chat_history_tokens_input': tokens_in,
         'llm_response_tokens_output': tokens_out,
     }
+    if return_chat_history:
+        result['chat_history'] = chat_history
     if context_info:
         result['context_info'] = context_info
     return result
