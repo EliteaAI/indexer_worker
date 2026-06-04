@@ -490,4 +490,5 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
 
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info)
+        return_chat_history = kwargs.get('return_chat_history', False)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history)
