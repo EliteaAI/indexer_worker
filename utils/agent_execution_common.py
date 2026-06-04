@@ -649,15 +649,6 @@ def emit_response_events(
 
         chat_history.append(output)
 
-        node_interface.emit(
-            type=EventTypes.agent_messages,
-            response_metadata={
-                'chat_history': chat_history,
-                'thread_id': thread_id_response,
-                'finish_reason': 'stop'
-            }
-        )
-
     return total_tokens_in, total_tokens_out, thread_id_response
 
 

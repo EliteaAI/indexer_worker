@@ -74,7 +74,6 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
 class EventTypes(StrEnum):
     agent_start = 'agent_start'
     agent_response = 'agent_response'
-    agent_messages = 'agent_messages'
     agent_exception = 'agent_exception'
     agent_tool_start = 'agent_tool_start'
     agent_tool_end = 'agent_tool_end'
