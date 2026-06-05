@@ -269,6 +269,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 exception_handling_enabled=exception_handling_enabled,
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
+                openai_compatible=client_args.get('openai_compatible', False),
             )
 
             # Create callbacks

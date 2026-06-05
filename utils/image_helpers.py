@@ -225,10 +225,11 @@ def resolve_generated_image_thumbnails(
 
 
 def is_anthropic_model(model_name: str) -> bool:
-    """Return True if model_name identifies an Anthropic model.
+    """Return True if model_name identifies an Anthropic model by name.
 
-    Matches the same heuristic used by ``EliteAClient.get_llm()`` so that
-    provider detection stays consistent across the platform.
+    Used for image/vision pre-processing only. Note: ``EliteAClient.get_llm()``
+    additionally respects the ``openai_compatible`` flag from the model config,
+    which this function does not have access to.
     """
     if not model_name:
         return False
