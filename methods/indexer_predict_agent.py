@@ -255,7 +255,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     "max_tokens": client_args.get("max_tokens"),
                     "reasoning_effort": client_args.get("reasoning_effort"),
                     "temperature": client_args.get("temperature"),
-                    "streaming": client_args.get("stream", True)
+                    "streaming": client_args.get("stream", True),
+                    "openai_compatible": client_args.get("openai_compatible", False),
                 }
             )
 
