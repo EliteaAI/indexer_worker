@@ -276,6 +276,47 @@ class NodeEventInterface:
         self._flush_all()
 
 
+class NoOpNodeEventInterface(NodeEventInterface):
+    """Event interface for non-interactive predicts (scheduled pipelines, webhook
+    triggers, blocking REST calls, indexer-internal predicts).
+
+    These flows have no Socket.IO subscriber, so live-UI events (token chunks,
+    tool start/end, thinking steps, graph edges, swarm start/handoff) are pure
+    overhead — serialized and pushed to a room nobody is in.
+
+    Only events that carry state or persistence semantics are still emitted.
+    Note that `full_message` and `partial_message` ride separate event_node
+    channels (`application_full_response` / `application_partial_response`) and
+    never pass through this interface, so message-group DB persistence and
+    incremental crash-safety are preserved regardless of this filter.
+    """
+
+    # Allowlist of state-bearing events. Everything else is dropped.
+    _ALLOWED_EVENT_TYPES = frozenset({
+        EventTypes.agent_index_data_status.value,    # drives index state machine
+        EventTypes.agent_index_data_removed.value,   # drives index state machine
+        EventTypes.mcp_authorization_required.value,  # pauses stream + DB row
+        EventTypes.agent_hitl_interrupt.value,        # resumability
+        EventTypes.agent_requires_confirmation.value,  # resumability
+        EventTypes.agent_exception.value,             # error reporting
+        EventTypes.agent_swarm_agent_response.value,  # triggers chat_child_message_save (DB)
+        EventTypes.summarization_started.value,       # mid-turn context state
+        EventTypes.summarization_finished.value,      # mid-turn context state
+        EventTypes.pipeline_finish.value,             # completion signal
+    })
+
+    def emit(self, **kwargs) -> None:
+        ev_type = kwargs.get("type")
+        ev_type_val = ev_type.value if isinstance(ev_type, EventTypes) else ev_type
+        if ev_type_val in self._ALLOWED_EVENT_TYPES:
+            # Allowed events are never agent_llm_chunk, so bypass batching entirely.
+            self._emit_now(**kwargs)
+
+    def flush(self) -> None:
+        # No chunk buffering happens in non-interactive mode; nothing to flush.
+        return
+
+
 ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     EventTypes.agent_on_tool_node.value: {
         'state', 'input_variables', 'tool_result',

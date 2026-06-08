@@ -39,7 +39,7 @@ from .image_helpers import (
     strip_image_chunks_from_assistant_messages,
     strip_stale_filepath_image_chunks,
 )
-from .node_interface import NodeEventInterface, EventTypes, NodeEvent, InitiatorType
+from .node_interface import NodeEventInterface, NoOpNodeEventInterface, EventTypes, NodeEvent, InitiatorType
 from .langfuse_callback import create_langfuse_callback, flush_langfuse_callback, langfuse_trace_context
 
 from ..methods.agent_common import (
@@ -336,7 +336,10 @@ def create_node_interface(
             Missing keys fall back to NodeEventInterface defaults.
 
     Returns:
-        Configured NodeEventInterface
+        Configured NodeEventInterface. For non-interactive flows
+        (``task_meta["non_interactive"]`` truthy) a NoOpNodeEventInterface is
+        returned, which suppresses live-UI events and keeps only state-bearing
+        ones. See NoOpNodeEventInterface for the allowlist.
     """
     batch_config = batch_config or {}
     batch_kwargs = {}
@@ -346,7 +349,13 @@ def create_node_interface(
         batch_kwargs["batch_max_chars"] = batch_config["max_chars"]
     if "max_interval_ms" in batch_config:
         batch_kwargs["batch_max_interval_ms"] = batch_config["max_interval_ms"]
-    return NodeEventInterface(
+
+    interface_cls = (
+        NoOpNodeEventInterface
+        if task_meta.get("non_interactive")
+        else NodeEventInterface
+    )
+    return interface_cls(
         event_node=local_event_node,
         node_event_name=EVENTNODE_EVENT_NAME,
         stream_id=stream_id,
