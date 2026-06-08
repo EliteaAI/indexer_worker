@@ -123,6 +123,66 @@ def _get_audit_callback(user_id=None, user_email=None, project_id=None):
         return None
 
 
+def _build_langfuse_callback_handler_class(callback_handler_cls):
+    """Create the Elitea Langfuse callback subclass without importing Langfuse at module load."""
+    class EliteaLangfuseCallbackHandler(callback_handler_cls):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._elitea_root_inputs = {}
+
+        def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
+            _cache_root_trace_input(
+                self._elitea_root_inputs,
+                run_id,
+                parent_run_id,
+                inputs,
+            )
+            try:
+                return super().on_chain_start(
+                    serialized,
+                    inputs,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    **kwargs,
+                )
+            except Exception as e:
+                log.warning(f"Langfuse on_chain_start failed: {e}")
+                return None
+
+        def on_chain_end(self, outputs, *, run_id, parent_run_id=None, **kwargs):
+            # Guard against Langfuse SDK changes to private _runs attribute.
+            runs = getattr(self, "_runs", {})
+            span = runs.get(run_id, None) if isinstance(runs, dict) else None
+            clean_inputs, clean_outputs = _normalize_root_trace_io(
+                parent_run_id,
+                kwargs.get("inputs"),
+                outputs,
+                run_id=run_id,
+                input_cache=self._elitea_root_inputs,
+            )
+            _set_root_trace_io_from_chain_end(
+                span,
+                parent_run_id,
+                clean_inputs,
+                clean_outputs,
+            )
+            if parent_run_id is None:
+                kwargs["inputs"] = clean_inputs
+                outputs = clean_outputs
+            try:
+                return super().on_chain_end(
+                    outputs,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    **kwargs,
+                )
+            except Exception as e:
+                log.warning(f"Langfuse on_chain_end failed: {e}")
+                return None
+
+    return EliteaLangfuseCallbackHandler
+
+
 def create_langfuse_callback(
     langfuse_config: Optional[Dict[str, Any]],
     trace_name: str = "agent-execution",
@@ -177,53 +237,6 @@ def create_langfuse_callback(
         from langfuse import Langfuse
         from langfuse.langchain import CallbackHandler
 
-        class EliteaLangfuseCallbackHandler(CallbackHandler):
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                self._elitea_root_inputs = {}
-
-            def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
-                _cache_root_trace_input(
-                    self._elitea_root_inputs,
-                    run_id,
-                    parent_run_id,
-                    inputs,
-                )
-                return super().on_chain_start(
-                    serialized,
-                    inputs,
-                    run_id=run_id,
-                    parent_run_id=parent_run_id,
-                    **kwargs,
-                )
-
-            def on_chain_end(self, outputs, *, run_id, parent_run_id=None, **kwargs):
-                # Guard against Langfuse SDK changes to private _runs attribute
-                runs = getattr(self, "_runs", {})
-                span = runs.get(run_id, None) if isinstance(runs, dict) else None
-                clean_inputs, clean_outputs = _normalize_root_trace_io(
-                    parent_run_id,
-                    kwargs.get("inputs"),
-                    outputs,
-                    run_id=run_id,
-                    input_cache=self._elitea_root_inputs,
-                )
-                _set_root_trace_io_from_chain_end(
-                    span,
-                    parent_run_id,
-                    clean_inputs,
-                    clean_outputs,
-                )
-                if parent_run_id is None:
-                    kwargs["inputs"] = clean_inputs
-                    outputs = clean_outputs
-                return super().on_chain_end(
-                    outputs,
-                    run_id=run_id,
-                    parent_run_id=parent_run_id,
-                    **kwargs,
-                )
-
         # Initialize Langfuse client first - this registers it globally
         # so the CallbackHandler can use it
         langfuse_client = Langfuse(
@@ -233,6 +246,7 @@ def create_langfuse_callback(
         )
 
         # Create callback handler - it will use the globally registered client
+        EliteaLangfuseCallbackHandler = _build_langfuse_callback_handler_class(CallbackHandler)
         handler = EliteaLangfuseCallbackHandler(
             public_key=public_key,
         )
