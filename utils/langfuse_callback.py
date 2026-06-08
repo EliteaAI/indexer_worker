@@ -17,9 +17,89 @@
 
 """Langfuse tracing callback helper for agent execution"""
 
+import sys
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
 from pylon.core.tools import log
+
+
+def _set_root_trace_io_from_chain_end(span, parent_run_id, inputs, outputs):
+    """Set trace-level I/O on the LangChain root observation before it ends."""
+    if span is None or parent_run_id is not None:
+        return
+
+    try:
+        clean_input, clean_output = _normalize_root_trace_io(parent_run_id, inputs, outputs)
+        span.set_trace_io(
+            input=clean_input,
+            output=clean_output,
+        )
+    except Exception as e:
+        log.warning(f"Failed to update Langfuse trace I/O: {e}")
+
+
+def _normalize_root_trace_io(parent_run_id, inputs, outputs, run_id=None, input_cache=None):
+    if parent_run_id is not None:
+        return inputs, outputs
+
+    if inputs is None and input_cache is not None and run_id is not None:
+        inputs = input_cache.pop(run_id, None)
+
+    return _extract_clean_trace_input(inputs), _extract_clean_trace_output(outputs)
+
+
+def _cache_root_trace_input(input_cache, run_id, parent_run_id, inputs):
+    if parent_run_id is not None:
+        return
+
+    input_cache[run_id] = _extract_clean_trace_input(inputs)
+
+
+def _extract_clean_trace_input(inputs):
+    if isinstance(inputs, dict) and "input" in inputs:
+        return _extract_content_text(inputs.get("input"))
+
+    return _extract_content_text(inputs)
+
+
+def _extract_clean_trace_output(outputs):
+    if isinstance(outputs, dict):
+        messages = outputs.get("messages")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                message_type = _get_message_value(message, "type")
+                if message_type in ("ai", "assistant") or _is_ai_message(message):
+                    return _extract_content_text(_get_message_value(message, "content"))
+
+        for key in ("output", "response", "content"):
+            if key in outputs:
+                return _extract_content_text(outputs.get(key))
+
+    return _extract_content_text(outputs)
+
+
+def _get_message_value(message, key):
+    if isinstance(message, dict):
+        return message.get(key)
+    return getattr(message, key, None)
+
+
+def _is_ai_message(message):
+    message_type = getattr(message, "type", None)
+    if message_type in ("ai", "assistant"):
+        return True
+    return message.__class__.__name__ in ("AIMessage", "AIMessageChunk")
+
+
+def _extract_content_text(value):
+    """
+    Extract text content from various response formats.
+
+    Delegates to normalize_response_content() for consistent behavior
+    between user-visible output and Langfuse traces.
+    """
+    from .agent_execution_common import normalize_response_content
+    return normalize_response_content(value)
 
 
 def _get_audit_callback(user_id=None, user_email=None, project_id=None):
@@ -97,6 +177,53 @@ def create_langfuse_callback(
         from langfuse import Langfuse
         from langfuse.langchain import CallbackHandler
 
+        class EliteaLangfuseCallbackHandler(CallbackHandler):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._elitea_root_inputs = {}
+
+            def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
+                _cache_root_trace_input(
+                    self._elitea_root_inputs,
+                    run_id,
+                    parent_run_id,
+                    inputs,
+                )
+                return super().on_chain_start(
+                    serialized,
+                    inputs,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    **kwargs,
+                )
+
+            def on_chain_end(self, outputs, *, run_id, parent_run_id=None, **kwargs):
+                # Guard against Langfuse SDK changes to private _runs attribute
+                runs = getattr(self, "_runs", {})
+                span = runs.get(run_id, None) if isinstance(runs, dict) else None
+                clean_inputs, clean_outputs = _normalize_root_trace_io(
+                    parent_run_id,
+                    kwargs.get("inputs"),
+                    outputs,
+                    run_id=run_id,
+                    input_cache=self._elitea_root_inputs,
+                )
+                _set_root_trace_io_from_chain_end(
+                    span,
+                    parent_run_id,
+                    clean_inputs,
+                    clean_outputs,
+                )
+                if parent_run_id is None:
+                    kwargs["inputs"] = clean_inputs
+                    outputs = clean_outputs
+                return super().on_chain_end(
+                    outputs,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                    **kwargs,
+                )
+
         # Initialize Langfuse client first - this registers it globally
         # so the CallbackHandler can use it
         langfuse_client = Langfuse(
@@ -106,7 +233,7 @@ def create_langfuse_callback(
         )
 
         # Create callback handler - it will use the globally registered client
-        handler = CallbackHandler(
+        handler = EliteaLangfuseCallbackHandler(
             public_key=public_key,
         )
 
@@ -129,41 +256,64 @@ def create_langfuse_callback(
 
 
 @contextmanager
-def langfuse_trace_context(trace_attrs: Optional[Dict[str, Any]]):
+def langfuse_trace_context(trace_attrs: Optional[Dict[str, Any]], langfuse_client=None):
     """
-    Context manager that wraps agent execution with Langfuse propagate_attributes.
+    Context manager that propagates Langfuse trace attributes to LangChain callbacks.
 
-    This sets trace-level attributes (user_id, session_id, metadata, trace_name)
-    on all spans created within the context.
+    The LangChain CallbackHandler creates the root observation for agent execution.
+    Creating an additional current observation here adds a duplicate wrapper span, so
+    this context only propagates trace-level attributes.
 
     Args:
         trace_attrs: Dict with session_id, user_id, metadata, trace_name
+        langfuse_client: The Langfuse client instance. Used only as a guard that Langfuse is enabled.
+
+    Yields:
+        None. Trace input/output can only be updated if an active observation exists.
     """
-    if trace_attrs is None:
-        yield
+    if trace_attrs is None or langfuse_client is None:
+        yield None
         return
 
-    use_propagate = False
+    # Import and setup outside the yield to avoid masking application exceptions
     try:
         from langfuse import propagate_attributes
-        use_propagate = True
     except ImportError:
-        pass
+        log.debug("Langfuse not available, skipping trace context")
+        yield None
+        return
 
-    if use_propagate:
+    try:
+        trace_name = trace_attrs.get("trace_name", "agent-execution")
+        ctx = propagate_attributes(
+            trace_name=trace_name,
+            session_id=trace_attrs.get("session_id"),
+            user_id=trace_attrs.get("user_id"),
+            metadata=trace_attrs.get("metadata"),
+        )
+    except Exception as e:
+        log.warning(f"Failed to create Langfuse trace context: {e}")
+        yield None
+        return
+
+    # Explicitly enter/exit context to guard against SDK failures
+    # while allowing exceptions from the body to propagate normally
+    try:
+        ctx.__enter__()
+    except Exception as e:
+        log.warning(f"Failed to enter Langfuse trace context: {e}")
+        yield None
+        return
+
+    try:
+        yield None
+    finally:
+        # Pass exception info to __exit__ so Langfuse can mark traces as failed
+        exc_info = sys.exc_info()
         try:
-            with propagate_attributes(
-                trace_name=trace_attrs.get("trace_name"),
-                session_id=trace_attrs.get("session_id"),
-                user_id=trace_attrs.get("user_id"),
-                metadata=trace_attrs.get("metadata"),
-            ):
-                yield
-        except Exception:
-            raise
-    else:
-        yield
-
+            ctx.__exit__(*exc_info)
+        except Exception as e:
+            log.warning(f"Failed to exit Langfuse trace context: {e}")
 
 def flush_langfuse_callback(langfuse_client, handler):
     """
