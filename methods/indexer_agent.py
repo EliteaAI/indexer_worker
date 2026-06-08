@@ -358,15 +358,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 )
 
             # Invoke the agent executor with Langfuse trace context
-            with langfuse_trace_context(langfuse_trace_attrs):
+            with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
-
-            # Extract context info (includes summarization details when summarization occurred)
-            context_info = response.get('context_info')
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='output')
             output = build_output_message(response_content)
+
+            # Extract context info (includes summarization details when summarization occurred)
+            context_info = response.get('context_info')
 
             # Resolve thumbnails for tool-generated images and merge with user-upload thumbnails
             resolve_generated_image_thumbnails(elitea_custom_callback, image_thumbnails, client)
