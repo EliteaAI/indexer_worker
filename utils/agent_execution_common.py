@@ -472,12 +472,15 @@ def create_langfuse_callback_with_metadata(
         "message_id": str(message_id or ""),
     }
 
+    langfuse_environment = task_meta.get("project_name")
+
     return create_langfuse_callback(
         langfuse_config,
         trace_name=application_name,
         session_id=thread_id,
         user_id=langfuse_user_id,
         metadata=langfuse_metadata,
+        environment=langfuse_environment,
     )
 
 
