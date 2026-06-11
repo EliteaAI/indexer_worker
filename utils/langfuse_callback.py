@@ -203,7 +203,7 @@ def create_langfuse_callback(
         session_id: Session/thread ID for grouping traces
         user_id: User ID for attribution
         metadata: Additional metadata dict (values should be strings)
-        environment: Langfuse environment for trace segregation (e.g., project name)
+        environment: Langfuse environment for trace segregation (e.g., project-{id})
 
     Returns:
         Tuple of (Langfuse client, CallbackHandler, trace_attrs) or (None, None, None)

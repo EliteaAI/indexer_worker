@@ -472,7 +472,8 @@ def create_langfuse_callback_with_metadata(
         "message_id": str(message_id or ""),
     }
 
-    langfuse_environment = task_meta.get("project_name")
+    project_id = task_meta.get("project_id")
+    langfuse_environment = f"project-{project_id}" if project_id else None
 
     return create_langfuse_callback(
         langfuse_config,
