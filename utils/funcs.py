@@ -224,7 +224,6 @@ def num_tokens_from_messages(messages: List[BaseMessage] | List[str], model="gpt
     try:
         encoding = tiktoken.encoding_for_model(model)
     except KeyError:
-        log.debug("Warning: model not found. Using o200k_base encoding.")
         encoding = tiktoken.get_encoding("o200k_base")
     #
     if not is_chunk:
