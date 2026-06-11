@@ -189,6 +189,7 @@ def create_langfuse_callback(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
     metadata: Optional[Dict[str, str]] = None,
+    environment: Optional[str] = None,
 ):
     """
     Create a Langfuse CallbackHandler for LangChain integration.
@@ -202,6 +203,7 @@ def create_langfuse_callback(
         session_id: Session/thread ID for grouping traces
         user_id: User ID for attribution
         metadata: Additional metadata dict (values should be strings)
+        environment: Langfuse environment for trace segregation (e.g., project-{id})
 
     Returns:
         Tuple of (Langfuse client, CallbackHandler, trace_attrs) or (None, None, None)
@@ -243,6 +245,7 @@ def create_langfuse_callback(
             public_key=public_key,
             secret_key=secret_key,
             base_url=base_url,
+            environment=environment,
         )
 
         # Create callback handler - it will use the globally registered client
