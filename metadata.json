@@ -10,5 +10,7 @@
   "order_weight": 9999,
   "version_requirements": {
     "pylon": ">= 1.2.19"
-  }
+  },
+  "git_source": "https://github.com/EliteaAI/indexer_worker.git",
+  "git_head": "91899b205e91f500da6eb878d9815a05abfebca0"
 }

@@ -820,7 +820,11 @@ def detect_parked_dispatch(response: Dict[str, Any]) -> Optional[Dict[str, Any]]
     }
 
 
-def build_parked_result(parked: Dict[str, Any]) -> Dict[str, Any]:
+def build_parked_result(
+    parked: Dict[str, Any],
+    stream_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Build the task-result payload for a parked parent.
 
     Carries the child dispatch specs (plus the parent's own reconcile re-invoke
@@ -829,12 +833,18 @@ def build_parked_result(parked: Dict[str, Any]) -> Dict[str, Any]:
     (``stopped``); pylon_main's stopped-handler launches one durable
     indexer_agent per child and, once all settle, re-invokes the parent with
     parallel_reconcile using the carried reconcile_payload.
+
+    ``stream_id``/``message_id`` are the parent's own — carried so pylon_main
+    re-invokes the reconcile on the SAME stream/message and the final answer
+    lands on the original user message.
     """
     return {
         'error': None,
         'parallel_parked': True,
         'parallel_dispatch': parked.get('parallel_dispatch') or [],
         'reconcile_payload': parked.get('reconcile_payload'),
+        'parent_stream_id': stream_id,
+        'parent_message_id': message_id,
         'thread_id': parked.get('thread_id'),
         'thinking_steps': [],
         'tool_calls': [],
