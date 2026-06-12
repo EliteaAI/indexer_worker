@@ -414,7 +414,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 )
                 # The finally block flushes Langfuse and stops the fork-pool
                 # event node on this return — no manual cleanup needed here.
-                return build_parked_result(_parked)
+                return build_parked_result(_parked, stream_id, message_id)
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='output')

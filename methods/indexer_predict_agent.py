@@ -403,7 +403,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     f'[PARALLEL] predict parent parked, dispatching '
                     f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'
                 )
-                return build_parked_result(_parked)
+                return build_parked_result(_parked, stream_id, message_id)
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='messages')
