@@ -55,6 +55,7 @@ from ..utils.agent_execution_common import (
     get_child_dispatcher,
     detect_parked_dispatch,
     build_parked_result,
+    build_child_launch_payloads,
     apply_parallel_reconcile,
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
@@ -387,6 +388,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # (no final answer yet). The finally block flushes/stops on return.
             _parked = detect_parked_dispatch(response)
             if _parked is not None:
+                # Enrich each spec with a self-contained child launch payload
+                # (inherits this parent's valid token/base_url; child model +
+                # tools come from the sub-agent's own version_details).
+                _parked['parallel_dispatch'] = build_child_launch_payloads(
+                    kwargs, _parked['parallel_dispatch']
+                )
                 log.info(
                     f'[PARALLEL] predict parent parked, dispatching '
                     f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'

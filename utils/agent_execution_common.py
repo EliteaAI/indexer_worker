@@ -842,6 +842,87 @@ def build_parked_result(parked: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_child_launch_payloads(
+    parent_kwargs: Dict[str, Any],
+    parked_dispatch: list,
+) -> list:
+    """Turn parked dispatch specs into self-contained child indexer_agent payloads.
+
+    A forked agent cannot call start_task and pylon_main cannot safely mint a
+    fresh predict token outside request scope, so the launch payload is built
+    HERE — the parent indexer task holds a valid token/base_url/headers in its
+    own ``llm.kwargs`` (same project + user as the child). Each child is a saved
+    Application: its identity (id/version_id) and already-fetched
+    ``version_details`` (carrying its own llm_settings + tools) ride in the SDK
+    spec, so the child re-resolves its model/tools without any extra round-trip.
+
+    Inherited from the parent: transport credentials (base_url, api_key,
+    api_extra_headers, project_id), conversation_id, mcp_tokens,
+    ignored_mcp_servers, persona, supports_vision, debug. Child-specific: model
+    (the sub-agent's own, falling back to the parent's), thread_id, user_input
+    (the tool-call ``task``), variables, and a fresh/empty chat_history.
+
+    pylon_main reads the returned specs from the parked task result and calls
+    start_task("indexer_agent", kwargs=spec["child_payload"], ...) verbatim.
+    """
+    parent_llm_kwargs = (parent_kwargs.get('llm') or {}).get('kwargs') or {}
+    enriched = []
+    for spec in parked_dispatch or []:
+        version_details = spec.get('version_details') or {}
+        llm_settings = version_details.get('llm_settings') or {}
+
+        # Child uses its OWN configured model; embedded sub-agents with null
+        # llm_settings inherit the parent's model. Token/base_url/headers are
+        # always the parent's (valid for the same project + user).
+        child_llm_kwargs = dict(parent_llm_kwargs)
+        child_llm_kwargs['model'] = llm_settings.get('model_name') or parent_llm_kwargs.get('model')
+        child_llm_kwargs['openai_compatible'] = llm_settings.get(
+            'openai_compatible', parent_llm_kwargs.get('openai_compatible', False)
+        )
+
+        # Variables: defaults overlaid with any non-task inputs from the call.
+        task_input = spec.get('input') if isinstance(spec.get('input'), dict) else {}
+        variables = dict(spec.get('variable_defaults') or {})
+        for key, value in task_input.items():
+            if key not in ('task', 'chat_history') and value is not None:
+                variables[key] = value
+        payload_variables = (
+            {k: {'name': k, 'value': v} for k, v in variables.items()} or None
+        )
+
+        child_payload = {
+            'llm': {'kwargs': child_llm_kwargs},
+            'chat_history': [],
+            'user_input': task_input.get('task') or '',
+            'thread_id': spec.get('child_thread_id'),
+            'conversation_id': parent_kwargs.get('conversation_id'),
+            'mcp_tokens': parent_kwargs.get('mcp_tokens') or {},
+            'ignored_mcp_servers': parent_kwargs.get('ignored_mcp_servers') or [],
+            'context_settings': {},
+            'supports_vision': parent_kwargs.get('supports_vision', True),
+            'debug': parent_kwargs.get('debug', False),
+            'persona': parent_kwargs.get('persona', 'generic'),
+            'should_continue': False,
+            'hitl_resume': False,
+            'is_regenerate': False,
+            'meta': version_details.get('meta', {}),
+            'application': {
+                'id': spec.get('application_id'),
+                'name': spec.get('name'),
+                'version_id': spec.get('application_version_id'),
+                'variables': payload_variables,
+                'version_details': version_details,
+            },
+        }
+
+        # Keep the spec light for the task result: version_details now lives
+        # inside child_payload, no need to carry it twice across the RPC.
+        new_spec = {k: v for k, v in spec.items() if k != 'version_details'}
+        new_spec['child_payload'] = child_payload
+        enriched.append(new_spec)
+    return enriched
+
+
 def apply_parallel_reconcile(invoke_input: Dict[str, Any], kwargs: Dict[str, Any]) -> Optional[Any]:
     """Thread the reconcile epoch from task kwargs into the SDK invoke input.
 
