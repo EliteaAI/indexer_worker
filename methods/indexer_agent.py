@@ -196,6 +196,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         hitl_resume = kwargs.get('hitl_resume', False)
         hitl_action = kwargs.get('hitl_action', 'approve')
         hitl_value = kwargs.get('hitl_value', '')
+        # Parallel sub-agent fan-out (#4993): per-child decisions for resuming
+        # multiple paused sub-agents in one turn (keyed by tool_call_id).
+        hitl_decisions = kwargs.get('hitl_decisions') or None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -347,6 +350,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 invoke_input['hitl_resume'] = True
                 invoke_input['hitl_action'] = hitl_action
                 invoke_input['hitl_value'] = hitl_value
+                # Parallel multi-interrupt resume (#4993): the SDK routes each
+                # decision to its paused sub-agent by tool_call_id.
+                if hitl_decisions:
+                    invoke_input['hitl_decisions'] = hitl_decisions
+                    log.info(f'[HITL] Resume with {len(hitl_decisions)} parallel decision(s)')
                 log.info(f'[HITL] Resume action: {invoke_input["hitl_action"]}')
             elif should_continue:
                 invoke_input, invoke_config = configure_checkpoint_resume(

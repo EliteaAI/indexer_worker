@@ -577,6 +577,13 @@ def emit_response_events(
 
     # Emit a dedicated event when execution paused at a HITL node.
     hitl_interrupt = response.get('hitl_interrupt')
+    # Parallel sub-agent fan-out (#4993): the SDK aggregates one entry per
+    # paused child into hitl_interrupts (plural). Forward the full list so the
+    # UI can render N stacked approval cards; fall back to the single interrupt
+    # for the ordinary one-pause case.
+    hitl_interrupts = response.get('hitl_interrupts')
+    if not hitl_interrupts and hitl_interrupt:
+        hitl_interrupts = [hitl_interrupt]
     if hitl_interrupt:
         node_interface.emit(
             type=EventTypes.agent_hitl_interrupt,
@@ -585,6 +592,7 @@ def emit_response_events(
                 'thread_id': thread_id_response,
                 'message': hitl_interrupt.get('message', 'Awaiting human review...'),
                 'hitl_interrupt': hitl_interrupt,
+                'hitl_interrupts': hitl_interrupts,
                 'node_name': hitl_interrupt.get('node_name'),
                 'available_actions': hitl_interrupt.get('available_actions', []),
                 'routes': hitl_interrupt.get('routes', {}),
