@@ -59,6 +59,7 @@ VOICE_EVENTS_CHANNEL = "voice_events"
 ASR_AUDIO_INPUT = "asr_audio_input"
 ASR_STOP = "asr_stop"
 TTS_CANCEL = "tts_cancel"
+TTS_NEXT = "tts_next"
 
 _lock = threading.Lock()
 # Keyed by (sid, event_type) to allow O(1) dispatch without nested dict overhead
