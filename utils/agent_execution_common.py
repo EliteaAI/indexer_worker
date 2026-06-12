@@ -362,8 +362,38 @@ def create_node_interface(
         message_id=message_id,
         sio_event=task_meta.get("sio_event"),
         question_id=task_meta.get("question_id"),
+        event_metadata_overlay=_child_event_metadata_overlay(task_meta),
         **batch_kwargs,
     )
+
+
+def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Attribution to stamp onto every event when this task is a fan-out child.
+
+    A parked-fan-out child (#4993 Track 2) is a standalone ``indexer_agent`` that
+    streams onto the PARENT's message, so — unlike the in-process gather path —
+    its events carry no ``parent_agent_name``/``checkpoint_ns`` and the UI cannot
+    attribute its live chips + HITL card to a sub-agent accordion. pylon_main puts
+    the child's identity in the task meta (``parallel_dispatch_launch_children``);
+    we surface it as a metadata overlay merged into every event's
+    ``response_metadata.metadata`` so the existing UI bucketing (which keys on
+    ``parent_agent_name`` / ``thread_id``) groups the child unchanged.
+
+    Returns None for an ordinary (non-child) task, leaving event metadata as-is.
+    """
+    if not isinstance(task_meta, dict):
+        return None
+    child_thread_id = task_meta.get("child_thread_id")
+    if not (child_thread_id and task_meta.get("parent_thread_id")):
+        return None
+    overlay = {
+        "parent_agent_name": task_meta.get("subagent_name") or "",
+        "child_thread_id": child_thread_id,
+        "thread_id": child_thread_id,
+    }
+    if task_meta.get("tool_call_id"):
+        overlay["tool_call_id"] = task_meta.get("tool_call_id")
+    return overlay
 
 
 # =============================================================================
@@ -575,6 +605,19 @@ def emit_response_events(
     """
     thread_id_response = response.get('thread_id', thread_id)
 
+    # Parked fan-out child (#4993 Track 2): this standalone indexer_agent streams
+    # onto the PARENT's message. Its live events (chunks, tool chips) flow so the
+    # UI animates the child's accordion, and its HITL pause MUST surface its card
+    # — but its TERMINAL/final-answer events are suppressed: the real answer is
+    # emitted by the reconciled parent (which reads each child's checkpoint), so
+    # a child emitting agent_response/full_message/pipeline_finish here would
+    # prematurely end the parent message and overwrite it with one child's output.
+    is_fanout_child = bool(
+        isinstance(task_meta, dict)
+        and task_meta.get('child_thread_id')
+        and task_meta.get('parent_thread_id')
+    )
+
     # Emit a dedicated event when execution paused at a HITL node.
     hitl_interrupt = response.get('hitl_interrupt')
     # Parallel sub-agent fan-out (#4993): the SDK aggregates one entry per
@@ -600,8 +643,10 @@ def emit_response_events(
             }
         )
 
-    # Emit pipeline_finish if execution completed
-    if response.get('execution_finished'):
+    # Emit pipeline_finish if execution completed. Suppressed for a fan-out child
+    # (it must not signal END on the parent's stream — only the reconciled parent
+    # does that once every child has settled).
+    if response.get('execution_finished') and not is_fanout_child:
         node_interface.emit(
             type=EventTypes.pipeline_finish,
             content=output['content'],
@@ -620,7 +665,10 @@ def emit_response_events(
     # Skip normal message events for HITL pauses. The frontend renders the
     # pause state from the dedicated interrupt event and should not receive a
     # duplicate assistant message or a synthetic chat history turn.
-    if not hitl_interrupt:
+    # Also skip for a fan-out child: its final answer must NOT land on the
+    # parent's message — the reconciled parent emits the real answer after
+    # reading each child's checkpoint (#4993 Track 2).
+    if not hitl_interrupt and not is_fanout_child:
         node_interface.emit(
             type=EventTypes.agent_response,
             content=output['content'],
