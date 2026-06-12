@@ -823,16 +823,18 @@ def detect_parked_dispatch(response: Dict[str, Any]) -> Optional[Dict[str, Any]]
 def build_parked_result(parked: Dict[str, Any]) -> Dict[str, Any]:
     """Build the task-result payload for a parked parent.
 
-    Carries the child dispatch specs out to pylon_main (read via
-    get_task_result) without the normal agent_response/full_message events. The
-    parent task then goes terminal (``stopped``); pylon_main's stopped-handler
-    launches one durable indexer_agent per child and, once all settle,
-    re-invokes the parent with parallel_reconcile.
+    Carries the child dispatch specs (plus the parent's own reconcile re-invoke
+    payload) out to pylon_main (read via get_task_result) without the normal
+    agent_response/full_message events. The parent task then goes terminal
+    (``stopped``); pylon_main's stopped-handler launches one durable
+    indexer_agent per child and, once all settle, re-invokes the parent with
+    parallel_reconcile using the carried reconcile_payload.
     """
     return {
         'error': None,
         'parallel_parked': True,
         'parallel_dispatch': parked.get('parallel_dispatch') or [],
+        'reconcile_payload': parked.get('reconcile_payload'),
         'thread_id': parked.get('thread_id'),
         'thinking_steps': [],
         'tool_calls': [],
@@ -921,6 +923,43 @@ def build_child_launch_payloads(
         new_spec['child_payload'] = child_payload
         enriched.append(new_spec)
     return enriched
+
+
+def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the self-contained payload to re-invoke a parked parent for reconcile.
+
+    Once every child task is terminal, pylon_main re-invokes the parked parent
+    as a FRESH ``indexer_agent`` task (not a checkpoint resume) so the SDK can
+    read each child's own checkpoint, append one ToolMessage per child, and
+    finish the tool loop. The re-invoke must land on the SAME thread_id with the
+    SAME agent identity and a valid token. The parent's own ``llm.kwargs`` token
+    is a long-lived user/system API token (no near-term expiry), so it survives
+    the human-think-time between park and reconcile — we carry the parent's
+    launch fields verbatim and only flip control flags.
+
+    Built HERE (not in pylon_main) for the same reason as the child payloads:
+    pylon_main cannot safely mint a predict token outside request scope, but the
+    parent indexer task already holds a valid one. pylon_main stashes this
+    payload (transiently, keyed by parent_thread_id+epoch) and replays it with
+    ``parallel_reconcile`` stamped in once the reconcile gate opens.
+
+    Only JSON-safe launch fields are carried; transient resume/HITL flags are
+    forced off so the re-invoke is a clean reconcile, not a continuation.
+    """
+    carry_keys = (
+        'llm', 'application', 'thread_id', 'conversation_id', 'user_input',
+        'chat_history', 'tools', 'internal_tools', 'mcp_tokens',
+        'ignored_mcp_servers', 'persona', 'supports_vision', 'debug',
+        'debug_mode', 'steps_limit', 'meta', 'context_settings',
+        'exception_handling_enabled', 'auto_approve_sensitive_actions',
+        'return_chat_history',
+    )
+    payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
+    # Force a clean reconcile invocation: not a HITL/continue/regenerate resume.
+    payload['should_continue'] = False
+    payload['hitl_resume'] = False
+    payload['is_regenerate'] = False
+    return payload
 
 
 def apply_parallel_reconcile(invoke_input: Dict[str, Any], kwargs: Dict[str, Any]) -> Optional[Any]:
