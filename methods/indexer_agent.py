@@ -56,6 +56,10 @@ from ..utils.agent_execution_common import (
     extract_response_content,
     build_output_message,
     create_summarization_callbacks,
+    get_child_dispatcher,
+    detect_parked_dispatch,
+    build_parked_result,
+    apply_parallel_reconcile,
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
@@ -199,6 +203,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Parallel sub-agent fan-out (#4993): per-child decisions for resuming
         # multiple paused sub-agents in one turn (keyed by tool_call_id).
         hitl_decisions = kwargs.get('hitl_decisions') or None
+        # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes the
+        # parked parent with this epoch once all children settle. It is a resume
+        # of the existing parent checkpoint — treat like should_continue so the
+        # checkpoint-reset logic does not wipe the parked state we must read back.
+        parallel_reconcile = kwargs.get('parallel_reconcile') or None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -237,7 +246,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Reset stale LangGraph checkpoint when pipeline state defaults have changed.
             # Skip during HITL/continue flows to avoid disrupting an in-progress run.
             current_state_hash = None
-            if not hitl_resume and not should_continue:
+            if not hitl_resume and not should_continue and not parallel_reconcile:
                 current_state_hash = compute_pipeline_state_hash(version_details)
                 if is_regenerate and current_state_hash is not None:
                     # On user-initiated regenerate: unconditionally clear the pipeline checkpoint
@@ -273,6 +282,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
                 openai_compatible=client_args.get('openai_compatible', False),
+                # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
+                # the operator enabled parallel_subagent_dispatch — switches the
+                # SDK from in-process gather to park-by-returning. None = Track 1.
+                child_dispatcher=get_child_dispatcher(self.descriptor.config),
             )
 
             # Create callbacks
@@ -365,9 +378,31 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     invoke_config
                 )
 
+            # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes
+            # the parked parent with this epoch once every child task is
+            # terminal. The SDK reads each child's own checkpoint, appends one
+            # ToolMessage per child, and resumes the agent node to synthesize the
+            # final answer. Independent of hitl_resume/should_continue.
+            apply_parallel_reconcile(invoke_input, kwargs)
+
             # Invoke the agent executor with Langfuse trace context
             with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
+
+            # Parallel sub-agent park (#4993 Track 2): the parent fanned out to
+            # 2+ sub-agents and returned parked (specs written, children NOT run
+            # in-process). Surface the dispatch specs in the task result so
+            # pylon_main's stopped-handler can launch one durable child per spec;
+            # skip the normal response events (no final answer exists yet).
+            _parked = detect_parked_dispatch(response)
+            if _parked is not None:
+                log.info(
+                    f'[PARALLEL] parent parked, dispatching '
+                    f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'
+                )
+                # The finally block flushes Langfuse and stops the fork-pool
+                # event node on this return — no manual cleanup needed here.
+                return build_parked_result(_parked)
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='output')

@@ -52,6 +52,10 @@ from ..utils.agent_execution_common import (
     extract_response_content,
     build_output_message,
     create_summarization_callbacks,
+    get_child_dispatcher,
+    detect_parked_dispatch,
+    build_parked_result,
+    apply_parallel_reconcile,
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
@@ -294,6 +298,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 step_limit=steps_limit,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
+                # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
+                # parallel_subagent_dispatch is enabled — an ad-hoc predict parent
+                # whose agent has Application tools also fans out and must park.
+                child_dispatcher=get_child_dispatcher(self.descriptor.config),
             )
 
             # Create callbacks
@@ -362,12 +370,28 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     invoke_config
                 )
 
+            # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes
+            # the parked parent with this epoch once every child task is terminal.
+            apply_parallel_reconcile(invoke_input, kwargs)
+
             # Invoke the agent executor with Langfuse trace context
             with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
 
             if elitea_callback.llm_error:
                 raise elitea_callback.llm_error
+
+            # Parallel sub-agent park (#4993 Track 2): the parent fanned out to
+            # 2+ sub-agents and returned parked. Surface the dispatch specs in the
+            # task result for pylon_main's stopped-handler; skip response events
+            # (no final answer yet). The finally block flushes/stops on return.
+            _parked = detect_parked_dispatch(response)
+            if _parked is not None:
+                log.info(
+                    f'[PARALLEL] predict parent parked, dispatching '
+                    f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'
+                )
+                return build_parked_result(_parked)
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='messages')

@@ -778,6 +778,86 @@ def build_success_result(
 
 
 # =============================================================================
+# Parallel sub-agent dispatch (Track 2, issue #4993)
+# =============================================================================
+
+# A forked agent process cannot safely call start_task (shared-Redis-socket
+# hazard), so the SDK's child_dispatcher is a pure presence-sentinel: the SDK
+# only checks `is not None` to choose park-by-returning (Track 2) over the
+# in-process asyncio.gather fan-out (Track 1). pylon_main owns the real child
+# launch. We hand the SDK a module-level marker — never called, only injected.
+_PARALLEL_DISPATCH_SENTINEL = object()
+
+
+def get_child_dispatcher(descriptor_config: Dict[str, Any]) -> Optional[Any]:
+    """Return a non-None sentinel to enable Track 2 park-mode, else None.
+
+    Gated on the indexer config flag ``parallel_subagent_dispatch`` so Track 1
+    (in-process gather) stays the default until an operator opts in. The SDK
+    only presence-checks the value, so the marker object's identity is
+    irrelevant — its non-None-ness is the whole switch.
+    """
+    if descriptor_config.get('parallel_subagent_dispatch', False):
+        return _PARALLEL_DISPATCH_SENTINEL
+    return None
+
+
+def detect_parked_dispatch(response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Detect the SDK park-by-returning sentinel in an agent response.
+
+    When the parent LLMNode fans out to 2+ Application sub-agents with a
+    child_dispatcher present, the SDK writes child specs to the parallel_tasks
+    channel and returns a parked shape instead of running them. Returns the
+    dispatch payload (specs + parent thread_id) for pylon_main to read via
+    get_task_result, or None for an ordinary run.
+    """
+    if not isinstance(response, dict) or not response.get('parallel_parked'):
+        return None
+    return {
+        'parallel_parked': True,
+        'parallel_dispatch': response.get('parallel_dispatch') or [],
+        'thread_id': response.get('thread_id'),
+    }
+
+
+def build_parked_result(parked: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the task-result payload for a parked parent.
+
+    Carries the child dispatch specs out to pylon_main (read via
+    get_task_result) without the normal agent_response/full_message events. The
+    parent task then goes terminal (``stopped``); pylon_main's stopped-handler
+    launches one durable indexer_agent per child and, once all settle,
+    re-invokes the parent with parallel_reconcile.
+    """
+    return {
+        'error': None,
+        'parallel_parked': True,
+        'parallel_dispatch': parked.get('parallel_dispatch') or [],
+        'thread_id': parked.get('thread_id'),
+        'thinking_steps': [],
+        'tool_calls': [],
+        'tool_calls_dict': {},
+        'chat_history_tokens_input': 0,
+        'llm_response_tokens_output': 0,
+    }
+
+
+def apply_parallel_reconcile(invoke_input: Dict[str, Any], kwargs: Dict[str, Any]) -> Optional[Any]:
+    """Thread the reconcile epoch from task kwargs into the SDK invoke input.
+
+    pylon_main re-invokes the parked parent with ``parallel_reconcile=<epoch>``
+    once every child task is terminal. The SDK runnable consumes
+    ``invoke_input['parallel_reconcile']`` to switch into reconcile-assembly
+    (read each child's own checkpoint, append one ToolMessage per child, resume
+    the agent node). Returns the epoch when present, else None.
+    """
+    epoch = kwargs.get('parallel_reconcile')
+    if epoch:
+        invoke_input['parallel_reconcile'] = epoch
+    return epoch
+
+
+# =============================================================================
 # Invoke Input Preparation
 # =============================================================================
 
