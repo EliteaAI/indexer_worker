@@ -789,6 +789,7 @@ def build_success_result(
     tokens_out: int,
     context_info: Optional[Dict[str, Any]] = None,
     return_chat_history: bool = False,
+    hitl_interrupt: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build successful execution result dict.
@@ -802,6 +803,12 @@ def build_success_result(
         return_chat_history: Include chat_history in result (only needed for blocking API callers
             that call join_task(); socket-based flows never read this field so it defaults to False
             to avoid serializing potentially large base64 payloads into the task store).
+        hitl_interrupt: Set when the run PAUSED at a HITL node (not a completed answer).
+            A parked fan-out child (#4993 Track 2) fires the arbiter ``stopped`` event on
+            a HITL pause just like a completion, so the reconcile gate
+            (parallel_dispatch_on_child_terminal) MUST be able to tell the two apart:
+            a paused child is NOT terminal and must not advance the gate. Surfacing the
+            interrupt in the task result is how the gate detects "still open".
 
     Returns:
         Result dict
@@ -822,6 +829,8 @@ def build_success_result(
         result['chat_history'] = chat_history
     if context_info:
         result['context_info'] = context_info
+    if hitl_interrupt:
+        result['hitl_interrupt'] = hitl_interrupt
     return result
 
 
@@ -1013,6 +1022,16 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'return_chat_history',
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
+    # context_settings is mutated in place at task entry to attach live
+    # summarization-callback closures (create_summarization_callbacks.<locals>.*),
+    # which are NOT picklable — and the parked result is pickled to the arbiter
+    # tasknode .bin. Drop the callbacks: the reconcile re-invoke rebuilds its own
+    # fresh from node_interface, exactly as the original invoke does, so this is a
+    # clean shallow copy, not a loss of configuration.
+    if isinstance(payload.get('context_settings'), dict):
+        payload['context_settings'] = {
+            k: v for k, v in payload['context_settings'].items() if k != 'callbacks'
+        }
     # Force a clean reconcile invocation: not a HITL/continue/regenerate resume.
     payload['should_continue'] = False
     payload['hitl_resume'] = False

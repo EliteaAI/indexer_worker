@@ -214,6 +214,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Parallel sub-agent fan-out (#4993): per-child decisions for resuming
         # multiple paused sub-agents in one turn (keyed by tool_call_id).
         hitl_decisions = kwargs.get('hitl_decisions') or None
+        # Set when THIS run paused at a HITL node; surfaced in the task result so a
+        # parked fan-out child's HITL pause is not mistaken for a completion by the
+        # reconcile gate (#4993).
+        paused_hitl_interrupt = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -436,6 +440,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_info=context_info,
             )
 
+            # Capture a HITL pause for the final task result so the reconcile gate
+            # keeps a paused child OPEN instead of marking it terminal (#4993).
+            paused_hitl_interrupt = response.get('hitl_interrupt')
+
         except InternalSDKError as e:
             return execution_error(
                 node_interface, user_input, chat_history,
@@ -544,4 +552,4 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)

@@ -210,6 +210,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # of the existing parent checkpoint — treat like should_continue so the
         # checkpoint-reset logic does not wipe the parked state we must read back.
         parallel_reconcile = kwargs.get('parallel_reconcile') or None
+        # Set when THIS run paused at a HITL node. Surfaced in the task result so a
+        # parked fan-out child's HITL pause is distinguishable from a completion —
+        # the reconcile gate must NOT treat a paused child as terminal (#4993).
+        paused_hitl_interrupt = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -271,6 +275,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             context_settings['callbacks'] = create_summarization_callbacks(node_interface)
 
             # Create application agent
+            _child_dispatcher = get_child_dispatcher(self.descriptor.config)
             agent_executor = client.application(
                 application_id=kwargs.get("application", {})["id"],
                 application_version_id=kwargs.get("application", {})["version_id"],
@@ -287,7 +292,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # the operator enabled parallel_subagent_dispatch — switches the
                 # SDK from in-process gather to park-by-returning. None = Track 1.
-                child_dispatcher=get_child_dispatcher(self.descriptor.config),
+                child_dispatcher=_child_dispatcher,
             )
 
             # Create callbacks
@@ -448,6 +453,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_info=context_info,
             )
 
+            # Capture a HITL pause so the final task result carries it: the
+            # reconcile gate keys off this to keep a paused child OPEN (#4993).
+            paused_hitl_interrupt = response.get('hitl_interrupt')
+
         except InternalSDKError as e:
             return execution_error(
                 node_interface, user_input, chat_history,
@@ -544,4 +553,4 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)
