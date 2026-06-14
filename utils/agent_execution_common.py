@@ -456,6 +456,11 @@ def create_callbacks(
         message_id=message_id,
         project_id=task_meta.get("project_id"),
         chat_project_id=task_meta.get("chat_project_id"),
+        # Durable fan-out child (#4993 Track 2): present only when this run is a
+        # parked sub-agent (set in parallel_dispatch_launch_children). Lets the
+        # callback tag the child's steps with its own name so they group under its
+        # sub-agent accordion in the parent's thinking view on history replay.
+        subagent_name=task_meta.get("subagent_name"),
     )
 
     elitea_custom_callback = EliteACustomCallback(

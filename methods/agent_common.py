@@ -377,6 +377,7 @@ class EliteACallback(BaseCallbackHandler):
         project_id: int = None,
         chat_project_id: int = None,
         toolkit_metadata: dict = None,
+        subagent_name: str = None,
     ):
         log.debug(f"EliteACallback init debug={debug}")
         self.node_interface = node_interface
@@ -384,6 +385,26 @@ class EliteACallback(BaseCallbackHandler):
         self.stream_id = node_interface.stream_id
         self.debug = debug
         self.thread_id: str = thread_id
+        # Durable parallel fan-out child (#4993 Track 2): this callback runs in a
+        # standalone indexer_agent process for a sub-agent that streams onto the
+        # PARENT's message. Unlike the in-process gather path, no parent callback
+        # is in scope to tag the child's steps, so its thinking_steps/tool_calls
+        # would persist into the parent meta with parent_agent_name=None and the
+        # UI (partitionIntoBlocks, keyed on parent_agent_name) would scatter them
+        # onto the coordinator. Stamp this name as the FALLBACK parent_agent_name
+        # so each child's steps group under its own sub-agent accordion in the
+        # thinking view — matching the sequential (in-process) render. None for an
+        # ordinary top-level run, leaving attribution untouched.
+        self.subagent_name: str = subagent_name
+        # The child's REAL kind ('pipeline' or the agent kind e.g. 'openai'), read
+        # from its own version_details. A pipeline child's internal LLM node emits
+        # self-named chips stamped with agent_type=<model provider> (e.g. 'openai')
+        # — wrong for the icon, which needs 'pipeline'. Stamped as a fallback onto
+        # the child's tool chips so the UI renders the pipeline (flow) icon, the
+        # same way subagent_name fixes parent_agent_name. None for ordinary runs.
+        # Set post-construction by indexer_agent (which has the child's
+        # version_details in scope); defaults None for an ordinary top-level run.
+        self.subagent_agent_type: str = None
         self.thinking_steps: list[dict] = []
         self.tokens_in = 0
         self.tokens_out = 0
@@ -415,6 +436,93 @@ class EliteACallback(BaseCallbackHandler):
                 f"EliteACallback cached_toolkit_name: {self.cached_toolkit_name}, cached_toolkit_type: {self.cached_toolkit_type}"
             )
         super().__init__()
+
+    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None):
+        """Emit the PARENT's bare sub-agent invocation chip for a durable child (#4993).
+
+        In the sequential (in-process) path the orchestrator runs the sub-agent
+        as a TOOL, so its on_tool_start/on_tool_end fire and produce a BARE chip:
+        tool name == the sub-agent name, ``parent_agent_name`` ABSENT (so it
+        renders without the "(Name Resolver)" parenthesis), grouped under the
+        sub-agent's own accordion via ``original_name``, and crucially carrying
+        BOTH the task (tool_inputs) and the sub-agent's final answer (tool_output)
+        — see group 568. For a pipeline child a second, parenthesized chip comes
+        from its embedded agent; for a simple-agent child this is the only one.
+
+        In the durable Track 2 park path the parent returns child specs WITHOUT
+        invoking the tool in-process, so this bare chip never exists — it is the
+        one missing from the parallel view. Reproduce it from the child's own
+        end-of-run state: its name, the task it was launched with, its full
+        AgentResponse, and its REAL agent_type for the icon. Persist via the same
+        partial_message path the child's real tool chips already use (full_message
+        is suppressed for a fan-out child), so it lands in the parent group's meta.
+
+        ``response`` is the raw AgentResponse dict the sub-agent returns (keys:
+        output, messages, name_meaning, …). The in-process path serializes this
+        WHOLE dict as the tool_output, so the UI shows the same structured JSON;
+        we must do the same here, not just the plain ``output`` string (#4993).
+
+        No-op for an ordinary top-level run (``subagent_name`` is None).
+        """
+        if not self.subagent_name:
+            return
+        if isinstance(response, str):
+            output_text = response
+        else:
+            try:
+                output_text = json.dumps(response, ensure_ascii=False, default=lambda o: str(o))
+            except (TypeError, ValueError):
+                output_text = str(response)
+        now = datetime.now(tz=timezone.utc).isoformat()
+        run_id = str(uuid4())
+        _agent_type = agent_type or self.subagent_agent_type or "agent"
+        # original_name groups the chip under the sub-agent's accordion;
+        # parent_agent_name is intentionally ABSENT so it renders bare (no
+        # parenthetical), matching the sequential parent-invocation chip.
+        metadata = {
+            "display_name": self.subagent_name,
+            "toolkit_name": self.subagent_name,
+            "toolkit_type": "application",
+            "agent_type": _agent_type,
+            "original_name": self.subagent_name,
+        }
+        tool_meta = {"name": self.subagent_name, "metadata": dict(metadata)}
+        self.tool_calls[run_id] = ToolCallPayload(
+            tool_name=self.subagent_name,
+            tool_run_id=run_id,
+            run_id=run_id,
+            tool_meta=tool_meta,
+            tool_inputs={"task": task_text} if task_text else {},
+            metadata=metadata,
+            agent_type=_agent_type,
+            content=output_text,
+            tool_output=output_text,
+            finish_reason="stop",
+            timestamp_start=now,
+            timestamp_finish=now,
+        )
+        msg_event_node = NodeEvent(
+            type=EventTypes.partial_message,
+            stream_id=self.node_interface.stream_id,
+            message_id=self.message_id,
+            response_metadata={
+                "project_id": self.project_id,
+                "chat_project_id": self.chat_project_id,
+                "thread_id": self.thread_id,
+                "thinking_steps": self.thinking_steps,
+                "tool_calls": {
+                    rid: tc.model_dump() for rid, tc in self.tool_calls.items()
+                },
+                "llm_start_timestamp": self.llm_start_timestamp,
+                "additional_response_meta": {},
+            },
+            content=None,
+            **self.node_interface.payload_additional_kwargs,
+        ).model_dump_json()
+        msg_event_node = json.loads(msg_event_node)
+        self.node_interface.event_node.emit(
+            EVENTNODE_PARTIAL_RESPONSE_NAME, msg_event_node
+        )
 
     #
     # Chain
@@ -518,6 +626,28 @@ class EliteACallback(BaseCallbackHandler):
                 if "metadata" not in tool_meta:
                     tool_meta["metadata"] = {}
                 tool_meta["metadata"]["parent_agent_name"] = context_original_name
+
+        # Durable fan-out child fallback (#4993 Track 2): if no nested-agent name
+        # was resolved above, attribute this tool to the child sub-agent this
+        # whole run represents, so its chip groups under the child's accordion in
+        # the parent's thinking view. Only fills when unset — a genuine deeper
+        # nested agent_name (set above) is never overwritten.
+        #
+        # Write BOTH dicts: the UI's deriveSubAgentName reads parent_agent_name
+        # from the TOP-LEVEL `metadata` (tool_metadata -> persisted tool_call
+        # `metadata`, also carried on the live event's response_metadata.metadata);
+        # the nested tool_meta["metadata"] is merged in only on the live socket
+        # path. A simple sub-agent (single `agent:` node) has no original_name /
+        # checkpoint_ns to fall back on, so without the top-level stamp its tool
+        # chip leaks to the coordinator block both live and on reload.
+        if self.subagent_name and not (
+            tool_metadata.get("parent_agent_name")
+            or tool_meta.get("metadata", {}).get("parent_agent_name")
+        ):
+            if "metadata" not in tool_meta:
+                tool_meta["metadata"] = {}
+            tool_meta["metadata"]["parent_agent_name"] = self.subagent_name
+            tool_metadata["parent_agent_name"] = self.subagent_name
 
         # Extract icon_meta from tool_metadata (kwargs['metadata']) and add directly to tool_meta
         # This is where LangGraph passes execution context metadata including icon_meta
@@ -1206,6 +1336,12 @@ class EliteACallback(BaseCallbackHandler):
                 # Propagate parent_agent_name so history replay can show the nested agent context
                 if parent_agent_name:
                     generation_chunk["parent_agent_name"] = parent_agent_name
+                # Durable fan-out child fallback (#4993 Track 2): attribute this
+                # reasoning step to the child sub-agent this run represents when no
+                # deeper nested name applies, so it groups under the child's
+                # accordion in the parent's thinking view. Only fills when unset.
+                elif self.subagent_name:
+                    generation_chunk["parent_agent_name"] = self.subagent_name
                 self.thinking_steps.append(generation_chunk)
 
         self.node_interface.emit(

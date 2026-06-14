@@ -305,6 +305,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 debug=kwargs.get("debug", False)
             )
 
+            # Durable fan-out child (#4993 Track 2): give the callback this child's
+            # REAL kind (pipeline vs agent) from its own version_details so a
+            # pipeline child's self-named chips render the pipeline (flow) icon
+            # instead of the model-provider-derived application icon. Only set for
+            # a parked sub-agent; harmless (None) for an ordinary run.
+            if tasknode_task.meta.get("subagent_name"):
+                elitea_callback.subagent_agent_type = version_details.get("agent_type")
+
             # Create Langfuse callback
             application_name = kwargs.get("application", {}).get("name", "agent")
             langfuse_client, langfuse_callback, langfuse_trace_attrs = create_langfuse_callback_with_metadata(
@@ -424,6 +432,26 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='output')
             output = build_output_message(response_content)
+
+            # Durable fan-out child (#4993 Track 2): emit the PARENT's bare
+            # sub-agent invocation chip — the one the parked orchestrator never
+            # produced because it returned specs instead of running the sub-agent
+            # tool in-process. In the sequential path this chip is born from the
+            # parent's on_tool_end and carries the task AND the sub-agent's final
+            # answer (group 568). Reproduce it here from THIS child's end-of-run
+            # state, now that `output` (the final answer) exists. Only on genuine
+            # completion: skip while paused at HITL (no final answer yet) — the
+            # reconcile re-run will emit it once the child truly finishes.
+            if (
+                tasknode_task.meta.get("subagent_name")
+                and not response.get("hitl_interrupt")
+            ):
+                _task_text = user_input if isinstance(user_input, str) else None
+                elitea_callback.emit_subagent_invocation_chip(
+                    task_text=_task_text,
+                    response=response,
+                    agent_type=version_details.get("agent_type"),
+                )
 
             # Extract context info (includes summarization details when summarization occurred)
             context_info = response.get('context_info')
