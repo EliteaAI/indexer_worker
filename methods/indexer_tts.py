@@ -297,10 +297,13 @@ def _run_tts_stream(
         else:
             # Sentence waypoint — frontend records exact audio→text anchor, then
             # ACKs with tts_next (carrying latest voice/speed) before we proceed.
-            local_event_node.emit(_EN_TTS_DONE, {"sid": sid, "char_end": char_end})
+            # Clear BEFORE emitting to prevent race: if ACK arrives between emit
+            # and clear, we would wipe the signal and wait until timeout.
             if next_event is not None:
                 next_event.clear()
-                next_event.wait(timeout=30)
+            local_event_node.emit(_EN_TTS_DONE, {"sid": sid, "char_end": char_end})
+            if next_event is not None:
+                next_event.wait(timeout=10)
                 if cancel_event.is_set():
                     return
                 # Apply any settings update carried in the ACK
