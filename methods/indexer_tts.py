@@ -24,7 +24,7 @@ from pylon.core.tools import log, web
 from tools import worker_core
 
 from ..utils.voice_router import register as voice_register, unregister as voice_unregister
-from ..utils.voice_router import TTS_CANCEL
+from ..utils.voice_router import TTS_CANCEL, TTS_NEXT
 
 # Internal event-node channel names (indexer → pylon_main)
 _EN_TTS_AUDIO_CHUNK = "voice_tts_audio_chunk"
@@ -108,18 +108,33 @@ class Method:
         local_event_node = worker_core.event_node
 
         cancel_event = threading.Event()
+        next_event = threading.Event()
+        next_config = {}
 
         def _on_cancel(payload):
             cancel_event.set()
+            next_event.set()  # unblock any waiting next_event so the loop exits cleanly
+
+        def _on_next(payload):
+            new_voice = payload.get("voice")
+            new_speed = payload.get("speed")
+            if new_voice is not None:
+                next_config["voice"] = new_voice
+            if new_speed is not None:
+                next_config["speed"] = float(new_speed)
+            next_event.set()
 
         voice_register(local_event_node, sid, TTS_CANCEL, _on_cancel)
+        voice_register(local_event_node, sid, TTS_NEXT, _on_next)
         try:
             _run_tts_stream(
                 local_event_node, sid, project_id, project_llm_key,
                 model_name, text, voice, speed, cancel_event, voice_instructions,
+                next_event=next_event,
+                next_config=next_config,
             )
         finally:
-            voice_unregister(sid, TTS_CANCEL)
+            voice_unregister(sid, TTS_CANCEL, TTS_NEXT)
 
 
 _LITELLM_TTS_URL = "http://127.0.0.1:8081/v1/audio/speech"
@@ -250,6 +265,8 @@ def _run_tts_stream(
     speed: float,
     cancel_event: threading.Event,
     voice_instructions: str = "",
+    next_event: threading.Event = None,
+    next_config: dict = None,
 ) -> None:
     url, headers = _build_request_params(project_id, project_llm_key)
     # LiteLLM expects models in "{project_id}_{model_name}" format for project-scoped routing
@@ -277,5 +294,18 @@ def _run_tts_stream(
             # Final done — no char_end; frontend uses this to set totalDuration
             local_event_node.emit(_EN_TTS_DONE, {"sid": sid})
         else:
-            # Sentence waypoint — frontend records exact audio→text anchor
+            # Sentence waypoint — frontend records exact audio→text anchor, then
+            # ACKs with tts_next (carrying latest voice/speed) before we proceed.
+            # Clear BEFORE emitting to prevent race: if ACK arrives between emit
+            # and clear, we would wipe the signal and wait until timeout.
+            if next_event is not None:
+                next_event.clear()
             local_event_node.emit(_EN_TTS_DONE, {"sid": sid, "char_end": char_end})
+            if next_event is not None:
+                next_event.wait(timeout=10)
+                if cancel_event.is_set():
+                    return
+                # Apply any settings update carried in the ACK
+                if next_config:
+                    voice = next_config.pop("voice", voice)
+                    speed = next_config.pop("speed", speed)
