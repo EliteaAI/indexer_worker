@@ -632,6 +632,13 @@ def emit_response_events(
     hitl_interrupts = response.get('hitl_interrupts')
     if not hitl_interrupts and hitl_interrupt:
         hitl_interrupts = [hitl_interrupt]
+    # Bidirectional fallback: a parallel fan-out aggregate may arrive as the
+    # plural list only. Derive the singular from the first entry so BOTH the
+    # interrupt-emission guard below and the skip-normal-message guard further
+    # down (which key off the singular) fire correctly on a plural-only pause —
+    # otherwise a paused child would leak a premature assistant message (#4993).
+    if not hitl_interrupt and hitl_interrupts:
+        hitl_interrupt = hitl_interrupts[0]
     if hitl_interrupt:
         node_interface.emit(
             type=EventTypes.agent_hitl_interrupt,

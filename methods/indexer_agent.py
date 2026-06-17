@@ -574,6 +574,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         finally:
+            # Flush any buffered streamed text before tearing down the event node.
+            # NodeEventInterface coalesces agent_llm_chunk token-deltas into a
+            # buffer that only empties on flush(); stopping the node without this
+            # drops the last partial tokens — especially on the early parked-parent
+            # return path (#4993). Mirrors indexer_predict_agent's teardown.
+            node_interface.flush()
+
             # Flush Langfuse traces
             flush_langfuse_callback(langfuse_client, langfuse_callback)
 
