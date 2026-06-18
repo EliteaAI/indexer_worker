@@ -56,6 +56,12 @@ from ..utils.agent_execution_common import (
     extract_response_content,
     build_output_message,
     create_summarization_callbacks,
+    get_child_dispatcher,
+    detect_parked_dispatch,
+    build_parked_result,
+    build_child_launch_payloads,
+    build_parent_reconcile_payload,
+    apply_parallel_reconcile,
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
@@ -196,6 +202,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         hitl_resume = kwargs.get('hitl_resume', False)
         hitl_action = kwargs.get('hitl_action', 'approve')
         hitl_value = kwargs.get('hitl_value', '')
+        # Parallel sub-agent fan-out (#4993): per-child decisions for resuming
+        # multiple paused sub-agents in one turn (keyed by tool_call_id).
+        hitl_decisions = kwargs.get('hitl_decisions') or None
+        # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes the
+        # parked parent with this epoch once all children settle. It is a resume
+        # of the existing parent checkpoint — treat like should_continue so the
+        # checkpoint-reset logic does not wipe the parked state we must read back.
+        parallel_reconcile = kwargs.get('parallel_reconcile') or None
+        # Set when THIS run paused at a HITL node. Surfaced in the task result so a
+        # parked fan-out child's HITL pause is distinguishable from a completion —
+        # the reconcile gate must NOT treat a paused child as terminal (#4993).
+        paused_hitl_interrupt = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -234,7 +252,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Reset stale LangGraph checkpoint when pipeline state defaults have changed.
             # Skip during HITL/continue flows to avoid disrupting an in-progress run.
             current_state_hash = None
-            if not hitl_resume and not should_continue:
+            if not hitl_resume and not should_continue and not parallel_reconcile:
                 current_state_hash = compute_pipeline_state_hash(version_details)
                 if is_regenerate and current_state_hash is not None:
                     # On user-initiated regenerate: unconditionally clear the pipeline checkpoint
@@ -257,6 +275,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             context_settings['callbacks'] = create_summarization_callbacks(node_interface)
 
             # Create application agent
+            _child_dispatcher = get_child_dispatcher(self.descriptor.config)
             agent_executor = client.application(
                 application_id=kwargs.get("application", {})["id"],
                 application_version_id=kwargs.get("application", {})["version_id"],
@@ -270,6 +289,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
                 openai_compatible=client_args.get('openai_compatible', False),
+                # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
+                # the operator enabled parallel_subagent_dispatch — switches the
+                # SDK from in-process gather to park-by-returning. None = Track 1.
+                child_dispatcher=_child_dispatcher,
             )
 
             # Create callbacks
@@ -281,6 +304,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 tasknode_task.id,
                 debug=kwargs.get("debug", False)
             )
+
+            # Durable fan-out child (#4993 Track 2): give the callback this child's
+            # REAL kind (pipeline vs agent) from its own version_details so a
+            # pipeline child's self-named chips render the pipeline (flow) icon
+            # instead of the model-provider-derived application icon. Only set for
+            # a parked sub-agent; harmless (None) for an ordinary run.
+            if tasknode_task.meta.get("subagent_name"):
+                elitea_callback.subagent_agent_type = version_details.get("agent_type")
 
             # Create Langfuse callback
             application_name = kwargs.get("application", {}).get("name", "agent")
@@ -347,6 +378,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 invoke_input['hitl_resume'] = True
                 invoke_input['hitl_action'] = hitl_action
                 invoke_input['hitl_value'] = hitl_value
+                # Parallel multi-interrupt resume (#4993): the SDK routes each
+                # decision to its paused sub-agent by tool_call_id.
+                if hitl_decisions:
+                    invoke_input['hitl_decisions'] = hitl_decisions
+                    log.info(f'[HITL] Resume with {len(hitl_decisions)} parallel decision(s)')
                 log.info(f'[HITL] Resume action: {invoke_input["hitl_action"]}')
             elif should_continue:
                 invoke_input, invoke_config = configure_checkpoint_resume(
@@ -357,13 +393,65 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     invoke_config
                 )
 
+            # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes
+            # the parked parent with this epoch once every child task is
+            # terminal. The SDK reads each child's own checkpoint, appends one
+            # ToolMessage per child, and resumes the agent node to synthesize the
+            # final answer. Independent of hitl_resume/should_continue.
+            apply_parallel_reconcile(invoke_input, kwargs)
+
             # Invoke the agent executor with Langfuse trace context
             with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
 
+            # Parallel sub-agent park (#4993 Track 2): the parent fanned out to
+            # 2+ sub-agents and returned parked (specs written, children NOT run
+            # in-process). Surface the dispatch specs in the task result so
+            # pylon_main's stopped-handler can launch one durable child per spec;
+            # skip the normal response events (no final answer exists yet).
+            _parked = detect_parked_dispatch(response)
+            if _parked is not None:
+                # Enrich each spec with a self-contained child launch payload
+                # (inherits this parent's valid token/base_url; child model +
+                # tools come from the sub-agent's own version_details). Also
+                # carry the parent's own reconcile re-invoke payload so pylon_main
+                # can replay this same parent (same token, same thread) once the
+                # children settle.
+                _parked['parallel_dispatch'] = build_child_launch_payloads(
+                    kwargs, _parked['parallel_dispatch']
+                )
+                _parked['reconcile_payload'] = build_parent_reconcile_payload(kwargs)
+                log.info(
+                    f'[PARALLEL] parent parked, dispatching '
+                    f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'
+                )
+                # The finally block flushes Langfuse and stops the fork-pool
+                # event node on this return — no manual cleanup needed here.
+                return build_parked_result(_parked, stream_id, message_id)
+
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='output')
             output = build_output_message(response_content)
+
+            # Durable fan-out child (#4993 Track 2): emit the PARENT's bare
+            # sub-agent invocation chip — the one the parked orchestrator never
+            # produced because it returned specs instead of running the sub-agent
+            # tool in-process. In the sequential path this chip is born from the
+            # parent's on_tool_end and carries the task AND the sub-agent's final
+            # answer (group 568). Reproduce it here from THIS child's end-of-run
+            # state, now that `output` (the final answer) exists. Only on genuine
+            # completion: skip while paused at HITL (no final answer yet) — the
+            # reconcile re-run will emit it once the child truly finishes.
+            if (
+                tasknode_task.meta.get("subagent_name")
+                and not response.get("hitl_interrupt")
+            ):
+                _task_text = user_input if isinstance(user_input, str) else None
+                elitea_callback.emit_subagent_invocation_chip(
+                    task_text=_task_text,
+                    response=response,
+                    agent_type=version_details.get("agent_type"),
+                )
 
             # Extract context info (includes summarization details when summarization occurred)
             context_info = response.get('context_info')
@@ -392,6 +480,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 image_thumbnails=image_thumbnails,
                 context_info=context_info,
             )
+
+            # Capture a HITL pause so the final task result carries it: the
+            # reconcile gate keys off this to keep a paused child OPEN (#4993).
+            paused_hitl_interrupt = response.get('hitl_interrupt')
 
         except InternalSDKError as e:
             return execution_error(
@@ -482,6 +574,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         finally:
+            # Flush any buffered streamed text before tearing down the event node.
+            # NodeEventInterface coalesces agent_llm_chunk token-deltas into a
+            # buffer that only empties on flush(); stopping the node without this
+            # drops the last partial tokens — especially on the early parked-parent
+            # return path (#4993). Mirrors indexer_predict_agent's teardown.
+            node_interface.flush()
+
             # Flush Langfuse traces
             flush_langfuse_callback(langfuse_client, langfuse_callback)
 
@@ -489,4 +588,4 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)

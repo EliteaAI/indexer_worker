@@ -362,8 +362,38 @@ def create_node_interface(
         message_id=message_id,
         sio_event=task_meta.get("sio_event"),
         question_id=task_meta.get("question_id"),
+        event_metadata_overlay=_child_event_metadata_overlay(task_meta),
         **batch_kwargs,
     )
+
+
+def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Attribution to stamp onto every event when this task is a fan-out child.
+
+    A parked-fan-out child (#4993 Track 2) is a standalone ``indexer_agent`` that
+    streams onto the PARENT's message, so — unlike the in-process gather path —
+    its events carry no ``parent_agent_name``/``checkpoint_ns`` and the UI cannot
+    attribute its live chips + HITL card to a sub-agent accordion. pylon_main puts
+    the child's identity in the task meta (``parallel_dispatch_launch_children``);
+    we surface it as a metadata overlay merged into every event's
+    ``response_metadata.metadata`` so the existing UI bucketing (which keys on
+    ``parent_agent_name`` / ``thread_id``) groups the child unchanged.
+
+    Returns None for an ordinary (non-child) task, leaving event metadata as-is.
+    """
+    if not isinstance(task_meta, dict):
+        return None
+    child_thread_id = task_meta.get("child_thread_id")
+    if not (child_thread_id and task_meta.get("parent_thread_id")):
+        return None
+    overlay = {
+        "parent_agent_name": task_meta.get("subagent_name") or "",
+        "child_thread_id": child_thread_id,
+        "thread_id": child_thread_id,
+    }
+    if task_meta.get("tool_call_id"):
+        overlay["tool_call_id"] = task_meta.get("tool_call_id")
+    return overlay
 
 
 # =============================================================================
@@ -426,6 +456,11 @@ def create_callbacks(
         message_id=message_id,
         project_id=task_meta.get("project_id"),
         chat_project_id=task_meta.get("chat_project_id"),
+        # Durable fan-out child (#4993 Track 2): present only when this run is a
+        # parked sub-agent (set in parallel_dispatch_launch_children). Lets the
+        # callback tag the child's steps with its own name so they group under its
+        # sub-agent accordion in the parent's thinking view on history replay.
+        subagent_name=task_meta.get("subagent_name"),
     )
 
     elitea_custom_callback = EliteACustomCallback(
@@ -575,8 +610,35 @@ def emit_response_events(
     """
     thread_id_response = response.get('thread_id', thread_id)
 
+    # Parked fan-out child (#4993 Track 2): this standalone indexer_agent streams
+    # onto the PARENT's message. Its live events (chunks, tool chips) flow so the
+    # UI animates the child's accordion, and its HITL pause MUST surface its card
+    # — but its TERMINAL/final-answer events are suppressed: the real answer is
+    # emitted by the reconciled parent (which reads each child's checkpoint), so
+    # a child emitting agent_response/full_message/pipeline_finish here would
+    # prematurely end the parent message and overwrite it with one child's output.
+    is_fanout_child = bool(
+        isinstance(task_meta, dict)
+        and task_meta.get('child_thread_id')
+        and task_meta.get('parent_thread_id')
+    )
+
     # Emit a dedicated event when execution paused at a HITL node.
     hitl_interrupt = response.get('hitl_interrupt')
+    # Parallel sub-agent fan-out (#4993): the SDK aggregates one entry per
+    # paused child into hitl_interrupts (plural). Forward the full list so the
+    # UI can render N stacked approval cards; fall back to the single interrupt
+    # for the ordinary one-pause case.
+    hitl_interrupts = response.get('hitl_interrupts')
+    if not hitl_interrupts and hitl_interrupt:
+        hitl_interrupts = [hitl_interrupt]
+    # Bidirectional fallback: a parallel fan-out aggregate may arrive as the
+    # plural list only. Derive the singular from the first entry so BOTH the
+    # interrupt-emission guard below and the skip-normal-message guard further
+    # down (which key off the singular) fire correctly on a plural-only pause —
+    # otherwise a paused child would leak a premature assistant message (#4993).
+    if not hitl_interrupt and hitl_interrupts:
+        hitl_interrupt = hitl_interrupts[0]
     if hitl_interrupt:
         node_interface.emit(
             type=EventTypes.agent_hitl_interrupt,
@@ -585,6 +647,7 @@ def emit_response_events(
                 'thread_id': thread_id_response,
                 'message': hitl_interrupt.get('message', 'Awaiting human review...'),
                 'hitl_interrupt': hitl_interrupt,
+                'hitl_interrupts': hitl_interrupts,
                 'node_name': hitl_interrupt.get('node_name'),
                 'available_actions': hitl_interrupt.get('available_actions', []),
                 'routes': hitl_interrupt.get('routes', {}),
@@ -592,8 +655,10 @@ def emit_response_events(
             }
         )
 
-    # Emit pipeline_finish if execution completed
-    if response.get('execution_finished'):
+    # Emit pipeline_finish if execution completed. Suppressed for a fan-out child
+    # (it must not signal END on the parent's stream — only the reconciled parent
+    # does that once every child has settled).
+    if response.get('execution_finished') and not is_fanout_child:
         node_interface.emit(
             type=EventTypes.pipeline_finish,
             content=output['content'],
@@ -612,7 +677,10 @@ def emit_response_events(
     # Skip normal message events for HITL pauses. The frontend renders the
     # pause state from the dedicated interrupt event and should not receive a
     # duplicate assistant message or a synthetic chat history turn.
-    if not hitl_interrupt:
+    # Also skip for a fan-out child: its final answer must NOT land on the
+    # parent's message — the reconciled parent emits the real answer after
+    # reading each child's checkpoint (#4993 Track 2).
+    if not hitl_interrupt and not is_fanout_child:
         node_interface.emit(
             type=EventTypes.agent_response,
             content=output['content'],
@@ -733,6 +801,7 @@ def build_success_result(
     tokens_out: int,
     context_info: Optional[Dict[str, Any]] = None,
     return_chat_history: bool = False,
+    hitl_interrupt: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build successful execution result dict.
@@ -746,6 +815,12 @@ def build_success_result(
         return_chat_history: Include chat_history in result (only needed for blocking API callers
             that call join_task(); socket-based flows never read this field so it defaults to False
             to avoid serializing potentially large base64 payloads into the task store).
+        hitl_interrupt: Set when the run PAUSED at a HITL node (not a completed answer).
+            A parked fan-out child (#4993 Track 2) fires the arbiter ``stopped`` event on
+            a HITL pause just like a completion, so the reconcile gate
+            (parallel_dispatch_on_child_terminal) MUST be able to tell the two apart:
+            a paused child is NOT terminal and must not advance the gate. Surfacing the
+            interrupt in the task result is how the gate detects "still open".
 
     Returns:
         Result dict
@@ -766,7 +841,229 @@ def build_success_result(
         result['chat_history'] = chat_history
     if context_info:
         result['context_info'] = context_info
+    if hitl_interrupt:
+        result['hitl_interrupt'] = hitl_interrupt
     return result
+
+
+# =============================================================================
+# Parallel sub-agent dispatch (Track 2, issue #4993)
+# =============================================================================
+
+# A forked agent process cannot safely call start_task (shared-Redis-socket
+# hazard), so the SDK's child_dispatcher is a pure presence-sentinel: the SDK
+# only checks `is not None` to choose park-by-returning (Track 2) over the
+# in-process asyncio.gather fan-out (Track 1). pylon_main owns the real child
+# launch. We hand the SDK a module-level marker — never called, only injected.
+_PARALLEL_DISPATCH_SENTINEL = object()
+
+
+def get_child_dispatcher(descriptor_config: Dict[str, Any]) -> Optional[Any]:
+    """Return a non-None sentinel to enable Track 2 park-mode, else None.
+
+    Gated on the indexer config flag ``parallel_subagent_dispatch`` so Track 1
+    (in-process gather) stays the default until an operator opts in. The SDK
+    only presence-checks the value, so the marker object's identity is
+    irrelevant — its non-None-ness is the whole switch.
+    """
+    if descriptor_config.get('parallel_subagent_dispatch', False):
+        return _PARALLEL_DISPATCH_SENTINEL
+    return None
+
+
+def detect_parked_dispatch(response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Detect the SDK park-by-returning sentinel in an agent response.
+
+    When the parent LLMNode fans out to 2+ Application sub-agents with a
+    child_dispatcher present, the SDK writes child specs to the parallel_tasks
+    channel and returns a parked shape instead of running them. Returns the
+    dispatch payload (specs + parent thread_id) for pylon_main to read via
+    get_task_result, or None for an ordinary run.
+    """
+    if not isinstance(response, dict) or not response.get('parallel_parked'):
+        return None
+    return {
+        'parallel_parked': True,
+        'parallel_dispatch': response.get('parallel_dispatch') or [],
+        'thread_id': response.get('thread_id'),
+    }
+
+
+def build_parked_result(
+    parked: Dict[str, Any],
+    stream_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build the task-result payload for a parked parent.
+
+    Carries the child dispatch specs (plus the parent's own reconcile re-invoke
+    payload) out to pylon_main (read via get_task_result) without the normal
+    agent_response/full_message events. The parent task then goes terminal
+    (``stopped``); pylon_main's stopped-handler launches one durable
+    indexer_agent per child and, once all settle, re-invokes the parent with
+    parallel_reconcile using the carried reconcile_payload.
+
+    ``stream_id``/``message_id`` are the parent's own — carried so pylon_main
+    re-invokes the reconcile on the SAME stream/message and the final answer
+    lands on the original user message.
+    """
+    return {
+        'error': None,
+        'parallel_parked': True,
+        'parallel_dispatch': parked.get('parallel_dispatch') or [],
+        'reconcile_payload': parked.get('reconcile_payload'),
+        'parent_stream_id': stream_id,
+        'parent_message_id': message_id,
+        'thread_id': parked.get('thread_id'),
+        'thinking_steps': [],
+        'tool_calls': [],
+        'tool_calls_dict': {},
+        'chat_history_tokens_input': 0,
+        'llm_response_tokens_output': 0,
+    }
+
+
+def build_child_launch_payloads(
+    parent_kwargs: Dict[str, Any],
+    parked_dispatch: list,
+) -> list:
+    """Turn parked dispatch specs into self-contained child indexer_agent payloads.
+
+    A forked agent cannot call start_task and pylon_main cannot safely mint a
+    fresh predict token outside request scope, so the launch payload is built
+    HERE — the parent indexer task holds a valid token/base_url/headers in its
+    own ``llm.kwargs`` (same project + user as the child). Each child is a saved
+    Application: its identity (id/version_id) and already-fetched
+    ``version_details`` (carrying its own llm_settings + tools) ride in the SDK
+    spec, so the child re-resolves its model/tools without any extra round-trip.
+
+    Inherited from the parent: transport credentials (base_url, api_key,
+    api_extra_headers, project_id), conversation_id, mcp_tokens,
+    ignored_mcp_servers, persona, supports_vision, debug. Child-specific: model
+    (the sub-agent's own, falling back to the parent's), thread_id, user_input
+    (the tool-call ``task``), variables, and a fresh/empty chat_history.
+
+    pylon_main reads the returned specs from the parked task result and calls
+    start_task("indexer_agent", kwargs=spec["child_payload"], ...) verbatim.
+    """
+    parent_llm_kwargs = (parent_kwargs.get('llm') or {}).get('kwargs') or {}
+    enriched = []
+    for spec in parked_dispatch or []:
+        version_details = spec.get('version_details') or {}
+        llm_settings = version_details.get('llm_settings') or {}
+
+        # Child uses its OWN configured model; embedded sub-agents with null
+        # llm_settings inherit the parent's model. Token/base_url/headers are
+        # always the parent's (valid for the same project + user).
+        child_llm_kwargs = dict(parent_llm_kwargs)
+        child_llm_kwargs['model'] = llm_settings.get('model_name') or parent_llm_kwargs.get('model')
+        child_llm_kwargs['openai_compatible'] = llm_settings.get(
+            'openai_compatible', parent_llm_kwargs.get('openai_compatible', False)
+        )
+
+        # Variables: defaults overlaid with any non-task inputs from the call.
+        task_input = spec.get('input') if isinstance(spec.get('input'), dict) else {}
+        variables = dict(spec.get('variable_defaults') or {})
+        for key, value in task_input.items():
+            if key not in ('task', 'chat_history') and value is not None:
+                variables[key] = value
+        payload_variables = (
+            {k: {'name': k, 'value': v} for k, v in variables.items()} or None
+        )
+
+        child_payload = {
+            'llm': {'kwargs': child_llm_kwargs},
+            'chat_history': [],
+            'user_input': task_input.get('task') or '',
+            'thread_id': spec.get('child_thread_id'),
+            'conversation_id': parent_kwargs.get('conversation_id'),
+            'mcp_tokens': parent_kwargs.get('mcp_tokens') or {},
+            'ignored_mcp_servers': parent_kwargs.get('ignored_mcp_servers') or [],
+            'context_settings': {},
+            'supports_vision': parent_kwargs.get('supports_vision', True),
+            'debug': parent_kwargs.get('debug', False),
+            'persona': parent_kwargs.get('persona', 'generic'),
+            'should_continue': False,
+            'hitl_resume': False,
+            'is_regenerate': False,
+            'meta': version_details.get('meta', {}),
+            'application': {
+                'id': spec.get('application_id'),
+                'name': spec.get('name'),
+                'version_id': spec.get('application_version_id'),
+                'variables': payload_variables,
+                'version_details': version_details,
+            },
+        }
+
+        # Keep the spec light for the task result: version_details now lives
+        # inside child_payload, no need to carry it twice across the RPC.
+        new_spec = {k: v for k, v in spec.items() if k != 'version_details'}
+        new_spec['child_payload'] = child_payload
+        enriched.append(new_spec)
+    return enriched
+
+
+def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the self-contained payload to re-invoke a parked parent for reconcile.
+
+    Once every child task is terminal, pylon_main re-invokes the parked parent
+    as a FRESH ``indexer_agent`` task (not a checkpoint resume) so the SDK can
+    read each child's own checkpoint, append one ToolMessage per child, and
+    finish the tool loop. The re-invoke must land on the SAME thread_id with the
+    SAME agent identity and a valid token. The parent's own ``llm.kwargs`` token
+    is a long-lived user/system API token (no near-term expiry), so it survives
+    the human-think-time between park and reconcile — we carry the parent's
+    launch fields verbatim and only flip control flags.
+
+    Built HERE (not in pylon_main) for the same reason as the child payloads:
+    pylon_main cannot safely mint a predict token outside request scope, but the
+    parent indexer task already holds a valid one. pylon_main stashes this
+    payload (transiently, keyed by parent_thread_id+epoch) and replays it with
+    ``parallel_reconcile`` stamped in once the reconcile gate opens.
+
+    Only JSON-safe launch fields are carried; transient resume/HITL flags are
+    forced off so the re-invoke is a clean reconcile, not a continuation.
+    """
+    carry_keys = (
+        'llm', 'application', 'thread_id', 'conversation_id', 'user_input',
+        'chat_history', 'tools', 'internal_tools', 'mcp_tokens',
+        'ignored_mcp_servers', 'persona', 'supports_vision', 'debug',
+        'debug_mode', 'steps_limit', 'meta', 'context_settings',
+        'exception_handling_enabled', 'auto_approve_sensitive_actions',
+        'return_chat_history',
+    )
+    payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
+    # context_settings is mutated in place at task entry to attach live
+    # summarization-callback closures (create_summarization_callbacks.<locals>.*),
+    # which are NOT picklable — and the parked result is pickled to the arbiter
+    # tasknode .bin. Drop the callbacks: the reconcile re-invoke rebuilds its own
+    # fresh from node_interface, exactly as the original invoke does, so this is a
+    # clean shallow copy, not a loss of configuration.
+    if isinstance(payload.get('context_settings'), dict):
+        payload['context_settings'] = {
+            k: v for k, v in payload['context_settings'].items() if k != 'callbacks'
+        }
+    # Force a clean reconcile invocation: not a HITL/continue/regenerate resume.
+    payload['should_continue'] = False
+    payload['hitl_resume'] = False
+    payload['is_regenerate'] = False
+    return payload
+
+
+def apply_parallel_reconcile(invoke_input: Dict[str, Any], kwargs: Dict[str, Any]) -> Optional[Any]:
+    """Thread the reconcile epoch from task kwargs into the SDK invoke input.
+
+    pylon_main re-invokes the parked parent with ``parallel_reconcile=<epoch>``
+    once every child task is terminal. The SDK runnable consumes
+    ``invoke_input['parallel_reconcile']`` to switch into reconcile-assembly
+    (read each child's own checkpoint, append one ToolMessage per child, resume
+    the agent node). Returns the epoch when present, else None.
+    """
+    epoch = kwargs.get('parallel_reconcile')
+    if epoch:
+        invoke_input['parallel_reconcile'] = epoch
+    return epoch
 
 
 # =============================================================================

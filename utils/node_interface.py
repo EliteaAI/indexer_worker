@@ -143,11 +143,18 @@ class NodeEventInterface:
                  batch_enabled: bool = True,
                  batch_max_chars: int = 64,
                  batch_max_interval_ms: int = 80,
+                 event_metadata_overlay: Optional[dict] = None,
                  **kwargs):
         self.event_node = event_node
         self.node_event_name = node_event_name
         self.stream_id = stream_id
         self.message_id = message_id
+        # Fan-out child attribution (#4993 Track 2) merged into every event's
+        # response_metadata.metadata so the UI groups a standalone child's live
+        # chips + HITL card under its own sub-agent accordion. None for ordinary
+        # tasks. Kept OUT of payload_additional_kwargs (those set top-level
+        # NodeEvent fields); this targets the nested metadata dict only.
+        self.event_metadata_overlay = event_metadata_overlay or None
         self.payload_additional_kwargs = kwargs
         self.event_log = []
         # agent_llm_chunk coalescing: buffer tiny token-deltas into fewer, larger
@@ -176,6 +183,12 @@ class NodeEventInterface:
         self._emit_now(**kwargs)
 
     def _emit_now(self, **kwargs) -> None:
+        # Stamp fan-out child attribution into response_metadata.metadata (the
+        # nested dict the UI reads parent_agent_name/thread_id from) without
+        # overwriting fields the producer already set (#4993 Track 2). No-op when
+        # the overlay is None (ordinary, non-child task).
+        if self.event_metadata_overlay:
+            self._apply_event_metadata_overlay(kwargs)
         # Clean all data to ensure JSON serializability
         clean_additional_kwargs = clean_for_json_serialization(
             self.payload_additional_kwargs,
@@ -207,6 +220,25 @@ class NodeEventInterface:
             log.debug(f'NodeEventInterface emit {e=}')
         self.event_log.append(e)
         self.event_node.emit(self.node_event_name, e)
+
+    def _apply_event_metadata_overlay(self, kwargs: dict) -> None:
+        """Merge child attribution into kwargs['response_metadata']['metadata'].
+
+        Only fills keys the producer left unset, so a genuine nested-sub-agent
+        ``parent_agent_name`` (a child that itself fans out in-process) is never
+        clobbered by this task-level overlay. Builds the nested dicts on demand.
+        """
+        rmeta = kwargs.get("response_metadata")
+        if not isinstance(rmeta, dict):
+            rmeta = {}
+            kwargs["response_metadata"] = rmeta
+        meta = rmeta.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+            rmeta["metadata"] = meta
+        for key, value in self.event_metadata_overlay.items():
+            if value and not meta.get(key):
+                meta[key] = value
 
     def _buffer_chunk(self, kwargs: dict) -> None:
         rmeta = kwargs.get("response_metadata") or {}

@@ -52,6 +52,12 @@ from ..utils.agent_execution_common import (
     extract_response_content,
     build_output_message,
     create_summarization_callbacks,
+    get_child_dispatcher,
+    detect_parked_dispatch,
+    build_parked_result,
+    build_child_launch_payloads,
+    build_parent_reconcile_payload,
+    apply_parallel_reconcile,
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
@@ -205,6 +211,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         hitl_resume = kwargs.get('hitl_resume', False)
         hitl_action = kwargs.get('hitl_action', 'approve')
         hitl_value = kwargs.get('hitl_value', '')
+        # Parallel sub-agent fan-out (#4993): per-child decisions for resuming
+        # multiple paused sub-agents in one turn (keyed by tool_call_id).
+        hitl_decisions = kwargs.get('hitl_decisions') or None
+        # Set when THIS run paused at a HITL node; surfaced in the task result so a
+        # parked fan-out child's HITL pause is not mistaken for a completion by the
+        # reconcile gate (#4993).
+        paused_hitl_interrupt = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -291,6 +304,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 step_limit=steps_limit,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
+                # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
+                # parallel_subagent_dispatch is enabled — an ad-hoc predict parent
+                # whose agent has Application tools also fans out and must park.
+                child_dispatcher=get_child_dispatcher(self.descriptor.config),
             )
 
             # Create callbacks
@@ -344,6 +361,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 invoke_input['hitl_resume'] = True
                 invoke_input['hitl_action'] = hitl_action
                 invoke_input['hitl_value'] = hitl_value
+                # Parallel multi-interrupt resume (#4993): the SDK routes each
+                # decision to its paused sub-agent by tool_call_id.
+                if hitl_decisions:
+                    invoke_input['hitl_decisions'] = hitl_decisions
+                    log.info(f'[HITL] Resume with {len(hitl_decisions)} parallel decision(s)')
                 log.info(f'[HITL] Resume action: {invoke_input["hitl_action"]}')
             elif should_continue:
                 invoke_input, invoke_config = configure_checkpoint_resume(
@@ -354,12 +376,38 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     invoke_config
                 )
 
+            # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes
+            # the parked parent with this epoch once every child task is terminal.
+            apply_parallel_reconcile(invoke_input, kwargs)
+
             # Invoke the agent executor with Langfuse trace context
             with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
 
             if elitea_callback.llm_error:
                 raise elitea_callback.llm_error
+
+            # Parallel sub-agent park (#4993 Track 2): the parent fanned out to
+            # 2+ sub-agents and returned parked. Surface the dispatch specs in the
+            # task result for pylon_main's stopped-handler; skip response events
+            # (no final answer yet). The finally block flushes/stops on return.
+            _parked = detect_parked_dispatch(response)
+            if _parked is not None:
+                # Enrich each spec with a self-contained child launch payload
+                # (inherits this parent's valid token/base_url; child model +
+                # tools come from the sub-agent's own version_details). Also
+                # carry the parent's own reconcile re-invoke payload so pylon_main
+                # can replay this same parent (same token, same thread) once the
+                # children settle.
+                _parked['parallel_dispatch'] = build_child_launch_payloads(
+                    kwargs, _parked['parallel_dispatch']
+                )
+                _parked['reconcile_payload'] = build_parent_reconcile_payload(kwargs)
+                log.info(
+                    f'[PARALLEL] predict parent parked, dispatching '
+                    f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'
+                )
+                return build_parked_result(_parked, stream_id, message_id)
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='messages')
@@ -391,6 +439,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 image_thumbnails=image_thumbnails,
                 context_info=context_info,
             )
+
+            # Capture a HITL pause for the final task result so the reconcile gate
+            # keeps a paused child OPEN instead of marking it terminal (#4993).
+            paused_hitl_interrupt = response.get('hitl_interrupt')
 
         except InternalSDKError as e:
             return execution_error(
@@ -500,4 +552,4 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)
