@@ -268,7 +268,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "exception_handling_enabled",
                 self.descriptor.config.get("exception_handling_enabled", False)
             )
-            log.info(f'exception_handling_enabled "{exception_handling_enabled}"')
+            log.debug('exception_handling_enabled "%s"', exception_handling_enabled)
 
             # Prepare context_settings with summarization callbacks
             context_settings = kwargs.get("context_settings", {})
