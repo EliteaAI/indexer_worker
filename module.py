@@ -409,8 +409,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             )
             log.info(f"[SECURITY] Configured toolkit blocklist: "
                     f"toolkits={blocked_toolkits}, tools={blocked_tools}")
-        except Exception as e:  # pylint: disable=W0718
-            log.warning(f"Failed to configure toolkit security blocklist: {e}")
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure toolkit security blocklist")
         try:
             from elitea_sdk.runtime.toolkits.security import configure_sensitive_tools  # pylint: disable=C0415,E0401
             sensitive_tools = toolkit_security.get("sensitive_tools") or {}
@@ -422,8 +422,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 message_template=message_template,
             )
             log.info(f"[SECURITY] Configured sensitive tools: {sensitive_tools}")
-        except Exception as e:  # pylint: disable=W0718
-            log.warning(f"Failed to configure sensitive tools: {e}")
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure sensitive tools")
 
     def reconfig(self):
         """Re-apply config live on admin save — no pylon restart required.
