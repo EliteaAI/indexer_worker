@@ -223,36 +223,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         except:  # pylint: disable=W0702
             pass  # allow to fail
         #
-        # Configure toolkit security blocklist from config
-        toolkit_security = self.descriptor.config.get("toolkit_security", {})
-        if toolkit_security:
-            try:
-                from elitea_sdk.runtime.toolkits.security import configure_blocklist  # pylint: disable=C0415,E0401
-                blocked_toolkits = toolkit_security.get("blocked_toolkits", [])
-                blocked_tools = toolkit_security.get("blocked_tools", {})
-                if blocked_toolkits or blocked_tools:
-                    configure_blocklist(
-                        blocked_toolkits=blocked_toolkits,
-                        blocked_tools=blocked_tools
-                    )
-                    log.info(f"[SECURITY] Configured toolkit blocklist: "
-                            f"toolkits={blocked_toolkits}, tools={blocked_tools}")
-            except Exception as e:  # pylint: disable=W0718
-                log.warning(f"Failed to configure toolkit security blocklist: {e}")
-            try:
-                from elitea_sdk.runtime.toolkits.security import configure_sensitive_tools  # pylint: disable=C0415,E0401
-                sensitive_tools = toolkit_security.get("sensitive_tools", {})
-                company_name = toolkit_security.get("sensitive_action_company_name", None)
-                message_template = toolkit_security.get("sensitive_action_message_template", None)
-                if sensitive_tools:
-                    configure_sensitive_tools(
-                        sensitive_tools=sensitive_tools,
-                        company_name=company_name,
-                        message_template=message_template,
-                    )
-                    log.info(f"[SECURITY] Configured sensitive tools: {sensitive_tools}")
-            except Exception as e:  # pylint: disable=W0718
-                log.warning(f"Failed to configure sensitive tools: {e}")
+        # Configure toolkit security guardrails from config (live-reloadable via reconfig)
+        self._apply_toolkit_security()
         #
         if self.descriptor.config.get("worker_enabled", True):
             # Agent prereqs
@@ -416,6 +388,53 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
 
         else:
             log.debug("Worker not enabled")
+
+    def _apply_toolkit_security(self):
+        """Apply the toolkit security guardrails from the current config.
+
+        Reads ``toolkit_security`` fresh from ``self.descriptor.config`` and pushes
+        it into the SDK's process-global guardrail state. Called from ``init()`` at
+        startup and from ``reconfig()`` whenever an admin saves the Guardrails
+        settings. Values are applied UNCONDITIONALLY (even when empty) so that
+        removing a blocked/sensitive rule takes effect — not only adding one.
+        """
+        toolkit_security = self.descriptor.config.get("toolkit_security", {}) or {}
+        try:
+            from elitea_sdk.runtime.toolkits.security import configure_blocklist  # pylint: disable=C0415,E0401
+            blocked_toolkits = toolkit_security.get("blocked_toolkits") or []
+            blocked_tools = toolkit_security.get("blocked_tools") or {}
+            configure_blocklist(
+                blocked_toolkits=blocked_toolkits,
+                blocked_tools=blocked_tools
+            )
+            log.info(f"[SECURITY] Configured toolkit blocklist: "
+                    f"toolkits={blocked_toolkits}, tools={blocked_tools}")
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure toolkit security blocklist")
+        try:
+            from elitea_sdk.runtime.toolkits.security import configure_sensitive_tools  # pylint: disable=C0415,E0401
+            sensitive_tools = toolkit_security.get("sensitive_tools") or {}
+            company_name = toolkit_security.get("sensitive_action_company_name", None)
+            message_template = toolkit_security.get("sensitive_action_message_template", None)
+            configure_sensitive_tools(
+                sensitive_tools=sensitive_tools,
+                company_name=company_name,
+                message_template=message_template,
+            )
+            log.info(f"[SECURITY] Configured sensitive tools: {sensitive_tools}")
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure sensitive tools")
+
+    def reconfig(self):
+        """Re-apply config live on admin save — no pylon restart required.
+
+        The bootstrap handler calls ``descriptor.load_config()`` before this, so
+        ``self.descriptor.config`` already holds the new Guardrails values. The
+        agent pool forks per task at dispatch, so refreshing the SDK guardrail
+        globals in this (main) process is inherited by every agent run started
+        afterwards. In-flight runs keep their own forked copy.
+        """
+        self._apply_toolkit_security()
 
     def deinit(self):
         """ De-init module """
