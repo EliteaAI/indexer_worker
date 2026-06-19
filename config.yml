@@ -13,3 +13,14 @@ llm_chunk_batching:
   enabled: true
   max_chars: 64
   max_interval_ms: 80
+
+# Pyodide code-node sandbox resource limits. Set into os.environ at plugin init
+# (see module.py env_vars loop) and read by PyodideSandboxTool in the SDK.
+# Values MUST be strings (os.environ requires str). Absent => SDK safe defaults.
+#   SANDBOX_MAX_CONCURRENT: "0"      disables the concurrency gate
+#   SANDBOX_MEMORY_PRESSURE_PCT: "0" disables the memory-pressure gate
+env_vars:
+  SANDBOX_TIMEOUT_SECONDS: "55"       # per-execution wall-clock kill
+  SANDBOX_WASM_MAX_MEM_MB: "512"      # per-execution Pyodide WASM heap cap
+  SANDBOX_MAX_CONCURRENT: "16"        # max concurrent deno sandboxes (per pod)
+  SANDBOX_MEMORY_PRESSURE_PCT: "85"   # reject new runs above this container mem %
