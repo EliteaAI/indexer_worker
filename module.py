@@ -413,7 +413,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             log.warning(f"Failed to configure toolkit security blocklist: {e}")
         try:
             from elitea_sdk.runtime.toolkits.security import configure_sensitive_tools  # pylint: disable=C0415,E0401
-            sensitive_tools = toolkit_security.get("sensitive_tools", {})
+            sensitive_tools = toolkit_security.get("sensitive_tools") or {}
             company_name = toolkit_security.get("sensitive_action_company_name", None)
             message_template = toolkit_security.get("sensitive_action_message_template", None)
             configure_sensitive_tools(
