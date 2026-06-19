@@ -401,8 +401,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         toolkit_security = self.descriptor.config.get("toolkit_security", {}) or {}
         try:
             from elitea_sdk.runtime.toolkits.security import configure_blocklist  # pylint: disable=C0415,E0401
-            blocked_toolkits = toolkit_security.get("blocked_toolkits", [])
-            blocked_tools = toolkit_security.get("blocked_tools", {})
+            blocked_toolkits = toolkit_security.get("blocked_toolkits") or []
+            blocked_tools = toolkit_security.get("blocked_tools") or {}
             configure_blocklist(
                 blocked_toolkits=blocked_toolkits,
                 blocked_tools=blocked_tools
