@@ -588,7 +588,8 @@ def emit_response_events(
     hitl_action: Optional[str] = None,
     hitl_value: str = '',
     image_thumbnails: Optional[Dict[str, str]] = None,
-    context_info: Optional[Dict[str, Any]] = None
+    context_info: Optional[Dict[str, Any]] = None,
+    invoked_skills: Optional[List[Dict[str, Any]]] = None
 ):
     """
     Emit all response-related events.
@@ -709,6 +710,11 @@ def emit_response_events(
             'llm_response_tokens_output': total_tokens_out,
             'should_continue': should_continue,
             'context_info': context_info,
+            'invoked_skills': [
+                {'skill_id': s.get('skill_id'), 'name': s.get('name')}
+                for s in (invoked_skills or [])
+                if isinstance(s, dict) and s.get('name')
+            ],
         }
 
         msg_event_node = NodeEvent(
