@@ -495,7 +495,6 @@ class EliteACallback(BaseCallbackHandler):
             tool_inputs={"task": task_text} if task_text else {},
             metadata=metadata,
             agent_type=_agent_type,
-            content=output_text,
             tool_output=output_text,
             finish_reason="stop",
             timestamp_start=now,
@@ -741,7 +740,6 @@ class EliteACallback(BaseCallbackHandler):
         now = datetime.now(tz=timezone.utc).isoformat()
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "stop"
-            self.tool_calls[tool_run_id].content = tool_output
             self.tool_calls[tool_run_id].tool_output = tool_output
             self.tool_calls[tool_run_id].timestamp_finish = now
             tool_call = self.tool_calls[tool_run_id]
