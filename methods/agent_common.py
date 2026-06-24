@@ -1361,6 +1361,10 @@ class EliteACallback(BaseCallbackHandler):
                 # accordion in the parent's thinking view. Only fills when unset.
                 elif self.subagent_name:
                     generation_chunk["parent_agent_name"] = self.subagent_name
+                # MUST run after all extraction above and before append.
+                _msg = generation_chunk.get("message")
+                if isinstance(_msg, dict):
+                    _msg.pop("content", None)
                 self.thinking_steps.append(generation_chunk)
 
         self.node_interface.emit(
