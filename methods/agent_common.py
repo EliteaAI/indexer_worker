@@ -721,6 +721,18 @@ class EliteACallback(BaseCallbackHandler):
         tool_run_id = str(run_id)
         # Use JSON serialization for non-string types to preserve proper formatting
         raw_output = args[0]
+        # Parallel sub-agent HITL pause (#5378): a child that pauses for a
+        # sensitive-action approval returns a deferred sentinel
+        # ({"__hitl_deferred__": True, ...}) instead of a real result. Its
+        # invocation wrapper's on_tool_end still fires (the sentinel is the _run
+        # return value), which would otherwise mark the sub-agent "done" in the UI
+        # and drop its shimmer mid-run — before the aggregate approval card even
+        # surfaces. Detect it here (where the sentinel is structurally available,
+        # pre-serialization), stamp a clean flag the UI can read, and DON'T leak
+        # the raw sentinel as the tool's visible result.
+        hitl_deferred = isinstance(raw_output, dict) and bool(
+            raw_output.get("__hitl_deferred__")
+        )
         # LangChain wraps tool results in a ToolMessage (BaseMessage) when a
         # tool_call_id is provided (e.g. via LangGraph's ToolNode for published
         # agents with toolkits). Extract the actual content, otherwise the
@@ -729,15 +741,18 @@ class EliteACallback(BaseCallbackHandler):
         # the end user / LLM context instead of the plain tool result.
         if isinstance(raw_output, BaseMessage):
             raw_output = raw_output.content
-        tool_output = (
-            raw_output
-            if isinstance(raw_output, str)
-            else json.dumps(
-                raw_output, 
-                ensure_ascii=False, 
-                default=lambda o: str(o)
+        if hitl_deferred:
+            tool_output = ""
+        else:
+            tool_output = (
+                raw_output
+                if isinstance(raw_output, str)
+                else json.dumps(
+                    raw_output,
+                    ensure_ascii=False,
+                    default=lambda o: str(o)
+                )
             )
-        )
         now = datetime.now(tz=timezone.utc).isoformat()
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "stop"
@@ -756,6 +771,12 @@ class EliteACallback(BaseCallbackHandler):
                 run_id=str(run_id),
             )
             self.tool_calls[tool_run_id] = tool_call
+
+        # Surface the deferred-pause flag (#5378) on the event metadata the UI
+        # reads (response_metadata.metadata). Lets the UI keep the sub-agent's
+        # shimmer alive through the approval gap instead of marking it "done".
+        if hitl_deferred:
+            tool_call.metadata = {**(tool_call.metadata or {}), "hitl_deferred": True}
 
         # Include agent_type field (will be None if not applicable)
         include_fields = {
