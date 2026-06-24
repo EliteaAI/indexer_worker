@@ -125,7 +125,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Fetch pgvector connection string for memory (PostgresSaver) and cleanup using context manager
             with temp_elitea_client(client_args, api_token, api_extra_headers) as temp_client:
-                pgvector_connstr = _fetch_pgvector_connstr_with_retry(temp_client)
+                pgvector_connstr = _fetch_pgvector_connstr_with_retry(
+                    temp_client, project_id=client_args.get("project_id")
+                )
 
             # Setup memory configuration
             memory_type, memory_config = setup_memory(

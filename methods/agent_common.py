@@ -56,6 +56,9 @@ EVENTNODE_PARTIAL_RESPONSE_NAME = "application_partial_response"
 # Secret name for project PostgreSQL connection string
 PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
 
+# Per-worker cache: project_id -> connstr (immutable after project creation, safe to hold forever)
+_pgvector_connstr_cache: dict = {}
+
 
 @contextmanager
 def temp_elitea_client(
@@ -98,46 +101,65 @@ def temp_elitea_client(
 
 
 def _fetch_pgvector_connstr_with_retry(
-    client, max_retries: int = 3, base_delay: float = 0.5
+    client, project_id=None, max_retries: int = 3, base_delay: float = 0.5
 ) -> Optional[str]:
     """
     Fetch pgvector_project_connstr secret from the project vault with retry logic.
+    Result is cached per project_id for the lifetime of the worker process.
 
     Args:
         client: EliteAClient instance with unsecret capability
+        project_id: Project ID used as cache key (skips cache if None)
         max_retries: Maximum number of retry attempts (default: 3)
         base_delay: Base delay in seconds between retries, uses exponential backoff (default: 0.5)
 
     Returns:
         Connection string if successful, None if secret doesn't exist or all retries failed
     """
+    if project_id is not None and project_id in _pgvector_connstr_cache:
+        log.debug(
+            "pgvector_connstr cache hit for project_id=%s", project_id
+        )
+        return _pgvector_connstr_cache[project_id]
+
+    log.debug(
+        "pgvector_connstr cache miss for project_id=%s — fetching from vault", project_id
+    )
+
     last_error = None
     for attempt in range(max_retries):
         try:
             conn_str = client.unsecret(PGVECTOR_PROJECT_CONNSTR_SECRET)
             if conn_str:
                 log.debug(
-                    f"Successfully fetched {PGVECTOR_PROJECT_CONNSTR_SECRET} secret"
+                    "Successfully fetched %s secret for project_id=%s",
+                    PGVECTOR_PROJECT_CONNSTR_SECRET, project_id
                 )
+                if project_id is not None:
+                    _pgvector_connstr_cache[project_id] = conn_str
                 return conn_str
             else:
                 log.warning(
-                    f"{PGVECTOR_PROJECT_CONNSTR_SECRET} secret not found or empty in project vault"
+                    "%s secret not found or empty in project vault for project_id=%s",
+                    PGVECTOR_PROJECT_CONNSTR_SECRET, project_id
                 )
+                if project_id is not None:
+                    _pgvector_connstr_cache[project_id] = None
                 return None
         except Exception as e:  # pylint: disable=W0718
             last_error = e
             if attempt < max_retries - 1:
                 delay = base_delay * (2**attempt)  # Exponential backoff
                 log.warning(
-                    f"Attempt {attempt + 1}/{max_retries} to fetch {PGVECTOR_PROJECT_CONNSTR_SECRET} failed: {e}. "
-                    f"Retrying in {delay:.1f}s..."
+                    "Attempt %d/%d to fetch %s failed: %s. Retrying in %.1fs...",
+                    attempt + 1, max_retries, PGVECTOR_PROJECT_CONNSTR_SECRET, e, delay
                 )
                 time.sleep(delay)
             else:
                 log.warning(
-                    f"All {max_retries} attempts to fetch {PGVECTOR_PROJECT_CONNSTR_SECRET} failed. "
-                    f"Last error: {last_error}. Planning toolkit will use filesystem storage."
+                    "All %d attempts to fetch %s failed. Last error: %s. "
+                    "Planning toolkit will use filesystem storage.",
+                    max_retries, PGVECTOR_PROJECT_CONNSTR_SECRET, last_error
                 )
     return None
 
