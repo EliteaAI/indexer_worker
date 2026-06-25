@@ -2,6 +2,7 @@
 import os
 import sys
 from typing import List, Optional, Dict, Any, Union
+from urllib.parse import urlparse
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.outputs import LLMResult
@@ -406,6 +407,102 @@ def normalize_mcp_toolkit_name(name: str) -> str:
     if normalized.startswith("mcp_"):
         normalized = normalized[4:]
     return normalized
+
+
+def normalize_mcp_server_url(url: Optional[str]) -> Optional[str]:
+    """Normalize MCP server URL values, including deprecated provider endpoints."""
+    if not isinstance(url, str):
+        return url
+
+    normalized = url.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return normalized
+
+    if parsed.netloc.lower() == "mcp.atlassian.com" and parsed.path.rstrip("/") == "/v1/sse":
+        return f"{parsed.scheme}://{parsed.netloc}/v1/mcp/authv2"
+
+    return normalized
+
+
+def normalize_mcp_auth_metadata_urls(auth_metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Normalize MCP auth metadata URL fields for consistent login behavior."""
+    if not isinstance(auth_metadata, dict):
+        return auth_metadata
+
+    metadata = dict(auth_metadata)
+    metadata["server_url"] = normalize_mcp_server_url(metadata.get("server_url"))
+    metadata["resource_metadata_url"] = normalize_mcp_server_url(metadata.get("resource_metadata_url"))
+
+    auth_servers = metadata.get("authorization_servers")
+    if isinstance(auth_servers, list):
+        metadata["authorization_servers"] = [
+            normalize_mcp_server_url(url) if isinstance(url, str) else url
+            for url in auth_servers
+        ]
+
+    resource_metadata = metadata.get("resource_metadata")
+    if isinstance(resource_metadata, dict):
+        resource_metadata = dict(resource_metadata)
+        resource_auth_servers = resource_metadata.get("authorization_servers")
+        if isinstance(resource_auth_servers, list):
+            resource_metadata["authorization_servers"] = [
+                normalize_mcp_server_url(url) if isinstance(url, str) else url
+                for url in resource_auth_servers
+            ]
+
+        oauth_auth_server = resource_metadata.get("oauth_authorization_server")
+        if isinstance(oauth_auth_server, dict):
+            oauth_auth_server = dict(oauth_auth_server)
+            for key in ("issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint"):
+                oauth_auth_server[key] = normalize_mcp_server_url(oauth_auth_server.get(key))
+            resource_metadata["oauth_authorization_server"] = oauth_auth_server
+
+        metadata["resource_metadata"] = resource_metadata
+
+    return metadata
+
+
+def _atlassian_mcp_alternate_url(url: Optional[str]) -> Optional[str]:
+    """Return alternate Atlassian MCP URL variant for token-key compatibility."""
+    if not isinstance(url, str):
+        return None
+
+    normalized = normalize_mcp_server_url(url)
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "mcp.atlassian.com":
+        return None
+
+    path = parsed.path.rstrip("/")
+    if path == "/v1/mcp/authv2":
+        return f"{parsed.scheme}://{parsed.netloc}/v1/sse"
+    if path == "/v1/sse":
+        return f"{parsed.scheme}://{parsed.netloc}/v1/mcp/authv2"
+    return None
+
+
+def expand_mcp_token_aliases(mcp_tokens: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Expand MCP token map with provider-specific key aliases used by runtime lookups."""
+    if not isinstance(mcp_tokens, dict):
+        return mcp_tokens
+
+    expanded = dict(mcp_tokens)
+    added_aliases: list[tuple[str, str]] = []
+    for key, value in list(mcp_tokens.items()):
+        if not isinstance(key, str):
+            continue
+
+        normalized_key = normalize_mcp_server_url(key)
+        if isinstance(normalized_key, str) and normalized_key not in expanded:
+            expanded[normalized_key] = value
+            added_aliases.append((key, normalized_key))
+
+        alternate_key = _atlassian_mcp_alternate_url(normalized_key)
+        if isinstance(alternate_key, str) and alternate_key not in expanded:
+            expanded[alternate_key] = value
+            added_aliases.append((normalized_key, alternate_key))
+
+    return expanded
 
 
 def get_mcp_server_settings(toolkit_name: str) -> Optional[Dict[str, Any]]:

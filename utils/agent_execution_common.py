@@ -304,6 +304,7 @@ def create_elitea_client(client_args: Dict[str, Any], api_token: str, api_extra_
         Configured EliteAClient instance
     """
     from ..utils.funcs import dev_reload_sdk
+    dev_reload_sdk('elitea_sdk.runtime.langchain')
     dev_reload_sdk('elitea_sdk.runtime.clients')
     dev_reload_sdk('elitea_sdk.runtime.toolkits')
     dev_reload_sdk('elitea_sdk.runtime.tools')
@@ -529,7 +530,9 @@ def configure_checkpoint_resume(
     thread_id: str,
     checkpoint_id: Optional[str],
     invoke_input: Dict[str, Any],
-    invoke_config: Dict[str, Any]
+    invoke_config: Dict[str, Any],
+    user_input: Optional[str] = None,
+    user_declined_mcp_servers: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Configure checkpoint resume if needed.
@@ -540,6 +543,10 @@ def configure_checkpoint_resume(
         checkpoint_id: Optional specific checkpoint to resume from
         invoke_input: Current invoke input dict
         invoke_config: Current invoke config dict
+        user_input: Original user question (used to build continuation message)
+        user_declined_mcp_servers: List of MCP servers the user skipped auth for.
+            When non-empty, a skip continuation message is generated so the LLM
+            knows auth was declined (not completed) and includes the reason.
 
     Returns:
         Tuple of (modified_invoke_input, modified_invoke_config)
@@ -554,8 +561,59 @@ def configure_checkpoint_resume(
                 checkpoint_id = states[0].config['configurable']['checkpoint_id']
 
         if checkpoint_id:
-            # Modify input for continuation
-            invoke_input = {'input': 'Continue your last response'}
+            declined = user_declined_mcp_servers or []
+            if declined:
+                # User clicked Skip — tell the LLM auth was declined, include reason(s).
+                # This prevents "auth completed" confusion and allows the LLM to
+                # acknowledge the skip and answer without MCP tools.
+                skip_details = []
+                for s in declined:
+                    if not isinstance(s, dict):
+                        continue
+                    reason = (s.get("skip_reason") or s.get("denial_reason") or "").strip()
+                    server = (s.get("server_url") or "").strip()
+                    if reason and server:
+                        skip_details.append(f"{server}: {reason}")
+                    elif reason:
+                        skip_details.append(reason)
+                if skip_details:
+                    reason_text = "; ".join(skip_details)
+                    continuation_message = (
+                        f"The user declined MCP authorization for this session. "
+                        f"Reason: {reason_text}. "
+                        f"Please proceed with the original request without using the unavailable MCP tools, "
+                        f"or explain that you cannot complete it without them: {user_input}"
+                        if user_input else
+                        f"The user declined MCP authorization for this session. "
+                        f"Reason: {reason_text}. "
+                        f"Please proceed with the original request without using the unavailable MCP tools, "
+                        f"or explain that you cannot complete it without them."
+                    )
+                else:
+                    continuation_message = (
+                        f"The user chose to skip MCP authorization for this session. "
+                        f"Please proceed with the original request without using the unavailable MCP tools, "
+                        f"or explain that you cannot complete it without them: {user_input}"
+                        if user_input else
+                        "The user chose to skip MCP authorization for this session. "
+                        "Please proceed with the original request without using the unavailable MCP tools, "
+                        "or explain that you cannot complete it without them."
+                    )
+            else:
+                # User completed (or attempted) authorization — proceed with the tools.
+                # Repeating the original user question avoids the LLM treating
+                # the stale "auth initiated" checkpoint messages as still pending.
+                if user_input:
+                    continuation_message = (
+                        f"The required authorization has been completed. "
+                        f"Please proceed with the original request: {user_input}"
+                    )
+                else:
+                    continuation_message = (
+                        "The required authorization has been completed. "
+                        "Please proceed with the original request using the newly available tools."
+                    )
+            invoke_input = {'input': continuation_message}
             invoke_config['configurable']['checkpoint_id'] = checkpoint_id
             invoke_config['should_continue'] = True
             log.debug(f'Resuming execution from checkpoint: {checkpoint_id}')

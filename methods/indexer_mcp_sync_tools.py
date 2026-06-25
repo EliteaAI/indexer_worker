@@ -25,6 +25,7 @@ from pylon.core.tools import web
 
 from tools import worker_core
 
+from ..utils.funcs import normalize_mcp_auth_metadata_urls, normalize_mcp_server_url
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent
 
 # Import shared components from the agent common module
@@ -78,7 +79,8 @@ class Method:
         Returns:
             Dictionary with tools list or authorization requirement
         """
-        log.debug(f"MCP sync tools task started: url={url}, project_id={project_id}")
+        normalized_url = normalize_mcp_server_url(url)
+        log.debug(f"MCP sync tools task started: url={normalized_url}, project_id={project_id}")
         
         # Get the task for monitoring
         import tasknode_task  # pylint: disable=E0401,C0415
@@ -113,13 +115,16 @@ class Method:
             
             # Add OAuth token if available
             if mcp_tokens:
-                server_key = canonical_resource(url)
+                server_key = canonical_resource(normalized_url)
+                original_server_key = canonical_resource(url)
                 # can be None or type for pre-built mcp, e.g. "mcp_github"
                 toolkit_type = kwargs.get('toolkit_type')
                 log.debug(f"Looking for token with server_key: {server_key} or toolkit_type: {toolkit_type}")
                 log.debug(f"Available mcp_tokens keys: {list(mcp_tokens.keys())}")
                 
                 token_data = mcp_tokens.get(server_key) if not toolkit_type else mcp_tokens.get(toolkit_type)
+                if not token_data and original_server_key != server_key:
+                    token_data = mcp_tokens.get(original_server_key)
                 # Try exact URL match if canonical didn't work
                 if not token_data:
                     token_data = mcp_tokens.get(url)
@@ -138,23 +143,23 @@ class Method:
                     log.warning(f"No token found for server_key: {server_key} or url: {url}")
             
             # Discover tools from the MCP server
-            log.debug(f"Discovering tools from MCP server: {url} (ssl_verify={ssl_verify})")
+            log.debug(f"Discovering tools from MCP server: {normalized_url} (ssl_verify={ssl_verify})")
             tools_list = discover_mcp_tools(
-                url=url,
+                url=normalized_url,
                 headers=connection_headers,
                 timeout=timeout,
                 session_id=session_id,
                 ssl_verify=ssl_verify,
             )
             
-            log.debug(f"Successfully discovered {len(tools_list)} tools from {url}")
+            log.debug(f"Successfully discovered {len(tools_list)} tools from {normalized_url}")
             
             # Build success response
             result = {
                 'success': True,
                 'tools': tools_list,
                 'count': len(tools_list),
-                'server_url': url,
+                'server_url': normalized_url,
             }
             
             # Build response metadata
@@ -162,7 +167,7 @@ class Method:
                 'tool_output': tools_list,
                 'success': True,
                 'count': len(tools_list),
-                'server_url': url,
+                'server_url': normalized_url,
             }
             
             # Emit success response via socket
@@ -182,7 +187,7 @@ class Method:
             log.info(f"MCP authorization required for server: {url}")
             
             # Get OAuth metadata from the exception
-            response_metadata = e.to_dict()
+            response_metadata = normalize_mcp_auth_metadata_urls(e.to_dict()) or {}
             response_metadata['chat_project_id'] = tasknode_task.meta.get('chat_project_id')
             
             # Emit the mcp_authorization_required event
@@ -196,7 +201,7 @@ class Method:
             return {
                 'success': False,
                 'error': str(e),
-                'server_url': url,
+                'server_url': normalized_url,
                 'requires_authorization': True,
                 'response_metadata': response_metadata,
             }
@@ -216,7 +221,7 @@ class Method:
                 content=error_msg,
                 response_metadata={
                     'error': error_msg,
-                    'server_url': url,
+                    'server_url': normalized_url,
                 }
             ).model_dump_json()
             error_event = json.loads(error_event)
@@ -225,7 +230,7 @@ class Method:
             return {
                 'success': False,
                 'error': error_msg,
-                'server_url': url,
+                'server_url': normalized_url,
             }
             
         finally:

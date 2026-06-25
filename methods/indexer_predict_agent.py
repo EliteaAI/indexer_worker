@@ -34,6 +34,9 @@ from .agent_common import (
     temp_elitea_client,
     fetch_langfuse_config,
     unsecret_mcp_tools,
+    is_mcp_authorization_required_error,
+    build_mcp_auth_pause_result,
+    build_mcp_auth_required_result,
 )
 from ..utils.agent_execution_common import (
     setup_memory,
@@ -61,6 +64,7 @@ from ..utils.agent_execution_common import (
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
+from ..utils.funcs import expand_mcp_token_aliases
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -289,6 +293,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Create predict agent
             steps_limit = kwargs.get("steps_limit")
+            raw_mcp_tokens = kwargs.get("mcp_tokens", None)
+            mcp_tokens = expand_mcp_token_aliases(raw_mcp_tokens)
             agent_executor = client.predict_agent(
                 llm=llm,
                 instructions=application_data.get('instructions', 'You are a helpful assistant.'),
@@ -296,7 +302,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 chat_history=chat_history,
                 memory=memory,
                 debug_mode=kwargs.get("debug_mode", True),
-                mcp_tokens=kwargs.get("mcp_tokens", None),
+                mcp_tokens=mcp_tokens,
                 conversation_id=conversation_id,
                 ignored_mcp_servers=kwargs.get("ignored_mcp_servers", None),
                 persona=kwargs.get("persona", "generic"),
@@ -306,6 +312,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 step_limit=steps_limit,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
+                user_declined_mcp_servers=kwargs.get("user_declined_mcp_servers") or [],
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # parallel_subagent_dispatch is enabled — an ad-hoc predict parent
                 # whose agent has Application tools also fans out and must park.
@@ -377,7 +384,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     thread_id,
                     kwargs.get('checkpoint_id'),
                     invoke_input,
-                    invoke_config
+                    invoke_config,
+                    user_input=user_input,
+                    user_declined_mcp_servers=kwargs.get('user_declined_mcp_servers') or [],
                 )
 
             # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes
@@ -387,6 +396,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Invoke the agent executor with Langfuse trace context
             with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
+
+            # Callback-path MCP auth interruption: pause immediately and do not
+            # emit regular response completion events for this run.
+            pause_result = build_mcp_auth_pause_result(elitea_callback, chat_history)
+            if pause_result:
+                return pause_result
 
             if elitea_callback.llm_error:
                 raise elitea_callback.llm_error
@@ -465,17 +480,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except McpAuthorizationRequired as e:
-            auth_metadata = e.to_dict()
-            auth_metadata['chat_project_id'] = tasknode_task.meta.get('chat_project_id')
-            node_interface.emit(
-                type=EventTypes.mcp_authorization_required,
-                content=str(e),
-                response_metadata=auth_metadata,
+            pause_result = build_mcp_auth_pause_result(elitea_callback, chat_history, fallback_error=str(e))
+            if pause_result:
+                return pause_result
+            return build_mcp_auth_required_result(
+                node_interface,
+                e,
+                tasknode_task.meta.get('chat_project_id'),
+                chat_history,
             )
-            return {
-                'chat_history': chat_history,
-                'error': str(e),
-            }
         except AssertionError:
             return execution_error(
                 node_interface, user_input, chat_history, f"AssertionError on user input: {user_input}",
@@ -508,6 +521,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except Exception as e:
+            if is_mcp_authorization_required_error(e):
+                return build_mcp_auth_required_result(
+                    node_interface,
+                    e,
+                    tasknode_task.meta.get('chat_project_id'),
+                    chat_history,
+                )
             # Check for LLM rate limit errors
             if LLM_RATE_LIMIT_ERRORS and isinstance(e, LLM_RATE_LIMIT_ERRORS):
                 return execution_error(

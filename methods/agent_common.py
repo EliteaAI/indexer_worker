@@ -25,10 +25,14 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import requests
-from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
+from elitea_sdk.runtime.utils.mcp_oauth import (
+    McpAuthorizationRequired,
+    infer_authorization_servers_from_realm,
+)
 from langchain_core.callbacks import BaseCallbackHandler  # pylint: disable=E0401
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, LLMResult
@@ -39,6 +43,8 @@ from ..utils.exceptions import InternalSDKError
 from ..utils.funcs import (
     extract_finish_reason,
     extract_token_usage,
+    normalize_mcp_auth_metadata_urls,
+    normalize_mcp_server_url,
     num_tokens_from_messages,
 )
 from ..utils.node_interface import (
@@ -58,6 +64,183 @@ PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
 
 # Per-worker cache: project_id -> connstr (immutable after project creation, safe to hold forever)
 _pgvector_connstr_cache: dict = {}
+
+
+def _is_mcp_authorization_required_error(exc: Exception) -> bool:
+    """Return True for McpAuthorizationRequired, including reloaded class instances.
+
+    In dev-reload mode, SDK modules may be re-imported and class identity checks
+    can fail across boundaries even when the exception shape is the same.
+    """
+    if isinstance(exc, McpAuthorizationRequired):
+        return True
+    return (
+        getattr(exc.__class__, "__name__", "") == "McpAuthorizationRequired"
+        and hasattr(exc, "server_url")
+    )
+
+
+def _is_http_url(value: Optional[str]) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _normalize_authorization_servers(value: Any) -> Optional[list]:
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        return None
+    normalized = [
+        normalize_mcp_server_url(v)
+        for v in candidates
+        if isinstance(v, str) and _is_http_url(v)
+    ]
+    return normalized or None
+
+
+def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
+    """Build stable metadata dict for MCP auth required events."""
+    if hasattr(exc, "to_dict") and callable(exc.to_dict):
+        try:
+            metadata = exc.to_dict()
+            metadata = normalize_mcp_auth_metadata_urls(metadata) or metadata
+            server_url = metadata.get("server_url")
+            authorization_servers = _normalize_authorization_servers(
+                metadata.get("authorization_servers")
+            )
+            resource_metadata = metadata.get("resource_metadata")
+
+            if authorization_servers:
+                metadata["authorization_servers"] = authorization_servers
+            else:
+                metadata.pop("authorization_servers", None)
+
+            if isinstance(resource_metadata, dict):
+                resource_auth_servers = _normalize_authorization_servers(
+                    resource_metadata.get("authorization_servers")
+                )
+                if resource_auth_servers:
+                    resource_metadata = {
+                        **resource_metadata,
+                        "authorization_servers": resource_auth_servers,
+                    }
+                elif "authorization_servers" in resource_metadata:
+                    resource_metadata = {
+                        key: value
+                        for key, value in resource_metadata.items()
+                        if key != "authorization_servers"
+                    }
+                metadata["resource_metadata"] = resource_metadata
+
+            if not authorization_servers and isinstance(resource_metadata, dict):
+                authorization_servers = _normalize_authorization_servers(
+                    resource_metadata.get("authorization_servers")
+                )
+
+            if not authorization_servers and _is_http_url(metadata.get("server_url")):
+                inferred_servers = infer_authorization_servers_from_realm(
+                    metadata.get("www_authenticate"),
+                    metadata.get("server_url"),
+                ) or [normalize_mcp_server_url(metadata.get("server_url"))]
+                inferred_servers = _normalize_authorization_servers(inferred_servers)
+                if not inferred_servers:
+                    return metadata
+                authorization_servers = inferred_servers
+                if not isinstance(resource_metadata, dict):
+                    metadata["resource_metadata"] = {
+                        "authorization_servers": inferred_servers,
+                    }
+                elif not resource_metadata.get("authorization_servers"):
+                    metadata["resource_metadata"] = {
+                        **resource_metadata,
+                        "authorization_servers": inferred_servers,
+                    }
+
+            if authorization_servers:
+                metadata["authorization_servers"] = authorization_servers
+            return metadata
+        except Exception:
+            pass
+    resource_metadata = getattr(exc, "resource_metadata", None)
+    authorization_servers = None
+    if isinstance(resource_metadata, dict):
+        authorization_servers = _normalize_authorization_servers(
+            resource_metadata.get("authorization_servers")
+        )
+    server_url = getattr(exc, "server_url", None)
+    server_url = normalize_mcp_server_url(server_url)
+    www_authenticate = getattr(exc, "www_authenticate", None)
+    if not authorization_servers and _is_http_url(server_url):
+        authorization_servers = (
+            infer_authorization_servers_from_realm(www_authenticate, server_url)
+            or [server_url]
+        )
+        authorization_servers = _normalize_authorization_servers(authorization_servers)
+    if authorization_servers:
+        if not isinstance(resource_metadata, dict):
+            resource_metadata = {
+                "authorization_servers": authorization_servers,
+            }
+        elif not resource_metadata.get("authorization_servers"):
+            resource_metadata = {
+                **resource_metadata,
+                "authorization_servers": authorization_servers,
+            }
+    return {
+        "message": str(exc),
+        "server_url": server_url,
+        "resource_metadata_url": getattr(exc, "resource_metadata_url", None),
+        "www_authenticate": www_authenticate,
+        "resource_metadata": resource_metadata,
+        "authorization_servers": authorization_servers,
+        "status": getattr(exc, "status", None),
+        "tool_name": getattr(exc, "tool_name", None),
+        "toolkit_type": getattr(exc, "toolkit_type", None),
+    }
+
+
+def is_mcp_authorization_required_error(exc: Exception) -> bool:
+    """Public wrapper for reload-safe MCP auth-required exception detection."""
+    return _is_mcp_authorization_required_error(exc)
+
+
+def build_mcp_auth_pause_result(
+    elitea_callback,
+    chat_history: list,
+    fallback_error: str = "Authorization required",
+) -> Optional[dict]:
+    """Return pause result when callback already emitted MCP auth-required event."""
+    if getattr(elitea_callback, "mcp_auth_pause_payload", None):
+        return {
+            "chat_history": chat_history,
+            "error": getattr(elitea_callback, "mcp_auth_pause_message", None) or fallback_error,
+        }
+    return None
+
+
+def build_mcp_auth_required_result(
+    node_interface: NodeEventInterface,
+    exc: Exception,
+    chat_project_id: Optional[int],
+    chat_history: list,
+) -> dict:
+    """Emit mcp_authorization_required with normalized metadata and return stop payload."""
+    auth_metadata = _mcp_auth_error_to_metadata(exc)
+    if chat_project_id is not None:
+        auth_metadata["chat_project_id"] = chat_project_id
+    node_interface.emit(
+        type=EventTypes.mcp_authorization_required,
+        content=str(exc),
+        response_metadata=auth_metadata,
+    )
+    return {
+        "chat_history": chat_history,
+        "error": str(exc),
+    }
 
 
 @contextmanager
@@ -469,6 +652,10 @@ class EliteACallback(BaseCallbackHandler):
         self.project_id: int = project_id
         self.chat_project_id: int = chat_project_id
         self.llm_error: Optional[InternalSDKError] = None
+        # If an MCP auth-required tool error is observed in callback flow,
+        # capture it so caller can pause execution and avoid emitting normal completion.
+        self.mcp_auth_pause_payload: Optional[dict] = None
+        self.mcp_auth_pause_message: Optional[str] = None
         self.toolkit_metadata: dict = toolkit_metadata or {}
         # Extract and cache toolkit_name and toolkit_type from toolkit_metadata for injection
         self.cached_toolkit_name = None
@@ -484,6 +671,10 @@ class EliteACallback(BaseCallbackHandler):
                 f"EliteACallback cached_toolkit_name: {self.cached_toolkit_name}, cached_toolkit_type: {self.cached_toolkit_type}"
             )
         super().__init__()
+
+    def _is_mcp_auth_paused(self) -> bool:
+        """Return True when this run is paused waiting for MCP authorization."""
+        return self.mcp_auth_pause_payload is not None
 
     def emit_subagent_invocation_chip(self, task_text, response, agent_type=None):
         """Emit the PARENT's bare sub-agent invocation chip for a durable child (#4993).
@@ -599,6 +790,8 @@ class EliteACallback(BaseCallbackHandler):
 
     def on_tool_start(self, *args, run_id: UUID, **kwargs):
         """Callback"""
+        if self._is_mcp_auth_paused():
+            return
         if self.debug:
             log.debug("on_tool_start(%s, %s)", args, kwargs)
         tool_name = args[0].get("name")
@@ -763,6 +956,8 @@ class EliteACallback(BaseCallbackHandler):
 
     def on_tool_end(self, *args, run_id: UUID, **kwargs):
         """Callback"""
+        if self._is_mcp_auth_paused():
+            return
         if self.debug:
             log.debug("on_tool_end(%s, %s)", args, kwargs)
         tool_run_id = str(run_id)
@@ -871,13 +1066,15 @@ class EliteACallback(BaseCallbackHandler):
 
     def on_tool_error(self, *args, run_id: UUID, **kwargs):
         """Callback"""
+        if self._is_mcp_auth_paused():
+            return
         if self.debug:
             log.debug("on_tool_error(%s, %s)", args, kwargs)
         tool_run_id = str(run_id)
         tool_exception = args[0]
         now = datetime.now(tz=timezone.utc).isoformat()
 
-        if isinstance(tool_exception, McpAuthorizationRequired):
+        if _is_mcp_authorization_required_error(tool_exception):
             error_str = (
                 tool_exception.args[0]
                 if tool_exception.args
@@ -901,14 +1098,19 @@ class EliteACallback(BaseCallbackHandler):
                 )
                 self.tool_calls[tool_run_id] = tool_call
 
-            auth_payload = tool_exception.to_dict()
+            auth_payload = _mcp_auth_error_to_metadata(tool_exception)
+            auth_tool_name = auth_payload.get("tool_name") or tool_call.tool_name
             auth_payload.update(
                 {
-                    "tool_name": tool_call.tool_name,
+                    "tool_name": auth_tool_name,
                     "tool_run_id": tool_run_id,
                     "chat_project_id": self.chat_project_id,  # Include for DB update
                 }
             )
+
+            # Mark this run as paused for MCP auth so caller can stop post-invoke flow.
+            self.mcp_auth_pause_payload = auth_payload
+            self.mcp_auth_pause_message = error_str
 
             self.node_interface.emit(
                 type=EventTypes.mcp_authorization_required,
@@ -982,6 +1184,8 @@ class EliteACallback(BaseCallbackHandler):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ):
+        if self._is_mcp_auth_paused():
+            return
         if self.debug:
             log.debug(f"on_llm_start run_id={run_id}, node={metadata.get('langgraph_node') if metadata else 'N/A'}")
 
@@ -1035,6 +1239,8 @@ class EliteACallback(BaseCallbackHandler):
         self, *args, run_id: UUID, parent_run_id: UUID = None, **kwargs
     ):
         """Callback"""
+        if self._is_mcp_auth_paused():
+            return
         if self.debug:
             log.debug("on_llm_new_token(%s, %s)", args, kwargs)
 
@@ -1258,6 +1464,8 @@ class EliteACallback(BaseCallbackHandler):
             log.debug("on_text(%s, %s)", args, kwargs)
 
     def on_llm_end(self, response: LLMResult, run_id: UUID, **kwargs) -> None:
+        if self._is_mcp_auth_paused():
+            return
         if self.debug:
             log.debug("on_llm_end(%s, %s)", response, kwargs)
 
