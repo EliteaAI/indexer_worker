@@ -283,6 +283,32 @@ def fetch_langfuse_config(client) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _sanitize_input_for_event(user_input):
+    """Strip resolved base64 image data from user_input before it goes into an event.
+
+    ``resolve_filepath_images`` rewrites each ``filepath:`` image chunk in-place to
+    a full-resolution ``data:<mime>;base64,...`` URL for the LLM/persistence. That
+    inflated payload must not ride along in error events to the browser — the UI
+    already has the image. Replace each image_url chunk with a small placeholder;
+    leave text chunks (and plain-string inputs) untouched. Returns a copy; never
+    mutates the original list.
+    """
+    if not isinstance(user_input, list):
+        return user_input
+    sanitized = []
+    for chunk in user_input:
+        if isinstance(chunk, dict) and chunk.get("type") == "image_url":
+            url = (chunk.get("image_url") or {}).get("url", "")
+            if url.startswith("data:") and ";" in url:
+                mime = url[5:url.find(";")]
+            else:
+                mime = "image"
+            sanitized.append({"type": "image_url", "image_url": {"url": f"[{mime}]"}})
+        else:
+            sanitized.append(chunk)
+    return sanitized
+
+
 def execution_error(
     node_interface: NodeEventInterface,
     user_input: str,
@@ -326,7 +352,7 @@ def execution_error(
         response_metadata={
             "tool_name": "Agent Exception Stacktrace",
             "tool_run_id": exception_uid,
-            "tool_meta": user_input,
+            "tool_meta": _sanitize_input_for_event(user_input),
             "tool_inputs": "",
         },
     )
