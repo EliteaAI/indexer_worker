@@ -749,6 +749,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Create application agent
             _child_dispatcher = get_child_dispatcher(self.descriptor.config)
+            elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
             agent_executor = client.application(
                 application_id=kwargs.get("application", {})["id"],
                 application_version_id=kwargs.get("application", {})["version_id"],
