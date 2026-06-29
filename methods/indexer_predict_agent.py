@@ -387,6 +387,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     invoke_config,
                     user_input=user_input,
                     user_declined_mcp_servers=kwargs.get('user_declined_mcp_servers') or [],
+                    mcp_tokens=mcp_tokens,
                 )
 
             # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes

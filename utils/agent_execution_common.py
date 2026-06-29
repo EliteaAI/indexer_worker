@@ -533,6 +533,7 @@ def configure_checkpoint_resume(
     invoke_config: Dict[str, Any],
     user_input: Optional[str] = None,
     user_declined_mcp_servers: Optional[List[Dict[str, Any]]] = None,
+    mcp_tokens: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Configure checkpoint resume if needed.
@@ -545,8 +546,12 @@ def configure_checkpoint_resume(
         invoke_config: Current invoke config dict
         user_input: Original user question (used to build continuation message)
         user_declined_mcp_servers: List of MCP servers the user skipped auth for.
-            When non-empty, a skip continuation message is generated so the LLM
-            knows auth was declined (not completed) and includes the reason.
+            When non-empty AND no new tokens were provided, a skip continuation
+            message is generated so the LLM knows auth was declined.
+        mcp_tokens: Dict of newly-authorized MCP server tokens for this resume.
+            When non-empty it means the user just authorized at least one server,
+            so the "authorization completed" message is used even if
+            user_declined_mcp_servers also contains other servers that were skipped.
 
     Returns:
         Tuple of (modified_invoke_input, modified_invoke_config)
@@ -562,8 +567,10 @@ def configure_checkpoint_resume(
 
         if checkpoint_id:
             declined = user_declined_mcp_servers or []
-            if declined:
-                # User clicked Skip — tell the LLM auth was declined, include reason(s).
+            authorized = bool(mcp_tokens)  # True if the user just authorized at least one server
+
+            if declined and not authorized:
+                # User clicked Skip for all servers — tell the LLM auth was declined.
                 # This prevents "auth completed" confusion and allows the LLM to
                 # acknowledge the skip and answer without MCP tools.
                 skip_details = []
@@ -600,17 +607,33 @@ def configure_checkpoint_resume(
                         "or explain that you cannot complete it without them."
                     )
             else:
-                # User completed (or attempted) authorization — proceed with the tools.
+                # User completed authorization for at least one server — proceed with the tools.
                 # Repeating the original user question avoids the LLM treating
                 # the stale "auth initiated" checkpoint messages as still pending.
+                # If some other servers were also declined in this session, mention it
+                # so the LLM knows those specific tools are still unavailable.
+                declined_note = ""
+                if declined:
+                    skip_details = []
+                    for s in declined:
+                        if not isinstance(s, dict):
+                            continue
+                        server = (s.get("server_url") or "").strip()
+                        if server:
+                            skip_details.append(server)
+                    if skip_details:
+                        declined_note = (
+                            f" Note: authorization for the following servers was declined and those tools "
+                            f"remain unavailable: {', '.join(skip_details)}."
+                        )
                 if user_input:
                     continuation_message = (
-                        f"The required authorization has been completed. "
+                        f"The required authorization has been completed.{declined_note} "
                         f"Please proceed with the original request: {user_input}"
                     )
                 else:
                     continuation_message = (
-                        "The required authorization has been completed. "
+                        f"The required authorization has been completed.{declined_note} "
                         "Please proceed with the original request using the newly available tools."
                     )
             invoke_input = {'input': continuation_message}
