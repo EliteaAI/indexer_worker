@@ -11,7 +11,10 @@ from langchain_core.outputs import LLMResult
 from pylon.core.tools import log
 
 from .constants import VISION_SYSTEM_MESSAGE, ATTACHMENT_SYSTEM_MESSAGE_TEMPLATE
-from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
+from elitea_sdk.runtime.utils.mcp_oauth import (
+    McpAuthorizationRequired,
+    infer_authorization_servers_from_realm,
+)
 
 
 # Development mode flag - set via environment variable or config
@@ -547,6 +550,123 @@ def _is_mcp_authorization_required_error(exc: Exception) -> bool:
 def is_mcp_authorization_required_error(exc: Exception) -> bool:
     """Public wrapper for reload-safe MCP auth-required exception detection."""
     return _is_mcp_authorization_required_error(exc)
+
+
+def _normalize_authorization_servers(value: Any) -> Optional[list]:
+    """Normalize a single URL string or list of URLs for MCP authorization_servers fields."""
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        return None
+    normalized = [
+        normalize_mcp_server_url(v)
+        for v in candidates
+        if isinstance(v, str) and _is_http_url(v)
+    ]
+    return normalized or None
+
+
+def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
+    """Build stable metadata dict for MCP auth required events."""
+    if hasattr(exc, "to_dict") and callable(exc.to_dict):
+        try:
+            metadata = exc.to_dict()
+            metadata = normalize_mcp_auth_metadata_urls(metadata) or metadata
+            server_url = metadata.get("server_url")
+            authorization_servers = _normalize_authorization_servers(
+                metadata.get("authorization_servers")
+            )
+            resource_metadata = metadata.get("resource_metadata")
+
+            if authorization_servers:
+                metadata["authorization_servers"] = authorization_servers
+            else:
+                metadata.pop("authorization_servers", None)
+
+            if isinstance(resource_metadata, dict):
+                resource_auth_servers = _normalize_authorization_servers(
+                    resource_metadata.get("authorization_servers")
+                )
+                if resource_auth_servers:
+                    resource_metadata = {
+                        **resource_metadata,
+                        "authorization_servers": resource_auth_servers,
+                    }
+                elif "authorization_servers" in resource_metadata:
+                    resource_metadata = {
+                        key: value
+                        for key, value in resource_metadata.items()
+                        if key != "authorization_servers"
+                    }
+                metadata["resource_metadata"] = resource_metadata
+
+            if not authorization_servers and isinstance(resource_metadata, dict):
+                authorization_servers = _normalize_authorization_servers(
+                    resource_metadata.get("authorization_servers")
+                )
+
+            if not authorization_servers and _is_http_url(metadata.get("server_url")):
+                inferred_servers = infer_authorization_servers_from_realm(
+                    metadata.get("www_authenticate"),
+                    metadata.get("server_url"),
+                ) or [normalize_mcp_server_url(metadata.get("server_url"))]
+                inferred_servers = _normalize_authorization_servers(inferred_servers)
+                if not inferred_servers:
+                    return metadata
+                authorization_servers = inferred_servers
+                if not isinstance(resource_metadata, dict):
+                    metadata["resource_metadata"] = {
+                        "authorization_servers": inferred_servers,
+                    }
+                elif not resource_metadata.get("authorization_servers"):
+                    metadata["resource_metadata"] = {
+                        **resource_metadata,
+                        "authorization_servers": inferred_servers,
+                    }
+
+            if authorization_servers:
+                metadata["authorization_servers"] = authorization_servers
+            return metadata
+        except Exception:
+            pass
+    resource_metadata = getattr(exc, "resource_metadata", None)
+    authorization_servers = None
+    if isinstance(resource_metadata, dict):
+        authorization_servers = _normalize_authorization_servers(
+            resource_metadata.get("authorization_servers")
+        )
+    server_url = getattr(exc, "server_url", None)
+    server_url = normalize_mcp_server_url(server_url)
+    www_authenticate = getattr(exc, "www_authenticate", None)
+    if not authorization_servers and _is_http_url(server_url):
+        authorization_servers = (
+            infer_authorization_servers_from_realm(www_authenticate, server_url)
+            or [server_url]
+        )
+        authorization_servers = _normalize_authorization_servers(authorization_servers)
+    if authorization_servers:
+        if not isinstance(resource_metadata, dict):
+            resource_metadata = {
+                "authorization_servers": authorization_servers,
+            }
+        elif not resource_metadata.get("authorization_servers"):
+            resource_metadata = {
+                **resource_metadata,
+                "authorization_servers": authorization_servers,
+            }
+    return {
+        "message": str(exc),
+        "server_url": server_url,
+        "resource_metadata_url": getattr(exc, "resource_metadata_url", None),
+        "www_authenticate": www_authenticate,
+        "resource_metadata": resource_metadata,
+        "authorization_servers": authorization_servers,
+        "status": getattr(exc, "status", None),
+        "tool_name": getattr(exc, "tool_name", None),
+        "toolkit_type": getattr(exc, "toolkit_type", None),
+    }
 
 
 # ---------------------------------------------------------------------------
