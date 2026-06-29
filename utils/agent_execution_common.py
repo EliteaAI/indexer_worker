@@ -563,7 +563,20 @@ def configure_checkpoint_resume(
                 'configurable': {'thread_id': thread_id}
             }))
             if states:
-                checkpoint_id = states[0].config['configurable']['checkpoint_id']
+                last_state = states[0]
+                # Only resume if the pipeline is actually paused (has pending nodes to execute).
+                # A completed run has next=() — resuming from its final checkpoint would
+                # incorrectly re-enter the graph with a stale state (e.g., when MCP auth
+                # fails during init before any execution, the previous completed run's
+                # checkpoints would be found here and must not be used).
+                if last_state.next:
+                    checkpoint_id = last_state.config['configurable']['checkpoint_id']
+                else:
+                    log.warning(
+                        'Last checkpoint for thread %s is from a completed run '
+                        '(next=%s), will start fresh instead of resuming',
+                        thread_id, last_state.next
+                    )
 
         if checkpoint_id:
             declined = user_declined_mcp_servers or []
