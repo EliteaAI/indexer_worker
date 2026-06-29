@@ -25,12 +25,10 @@ from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import requests
 from elitea_sdk.runtime.utils.mcp_oauth import (
-    McpAuthorizationRequired,
     infer_authorization_servers_from_realm,
 )
 from langchain_core.callbacks import BaseCallbackHandler  # pylint: disable=E0401
@@ -41,6 +39,9 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from ..utils.exceptions import InternalSDKError
 from ..utils.funcs import (
+    _is_http_url,
+    _is_mcp_authorization_required_error,
+    is_mcp_authorization_required_error,
     extract_finish_reason,
     extract_token_usage,
     normalize_mcp_auth_metadata_urls,
@@ -65,26 +66,6 @@ PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
 # Per-worker cache: project_id -> connstr (immutable after project creation, safe to hold forever)
 _pgvector_connstr_cache: dict = {}
 
-
-def _is_mcp_authorization_required_error(exc: Exception) -> bool:
-    """Return True for McpAuthorizationRequired, including reloaded class instances.
-
-    In dev-reload mode, SDK modules may be re-imported and class identity checks
-    can fail across boundaries even when the exception shape is the same.
-    """
-    if isinstance(exc, McpAuthorizationRequired):
-        return True
-    return (
-        getattr(exc.__class__, "__name__", "") == "McpAuthorizationRequired"
-        and hasattr(exc, "server_url")
-    )
-
-
-def _is_http_url(value: Optional[str]) -> bool:
-    if not isinstance(value, str):
-        return False
-    parsed = urlparse(value.strip())
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _normalize_authorization_servers(value: Any) -> Optional[list]:
@@ -201,11 +182,6 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
         "tool_name": getattr(exc, "tool_name", None),
         "toolkit_type": getattr(exc, "toolkit_type", None),
     }
-
-
-def is_mcp_authorization_required_error(exc: Exception) -> bool:
-    """Public wrapper for reload-safe MCP auth-required exception detection."""
-    return _is_mcp_authorization_required_error(exc)
 
 
 def build_mcp_auth_pause_result(

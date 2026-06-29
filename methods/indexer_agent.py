@@ -17,7 +17,6 @@
 
 """ Method for Application Agent """
 from copy import deepcopy
-import re
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
@@ -72,13 +71,18 @@ from ..utils.agent_execution_common import (
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
-from ..utils.funcs import get_mcp_server_settings, normalize_mcp_server_url, expand_mcp_token_aliases
+from ..utils.funcs import (
+    _extract_mcp_server_url,
+    _is_http_url,
+    get_mcp_server_settings,
+    normalize_mcp_server_url,
+    expand_mcp_token_aliases,
+)
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import (
     McpAuthorizationRequired,
     build_mcp_auth_decision_result,
-    _is_http_url,
     has_active_mcp_token,
 )
 from openai import InternalServerError
@@ -98,39 +102,6 @@ except ImportError:
 LLM_AUTH_ERRORS_APP = tuple(_LLM_AUTH_ERRORS_APP) if _LLM_AUTH_ERRORS_APP else None
 
 
-
-def _extract_mcp_server_url(settings: Optional[dict]) -> Optional[str]:
-    if not isinstance(settings, dict):
-        return None
-
-    for key in ("url", "server_url", "base_url", "authorization_server_url", "auth_url"):
-        value = settings.get(key)
-        if _is_http_url(value):
-            return normalize_mcp_server_url(value)
-
-    for key in ("authorization_servers", "auth_urls", "urls", "alternative_urls"):
-        values = settings.get(key)
-        if isinstance(values, list):
-            for value in values:
-                if _is_http_url(value):
-                    return normalize_mcp_server_url(value)
-        elif _is_http_url(values):
-            return normalize_mcp_server_url(values)
-
-    # Support args-based MCP configs (for example mcp-remote <url> patterns).
-    for key in ("args", "command_args"):
-        values = settings.get(key)
-        if isinstance(values, list):
-            for value in values:
-                if not isinstance(value, str):
-                    continue
-                if _is_http_url(value):
-                    return normalize_mcp_server_url(value)
-                match = re.search(r"https?://[^\s\"']+", value)
-                if match and _is_http_url(match.group(0)):
-                    return normalize_mcp_server_url(match.group(0))
-
-    return None
 
 
 def _mcp_discovery_url(server_url: str) -> str:

@@ -1,5 +1,6 @@
 # Based on https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb (MIT license)
 import os
+import re
 import sys
 from typing import List, Optional, Dict, Any, Union
 from urllib.parse import urlparse
@@ -10,6 +11,7 @@ from langchain_core.outputs import LLMResult
 from pylon.core.tools import log
 
 from .constants import VISION_SYSTEM_MESSAGE, ATTACHMENT_SYSTEM_MESSAGE_TEMPLATE
+from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
 
 
 # Development mode flag - set via environment variable or config
@@ -409,6 +411,42 @@ def normalize_mcp_toolkit_name(name: str) -> str:
     return normalized
 
 
+# ---------------------------------------------------------------------------
+# URL utility helpers
+# ---------------------------------------------------------------------------
+
+def _is_http_url(value: Optional[str]) -> bool:
+    """Return True if value is a valid HTTP or HTTPS URL."""
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+# ---------------------------------------------------------------------------
+# MCP URL normalisation
+#
+# Mapping structures are used instead of hardcoded if/elif chains so that
+# adding support for a new provider requires only a dict entry.
+# ---------------------------------------------------------------------------
+
+# Deprecated → current path migrations per hostname.
+# key: (hostname, deprecated_path)  value: new_path
+_MCP_URL_MIGRATIONS: Dict[str, Dict[str, str]] = {
+    "mcp.atlassian.com": {
+        "/v1/sse": "/v1/mcp/authv2",
+    },
+}
+
+# Bidirectional path alternates per hostname (for token-key compatibility lookups).
+_MCP_URL_ALTERNATES: Dict[str, Dict[str, str]] = {
+    "mcp.atlassian.com": {
+        "/v1/mcp/authv2": "/v1/sse",
+        "/v1/sse": "/v1/mcp/authv2",
+    },
+}
+
+
 def normalize_mcp_server_url(url: Optional[str]) -> Optional[str]:
     """Normalize MCP server URL values, including deprecated provider endpoints."""
     if not isinstance(url, str):
@@ -419,8 +457,12 @@ def normalize_mcp_server_url(url: Optional[str]) -> Optional[str]:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return normalized
 
-    if parsed.netloc.lower() == "mcp.atlassian.com" and parsed.path.rstrip("/") == "/v1/sse":
-        return f"{parsed.scheme}://{parsed.netloc}/v1/mcp/authv2"
+    host = parsed.netloc.lower()
+    path_map = _MCP_URL_MIGRATIONS.get(host)
+    if path_map:
+        new_path = path_map.get(parsed.path.rstrip("/"))
+        if new_path:
+            return f"{parsed.scheme}://{parsed.netloc}{new_path}"
 
     return normalized
 
@@ -470,14 +512,83 @@ def _atlassian_mcp_alternate_url(url: Optional[str]) -> Optional[str]:
 
     normalized = normalize_mcp_server_url(url)
     parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "mcp.atlassian.com":
+    if parsed.scheme not in {"http", "https"}:
         return None
 
-    path = parsed.path.rstrip("/")
-    if path == "/v1/mcp/authv2":
-        return f"{parsed.scheme}://{parsed.netloc}/v1/sse"
-    if path == "/v1/sse":
-        return f"{parsed.scheme}://{parsed.netloc}/v1/mcp/authv2"
+    host = parsed.netloc.lower()
+    path_map = _MCP_URL_ALTERNATES.get(host)
+    if not path_map:
+        return None
+
+    alt_path = path_map.get(parsed.path.rstrip("/"))
+    if alt_path:
+        return f"{parsed.scheme}://{parsed.netloc}{alt_path}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# MCP exception helpers
+# ---------------------------------------------------------------------------
+
+def _is_mcp_authorization_required_error(exc: Exception) -> bool:
+    """Return True for McpAuthorizationRequired, including reloaded class instances.
+
+    In dev-reload mode, SDK modules may be re-imported and class identity checks
+    can fail across boundaries even when the exception shape is the same.
+    """
+    if isinstance(exc, McpAuthorizationRequired):
+        return True
+    return (
+        getattr(exc.__class__, "__name__", "") == "McpAuthorizationRequired"
+        and hasattr(exc, "server_url")
+    )
+
+
+def is_mcp_authorization_required_error(exc: Exception) -> bool:
+    """Public wrapper for reload-safe MCP auth-required exception detection."""
+    return _is_mcp_authorization_required_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# MCP server URL extraction
+# ---------------------------------------------------------------------------
+
+def _extract_mcp_server_url(settings: Optional[dict]) -> Optional[str]:
+    """Extract and normalise the MCP server URL from a toolkit settings dict.
+
+    Tries common key names in order of specificity, then falls back to scanning
+    list-typed keys, and finally to bare URLs embedded in args/command_args.
+    """
+    if not isinstance(settings, dict):
+        return None
+
+    for key in ("url", "server_url", "base_url", "authorization_server_url", "auth_url"):
+        value = settings.get(key)
+        if _is_http_url(value):
+            return normalize_mcp_server_url(value)
+
+    for key in ("authorization_servers", "auth_urls", "urls", "alternative_urls"):
+        values = settings.get(key)
+        if isinstance(values, list):
+            for value in values:
+                if _is_http_url(value):
+                    return normalize_mcp_server_url(value)
+        elif _is_http_url(values):
+            return normalize_mcp_server_url(values)
+
+    # Support args-based MCP configs (for example mcp-remote <url> patterns).
+    for key in ("args", "command_args"):
+        values = settings.get(key)
+        if isinstance(values, list):
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                if _is_http_url(value):
+                    return normalize_mcp_server_url(value)
+                match = re.search(r"https?://[^\s\"']+", value)
+                if match and _is_http_url(match.group(0)):
+                    return normalize_mcp_server_url(match.group(0))
+
     return None
 
 
