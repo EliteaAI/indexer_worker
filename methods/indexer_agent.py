@@ -17,8 +17,7 @@
 
 """ Method for Application Agent """
 from copy import deepcopy
-from typing import Optional
-
+from typing import Any, Dict, Optional
 from langchain_core.messages import HumanMessage
 
 from pylon.core.tools import log
@@ -33,6 +32,9 @@ from .agent_common import (
     _fetch_pgvector_connstr_with_retry,
     temp_elitea_client,
     fetch_langfuse_config,
+    is_mcp_authorization_required_error,
+    build_mcp_auth_pause_result,
+    build_mcp_auth_required_result,
 )
 from ..utils.checkpoint_utils import (
     compute_pipeline_state_hash,
@@ -65,6 +67,11 @@ from ..utils.agent_execution_common import (
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
+from ..utils.funcs import expand_mcp_token_aliases
+from ..utils.mcp_auth_tools import (
+    _make_mcp_auth_tools,
+    _has_mcp_toolkits,
+)
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -276,15 +283,33 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             context_settings = kwargs.get("context_settings", {})
             context_settings['callbacks'] = create_summarization_callbacks(node_interface)
 
+            # Always provide mcp_auth_control in chat runs that include MCP toolkits.
+            # This guarantees a single, explicit auth flow for all MCP tool usage.
+            user_declined = kwargs.get('user_declined_mcp_servers') or []
+            app_tool_configs = (
+                (kwargs.get("application") or {}).get("version_details", {}).get("tools")
+                or kwargs.get("tools")
+                or []
+            )
+            has_mcp_toolkits = _has_mcp_toolkits(app_tool_configs)
+            raw_mcp_tokens = kwargs.get("mcp_tokens", None)
+            mcp_tokens = expand_mcp_token_aliases(raw_mcp_tokens)
+            additional_tools = (
+                _make_mcp_auth_tools(user_declined, app_tool_configs, mcp_tokens=mcp_tokens)
+                if has_mcp_toolkits
+                else []
+            )
+
             # Create application agent
             _child_dispatcher = get_child_dispatcher(self.descriptor.config)
+            elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
             agent_executor = client.application(
                 application_id=kwargs.get("application", {})["id"],
                 application_version_id=kwargs.get("application", {})["version_id"],
                 memory=memory,
                 application_variables=kwargs.get("application", {}).get('variables'),
                 version_details=deepcopy(version_details),
-                mcp_tokens=kwargs.get("mcp_tokens", None),
+                mcp_tokens=mcp_tokens,
                 conversation_id=conversation_id,
                 ignored_mcp_servers=kwargs.get("ignored_mcp_servers", None),
                 exception_handling_enabled=exception_handling_enabled,
@@ -295,6 +320,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # the operator enabled parallel_subagent_dispatch — switches the
                 # SDK from in-process gather to park-by-returning. None = Track 1.
                 child_dispatcher=_child_dispatcher,
+                tools=additional_tools if additional_tools else None,
             )
 
             # Create callbacks
@@ -394,7 +420,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     thread_id,
                     kwargs.get('checkpoint_id'),
                     invoke_input,
-                    invoke_config
+                    invoke_config,
+                    user_input=user_input,
+                    user_declined_mcp_servers=kwargs.get('user_declined_mcp_servers') or [],
+                    mcp_tokens=mcp_tokens,
                 )
 
             # Parallel sub-agent reconcile (#4993 Track 2): pylon_main re-invokes
@@ -407,6 +436,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Invoke the agent executor with Langfuse trace context
             with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
+
+            # Callback-path MCP auth interruption: pause immediately and do not
+            # emit regular response completion events for this run.
+            pause_result = build_mcp_auth_pause_result(elitea_callback, chat_history)
+            if pause_result:
+                return pause_result
 
             # Parallel sub-agent park (#4993 Track 2): the parent fanned out to
             # 2+ sub-agents and returned parked (specs written, children NOT run
@@ -529,17 +564,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except McpAuthorizationRequired as e:
-            auth_metadata = e.to_dict()
-            auth_metadata['chat_project_id'] = tasknode_task.meta.get('chat_project_id')
-            node_interface.emit(
-                type=EventTypes.mcp_authorization_required,
-                content=str(e),
-                response_metadata=auth_metadata,
+            pause_result = build_mcp_auth_pause_result(elitea_callback, chat_history, fallback_error=str(e))
+            if pause_result:
+                return pause_result
+            return build_mcp_auth_required_result(
+                node_interface,
+                e,
+                tasknode_task.meta.get('chat_project_id'),
+                chat_history,
             )
-            return {
-                'chat_history': chat_history,
-                'error': str(e),
-            }
         except InternalServerError:
             return execution_error(
                 node_interface, user_input, chat_history,
@@ -549,6 +582,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except Exception as e:
+            # Dev-reload-safe fallback: class identity can differ across reloaded SDK modules.
+            if is_mcp_authorization_required_error(e):
+                return build_mcp_auth_required_result(
+                    node_interface,
+                    e,
+                    tasknode_task.meta.get('chat_project_id'),
+                    chat_history,
+                )
+
             # Check for LLM authentication/authorization errors (model access denied, invalid keys, etc.)
             if LLM_AUTH_ERRORS_APP and isinstance(e, LLM_AUTH_ERRORS_APP):
                 error_body = getattr(e, 'body', {}) or {}

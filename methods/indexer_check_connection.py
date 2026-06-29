@@ -21,6 +21,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from pydantic import ValidationError
+from ..utils.funcs import normalize_mcp_auth_metadata_urls
 
 class Method:
     """
@@ -64,7 +65,7 @@ class Method:
         except McpAuthorizationRequired as ex:
             log.info(f"MCP authorization required for configuration check_connection [{configuration_type}]: {str(ex)}")
             # Build auth metadata from the exception (no toolkit_config here — configurations page only)
-            auth_metadata = ex.to_dict()
+            auth_metadata = normalize_mcp_auth_metadata_urls(ex.to_dict())
             return {
                 'success': False,
                 'requires_authorization': True,

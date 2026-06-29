@@ -1,7 +1,9 @@
 # Based on https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb (MIT license)
 import os
+import re
 import sys
 from typing import List, Optional, Dict, Any, Union
+from urllib.parse import urlparse
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.outputs import LLMResult
@@ -9,6 +11,10 @@ from langchain_core.outputs import LLMResult
 from pylon.core.tools import log
 
 from .constants import VISION_SYSTEM_MESSAGE, ATTACHMENT_SYSTEM_MESSAGE_TEMPLATE
+from elitea_sdk.runtime.utils.mcp_oauth import (
+    McpAuthorizationRequired,
+    infer_authorization_servers_from_realm,
+)
 
 
 # Development mode flag - set via environment variable or config
@@ -406,6 +412,328 @@ def normalize_mcp_toolkit_name(name: str) -> str:
     if normalized.startswith("mcp_"):
         normalized = normalized[4:]
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# URL utility helpers
+# ---------------------------------------------------------------------------
+
+def _is_http_url(value: Optional[str]) -> bool:
+    """Return True if value is a valid HTTP or HTTPS URL."""
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+# ---------------------------------------------------------------------------
+# MCP URL normalisation
+#
+# Mapping structures are used instead of hardcoded if/elif chains so that
+# adding support for a new provider requires only a dict entry.
+# ---------------------------------------------------------------------------
+
+# Deprecated → current path migrations per hostname.
+# To add a new migration, insert a new hostname entry — no logic changes needed.
+_MCP_URL_MIGRATIONS: Dict[str, Dict[str, str]] = {
+    "mcp.atlassian.com": {
+        "/v1/sse": "/v1/mcp/authv2",
+    },
+}
+
+# Bidirectional path alternates per hostname (for token-key compatibility lookups).
+_MCP_URL_ALTERNATES: Dict[str, Dict[str, str]] = {
+    "mcp.atlassian.com": {
+        "/v1/mcp/authv2": "/v1/sse",
+        "/v1/sse": "/v1/mcp/authv2",
+    },
+}
+
+
+def normalize_mcp_server_url(url: Optional[str]) -> Optional[str]:
+    """Normalize MCP server URL values, including deprecated provider endpoints."""
+    if not isinstance(url, str):
+        return url
+
+    normalized = url.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return normalized
+
+    host = parsed.netloc.lower()
+    path_map = _MCP_URL_MIGRATIONS.get(host)
+    if path_map:
+        new_path = path_map.get(parsed.path.rstrip("/"))
+        if new_path:
+            return f"{parsed.scheme}://{parsed.netloc}{new_path}"
+
+    return normalized
+
+
+def normalize_mcp_auth_metadata_urls(auth_metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Normalize MCP auth metadata URL fields for consistent login behavior."""
+    if not isinstance(auth_metadata, dict):
+        return auth_metadata
+
+    metadata = dict(auth_metadata)
+    metadata["server_url"] = normalize_mcp_server_url(metadata.get("server_url"))
+    metadata["resource_metadata_url"] = normalize_mcp_server_url(metadata.get("resource_metadata_url"))
+
+    auth_servers = metadata.get("authorization_servers")
+    if isinstance(auth_servers, list):
+        metadata["authorization_servers"] = [
+            normalize_mcp_server_url(url) if isinstance(url, str) else url
+            for url in auth_servers
+        ]
+
+    resource_metadata = metadata.get("resource_metadata")
+    if isinstance(resource_metadata, dict):
+        resource_metadata = dict(resource_metadata)
+        resource_auth_servers = resource_metadata.get("authorization_servers")
+        if isinstance(resource_auth_servers, list):
+            resource_metadata["authorization_servers"] = [
+                normalize_mcp_server_url(url) if isinstance(url, str) else url
+                for url in resource_auth_servers
+            ]
+
+        oauth_auth_server = resource_metadata.get("oauth_authorization_server")
+        if isinstance(oauth_auth_server, dict):
+            oauth_auth_server = dict(oauth_auth_server)
+            for key in ("issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint"):
+                oauth_auth_server[key] = normalize_mcp_server_url(oauth_auth_server.get(key))
+            resource_metadata["oauth_authorization_server"] = oauth_auth_server
+
+        metadata["resource_metadata"] = resource_metadata
+
+    return metadata
+
+
+def _mcp_alternate_url(url: Optional[str]) -> Optional[str]:
+    """Return alternate MCP URL for token-key compatibility, or None if not in the mapping."""
+    if not isinstance(url, str):
+        return None
+
+    normalized = normalize_mcp_server_url(url)
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+
+    host = parsed.netloc.lower()
+    path_map = _MCP_URL_ALTERNATES.get(host)
+    if not path_map:
+        return None
+
+    alt_path = path_map.get(parsed.path.rstrip("/"))
+    if alt_path:
+        return f"{parsed.scheme}://{parsed.netloc}{alt_path}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# MCP exception helpers
+# ---------------------------------------------------------------------------
+
+def _is_mcp_authorization_required_error(exc: Exception) -> bool:
+    """Return True for McpAuthorizationRequired, including reloaded class instances.
+
+    In dev-reload mode, SDK modules may be re-imported and class identity checks
+    can fail across boundaries even when the exception shape is the same.
+    """
+    if isinstance(exc, McpAuthorizationRequired):
+        return True
+    return (
+        getattr(exc.__class__, "__name__", "") == "McpAuthorizationRequired"
+        and hasattr(exc, "server_url")
+    )
+
+
+def is_mcp_authorization_required_error(exc: Exception) -> bool:
+    """Public wrapper for reload-safe MCP auth-required exception detection."""
+    return _is_mcp_authorization_required_error(exc)
+
+
+def _normalize_authorization_servers(value: Any) -> Optional[list]:
+    """Normalize a single URL string or list of URLs for MCP authorization_servers fields."""
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        return None
+    normalized = [
+        normalize_mcp_server_url(v)
+        for v in candidates
+        if isinstance(v, str) and _is_http_url(v)
+    ]
+    return normalized or None
+
+
+def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
+    """Build stable metadata dict for MCP auth required events."""
+    if hasattr(exc, "to_dict") and callable(exc.to_dict):
+        try:
+            metadata = exc.to_dict()
+            metadata = normalize_mcp_auth_metadata_urls(metadata) or metadata
+            server_url = metadata.get("server_url")
+            authorization_servers = _normalize_authorization_servers(
+                metadata.get("authorization_servers")
+            )
+            resource_metadata = metadata.get("resource_metadata")
+
+            if authorization_servers:
+                metadata["authorization_servers"] = authorization_servers
+            else:
+                metadata.pop("authorization_servers", None)
+
+            if isinstance(resource_metadata, dict):
+                resource_auth_servers = _normalize_authorization_servers(
+                    resource_metadata.get("authorization_servers")
+                )
+                if resource_auth_servers:
+                    resource_metadata = {
+                        **resource_metadata,
+                        "authorization_servers": resource_auth_servers,
+                    }
+                elif "authorization_servers" in resource_metadata:
+                    resource_metadata = {
+                        key: value
+                        for key, value in resource_metadata.items()
+                        if key != "authorization_servers"
+                    }
+                metadata["resource_metadata"] = resource_metadata
+
+            if not authorization_servers and isinstance(resource_metadata, dict):
+                authorization_servers = _normalize_authorization_servers(
+                    resource_metadata.get("authorization_servers")
+                )
+
+            if not authorization_servers and _is_http_url(metadata.get("server_url")):
+                inferred_servers = infer_authorization_servers_from_realm(
+                    metadata.get("www_authenticate"),
+                    metadata.get("server_url"),
+                ) or [normalize_mcp_server_url(metadata.get("server_url"))]
+                inferred_servers = _normalize_authorization_servers(inferred_servers)
+                if not inferred_servers:
+                    return metadata
+                authorization_servers = inferred_servers
+                if not isinstance(resource_metadata, dict):
+                    metadata["resource_metadata"] = {
+                        "authorization_servers": inferred_servers,
+                    }
+                elif not resource_metadata.get("authorization_servers"):
+                    metadata["resource_metadata"] = {
+                        **resource_metadata,
+                        "authorization_servers": inferred_servers,
+                    }
+
+            if authorization_servers:
+                metadata["authorization_servers"] = authorization_servers
+            return metadata
+        except Exception:
+            pass
+    resource_metadata = getattr(exc, "resource_metadata", None)
+    authorization_servers = None
+    if isinstance(resource_metadata, dict):
+        authorization_servers = _normalize_authorization_servers(
+            resource_metadata.get("authorization_servers")
+        )
+    server_url = getattr(exc, "server_url", None)
+    server_url = normalize_mcp_server_url(server_url)
+    www_authenticate = getattr(exc, "www_authenticate", None)
+    if not authorization_servers and _is_http_url(server_url):
+        authorization_servers = (
+            infer_authorization_servers_from_realm(www_authenticate, server_url)
+            or [server_url]
+        )
+        authorization_servers = _normalize_authorization_servers(authorization_servers)
+    if authorization_servers:
+        if not isinstance(resource_metadata, dict):
+            resource_metadata = {
+                "authorization_servers": authorization_servers,
+            }
+        elif not resource_metadata.get("authorization_servers"):
+            resource_metadata = {
+                **resource_metadata,
+                "authorization_servers": authorization_servers,
+            }
+    return {
+        "message": str(exc),
+        "server_url": server_url,
+        "resource_metadata_url": getattr(exc, "resource_metadata_url", None),
+        "www_authenticate": www_authenticate,
+        "resource_metadata": resource_metadata,
+        "authorization_servers": authorization_servers,
+        "status": getattr(exc, "status", None),
+        "tool_name": getattr(exc, "tool_name", None),
+        "toolkit_type": getattr(exc, "toolkit_type", None),
+    }
+
+
+# ---------------------------------------------------------------------------
+# MCP server URL extraction
+# ---------------------------------------------------------------------------
+
+def _extract_mcp_server_url(settings: Optional[dict]) -> Optional[str]:
+    """Extract and normalise the MCP server URL from a toolkit settings dict.
+
+    Tries common key names in order of specificity, then falls back to scanning
+    list-typed keys, and finally to bare URLs embedded in args/command_args.
+    """
+    if not isinstance(settings, dict):
+        return None
+
+    for key in ("url", "server_url", "base_url", "authorization_server_url", "auth_url"):
+        value = settings.get(key)
+        if _is_http_url(value):
+            return normalize_mcp_server_url(value)
+
+    for key in ("authorization_servers", "auth_urls", "urls", "alternative_urls"):
+        values = settings.get(key)
+        if isinstance(values, list):
+            for value in values:
+                if _is_http_url(value):
+                    return normalize_mcp_server_url(value)
+        elif _is_http_url(values):
+            return normalize_mcp_server_url(values)
+
+    # Support args-based MCP configs (for example mcp-remote <url> patterns).
+    for key in ("args", "command_args"):
+        values = settings.get(key)
+        if isinstance(values, list):
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                if _is_http_url(value):
+                    return normalize_mcp_server_url(value)
+                match = re.search(r"https?://[^\s\"']+", value)
+                if match and _is_http_url(match.group(0)):
+                    return normalize_mcp_server_url(match.group(0))
+
+    return None
+
+
+def expand_mcp_token_aliases(mcp_tokens: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Expand MCP token map with provider-specific key aliases used by runtime lookups."""
+    if not isinstance(mcp_tokens, dict):
+        return mcp_tokens
+
+    expanded = dict(mcp_tokens)
+    added_aliases: list[tuple[str, str]] = []
+    for key, value in list(mcp_tokens.items()):
+        if not isinstance(key, str):
+            continue
+
+        normalized_key = normalize_mcp_server_url(key)
+        if isinstance(normalized_key, str) and normalized_key not in expanded:
+            expanded[normalized_key] = value
+            added_aliases.append((key, normalized_key))
+
+        alternate_key = _mcp_alternate_url(normalized_key)
+        if isinstance(alternate_key, str) and alternate_key not in expanded:
+            expanded[alternate_key] = value
+            added_aliases.append((normalized_key, alternate_key))
+
+    return expanded
 
 
 def get_mcp_server_settings(toolkit_name: str) -> Optional[Dict[str, Any]]:
