@@ -431,7 +431,7 @@ def _is_http_url(value: Optional[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 # Deprecated → current path migrations per hostname.
-# key: (hostname, deprecated_path)  value: new_path
+# To add a new migration, insert a new hostname entry — no logic changes needed.
 _MCP_URL_MIGRATIONS: Dict[str, Dict[str, str]] = {
     "mcp.atlassian.com": {
         "/v1/sse": "/v1/mcp/authv2",
@@ -505,8 +505,8 @@ def normalize_mcp_auth_metadata_urls(auth_metadata: Optional[Dict[str, Any]]) ->
     return metadata
 
 
-def _atlassian_mcp_alternate_url(url: Optional[str]) -> Optional[str]:
-    """Return alternate Atlassian MCP URL variant for token-key compatibility."""
+def _mcp_alternate_url(url: Optional[str]) -> Optional[str]:
+    """Return alternate MCP URL for token-key compatibility, or None if not in the mapping."""
     if not isinstance(url, str):
         return None
 
@@ -608,7 +608,7 @@ def expand_mcp_token_aliases(mcp_tokens: Optional[Dict[str, Any]]) -> Optional[D
             expanded[normalized_key] = value
             added_aliases.append((key, normalized_key))
 
-        alternate_key = _atlassian_mcp_alternate_url(normalized_key)
+        alternate_key = _mcp_alternate_url(normalized_key)
         if isinstance(alternate_key, str) and alternate_key not in expanded:
             expanded[alternate_key] = value
             added_aliases.append((normalized_key, alternate_key))
