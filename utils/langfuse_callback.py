@@ -332,6 +332,34 @@ def langfuse_trace_context(trace_attrs: Optional[Dict[str, Any]], langfuse_clien
         except Exception as e:
             log.warning(f"Failed to exit Langfuse trace context: {e}")
 
+def _is_langfuse_on_shared_provider(langfuse_client, tracing_module):
+    """True only if the Langfuse client emits into the tracing plugin's provider.
+
+    The per-processor flush below only reaches Langfuse when Langfuse's span
+    processor lives on the platform's shared TracerProvider — which holds today
+    solely because the tracing plugin sets the global provider before any
+    Langfuse client is created. If that ever stops being true (SDK or init-order
+    change), Langfuse owns its own provider and must be flushed via its native
+    ``client.flush()`` instead; flushing the shared provider would then flush
+    OTLP/audit but never Langfuse — strictly worse than the old behaviour. Verify
+    the assumption explicitly and fail loud rather than silently regress.
+    """
+    if tracing_module is None or not getattr(tracing_module, "enabled", False):
+        return False
+
+    shared_provider = getattr(tracing_module, "tracer_provider", None)
+    lf_resources = getattr(langfuse_client, "_resources", None)
+    lf_provider = getattr(lf_resources, "tracer_provider", None)
+    if shared_provider is not None and lf_provider is shared_provider:
+        return True
+
+    log.warning(
+        "Langfuse is not attached to the tracing plugin's shared TracerProvider; "
+        "flushing via client.flush(). The Langfuse trace-export wiring may have changed."
+    )
+    return False
+
+
 def flush_langfuse_callback(langfuse_client, handler):
     """
     Flush any pending traces from Langfuse.
@@ -344,10 +372,11 @@ def flush_langfuse_callback(langfuse_client, handler):
     dropping Langfuse's final span batch (the last executed node + the root span
     carrying trace-level I/O). See issues #5391 / #5390.
 
-    So when tracing is enabled we flush each processor independently via the
-    tracing plugin (which guarantees Langfuse's processor is reached). When
-    tracing is NOT enabled, Langfuse owns its own provider and its native
-    ``flush()`` is the correct path.
+    So when Langfuse is confirmed to share that provider we flush each processor
+    independently via the tracing plugin (which guarantees Langfuse's processor
+    is reached). Otherwise (tracing disabled, or Langfuse owns its own provider)
+    its native ``flush()`` is the correct path — see
+    :func:`_is_langfuse_on_shared_provider`.
 
     Args:
         langfuse_client: The Langfuse client instance to flush
@@ -365,7 +394,7 @@ def flush_langfuse_callback(langfuse_client, handler):
         log.debug(f"Tracing module unavailable for Langfuse flush: {e}")
 
     try:
-        if tracing_module is not None and getattr(tracing_module, "enabled", False):
+        if _is_langfuse_on_shared_provider(langfuse_client, tracing_module):
             tracing_module.flush_span_processors()
         else:
             langfuse_client.flush()
