@@ -317,6 +317,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # parallel_subagent_dispatch is enabled — an ad-hoc predict parent
                 # whose agent has Application tools also fans out and must park.
                 child_dispatcher=get_child_dispatcher(self.descriptor.config),
+                mcp_addon_instructions=application_data.get('mcp_addon_instructions'),
             )
 
             # Create callbacks
