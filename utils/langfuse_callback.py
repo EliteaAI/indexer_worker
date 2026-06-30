@@ -20,7 +20,6 @@
 import sys
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
-from opentelemetry import trace as otel_trace_api
 from pylon.core.tools import log
 
 
@@ -336,21 +335,17 @@ def langfuse_trace_context(trace_attrs: Optional[Dict[str, Any]], langfuse_clien
 def _is_langfuse_on_shared_provider(tracing_module):
     """True iff the tracing plugin's provider is the active global OTEL provider.
 
-    The per-processor flush below only reaches Langfuse when Langfuse's span
-    processor lives on the platform's shared TracerProvider. Langfuse adopts the
-    global provider on init (langfuse ``_init_tracer_provider`` reuses a
-    non-Proxy global provider rather than replacing it), and the tracing plugin
-    sets that global provider at startup — so if the tracing plugin's provider IS
-    the active global provider, Langfuse is on it.
-
-    Checked via the public OTEL API + the tracing module's own attribute, with no
-    dependency on Langfuse SDK internals: a Langfuse change can't silently flip
-    this to the starved path. If the precondition does not hold (tracing
-    disabled, or the global provider was replaced), fail loud and let the caller
-    fall back to the native ``client.flush()``.
+    Langfuse adopts the global provider on init, which the tracing plugin sets at
+    startup, so this identity check confirms Langfuse rides the shared provider —
+    using only public OTEL + the tracing module, with no Langfuse-private
+    coupling. On mismatch, warn and let the caller fall back to client.flush().
     """
     if tracing_module is None or not getattr(tracing_module, "enabled", False):
         return False
+
+    # otel is an optional/undeclared dep of indexer_worker; import lazily. Only
+    # reached when a Langfuse client exists, so otel is guaranteed importable.
+    from opentelemetry import trace as otel_trace_api
 
     shared_provider = getattr(tracing_module, "tracer_provider", None)
     if shared_provider is not None and otel_trace_api.get_tracer_provider() is shared_provider:
@@ -364,22 +359,13 @@ def _is_langfuse_on_shared_provider(tracing_module):
 
 
 def flush_langfuse_callback(langfuse_client, handler):
-    """
-    Flush any pending traces from Langfuse.
+    """Flush pending Langfuse traces.
 
-    When the platform ``tracing`` plugin owns the global OTEL TracerProvider,
-    Langfuse appends its span processor to that shared provider. Calling
-    ``langfuse_client.flush()`` then routes through the provider's
-    SynchronousMultiSpanProcessor, whose shared-deadline ``force_flush`` can be
-    starved by an earlier, fork-unsafe OTLP processor in the forked task worker —
-    dropping Langfuse's final span batch (the last executed node + the root span
-    carrying trace-level I/O). See issues #5391 / #5390.
-
-    So when Langfuse is confirmed to share that provider we flush each processor
-    independently via the tracing plugin (which guarantees Langfuse's processor
-    is reached). Otherwise (tracing disabled, or Langfuse owns its own provider)
-    its native ``flush()`` is the correct path — see
-    :func:`_is_langfuse_on_shared_provider`.
+    When Langfuse shares the tracing plugin's global provider, routing through
+    ``langfuse_client.flush()`` can be starved by a fork-unsafe OTLP processor in
+    the forked task worker, dropping the final span batch — the last node and the
+    root span's trace-level I/O (#5391 / #5390). So flush each processor
+    independently via the tracing plugin in that case; otherwise client.flush().
 
     Args:
         langfuse_client: The Langfuse client instance to flush
@@ -388,7 +374,7 @@ def flush_langfuse_callback(langfuse_client, handler):
     if langfuse_client is None:
         return
 
-    # Resolve the tracing plugin (mirrors _get_audit_callback's `.module` deref).
+    # Resolve the tracing plugin module (`.module` deref, see _get_audit_callback).
     try:
         from tools import this
         tracing_module = this.for_module("tracing").module
