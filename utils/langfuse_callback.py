@@ -336,6 +336,19 @@ def flush_langfuse_callback(langfuse_client, handler):
     """
     Flush any pending traces from Langfuse.
 
+    When the platform ``tracing`` plugin owns the global OTEL TracerProvider,
+    Langfuse appends its span processor to that shared provider. Calling
+    ``langfuse_client.flush()`` then routes through the provider's
+    SynchronousMultiSpanProcessor, whose shared-deadline ``force_flush`` can be
+    starved by an earlier, fork-unsafe OTLP processor in the forked task worker —
+    dropping Langfuse's final span batch (the last executed node + the root span
+    carrying trace-level I/O). See issues #5391 / #5390.
+
+    So when tracing is enabled we flush each processor independently via the
+    tracing plugin (which guarantees Langfuse's processor is reached). When
+    tracing is NOT enabled, Langfuse owns its own provider and its native
+    ``flush()`` is the correct path.
+
     Args:
         langfuse_client: The Langfuse client instance to flush
         handler: The CallbackHandler instance (for future use)
@@ -343,8 +356,19 @@ def flush_langfuse_callback(langfuse_client, handler):
     if langfuse_client is None:
         return
 
+    # Resolve the tracing plugin (mirrors _get_audit_callback's `.module` deref).
     try:
-        langfuse_client.flush()
-        log.debug("Langfuse client flushed")
+        from tools import this
+        tracing_module = this.for_module("tracing").module
+    except Exception as e:
+        tracing_module = None
+        log.debug(f"Tracing module unavailable for Langfuse flush: {e}")
+
+    try:
+        if tracing_module is not None and getattr(tracing_module, "enabled", False):
+            tracing_module.flush_span_processors()
+        else:
+            langfuse_client.flush()
+        log.debug("Langfuse traces flushed")
     except Exception as e:
         log.warning(f"Failed to flush Langfuse: {e}")
