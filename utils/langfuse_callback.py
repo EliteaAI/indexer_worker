@@ -332,9 +332,40 @@ def langfuse_trace_context(trace_attrs: Optional[Dict[str, Any]], langfuse_clien
         except Exception as e:
             log.warning(f"Failed to exit Langfuse trace context: {e}")
 
-def flush_langfuse_callback(langfuse_client, handler):
+def _is_langfuse_on_shared_provider(tracing_module):
+    """True iff the tracing plugin's provider is the active global OTEL provider.
+
+    Langfuse adopts the global provider on init, which the tracing plugin sets at
+    startup, so this identity check confirms Langfuse rides the shared provider —
+    using only public OTEL + the tracing module, with no Langfuse-private
+    coupling. On mismatch, warn and let the caller fall back to client.flush().
     """
-    Flush any pending traces from Langfuse.
+    if tracing_module is None or not getattr(tracing_module, "enabled", False):
+        return False
+
+    # otel is an optional/undeclared dep of indexer_worker; import lazily. Only
+    # reached when a Langfuse client exists, so otel is guaranteed importable.
+    from opentelemetry import trace as otel_trace_api
+
+    shared_provider = getattr(tracing_module, "tracer_provider", None)
+    if shared_provider is not None and otel_trace_api.get_tracer_provider() is shared_provider:
+        return True
+
+    log.warning(
+        "Tracing plugin provider is not the active global OTEL provider; "
+        "flushing Langfuse via client.flush(). Trace-export wiring may have changed."
+    )
+    return False
+
+
+def flush_langfuse_callback(langfuse_client, handler):
+    """Flush pending Langfuse traces.
+
+    When Langfuse shares the tracing plugin's global provider, routing through
+    ``langfuse_client.flush()`` can be starved by a fork-unsafe OTLP processor in
+    the forked task worker, dropping the final span batch — the last node and the
+    root span's trace-level I/O (#5391 / #5390). So flush each processor
+    independently via the tracing plugin in that case; otherwise client.flush().
 
     Args:
         langfuse_client: The Langfuse client instance to flush
@@ -343,8 +374,19 @@ def flush_langfuse_callback(langfuse_client, handler):
     if langfuse_client is None:
         return
 
+    # Resolve the tracing plugin module (`.module` deref, see _get_audit_callback).
     try:
-        langfuse_client.flush()
-        log.debug("Langfuse client flushed")
+        from tools import this
+        tracing_module = this.for_module("tracing").module
+    except Exception as e:
+        tracing_module = None
+        log.debug(f"Tracing module unavailable for Langfuse flush: {e}")
+
+    try:
+        if _is_langfuse_on_shared_provider(tracing_module):
+            tracing_module.flush_span_processors()
+        else:
+            langfuse_client.flush()
+        log.debug("Langfuse traces flushed")
     except Exception as e:
         log.warning(f"Failed to flush Langfuse: {e}")
