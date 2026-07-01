@@ -312,6 +312,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 mcp_tokens=mcp_tokens,
                 conversation_id=conversation_id,
                 ignored_mcp_servers=kwargs.get("ignored_mcp_servers", None),
+                user_declined_mcp_servers=user_declined,
                 exception_handling_enabled=exception_handling_enabled,
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
