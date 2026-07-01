@@ -381,7 +381,11 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
         'message', 'filepath', 'tool_name', 'toolkit', 'operation_type', 'meta', 'media_type'
     },
     EventTypes.agent_index_data_status.value: {
-        'id', 'index_name', 'state', 'error', 'reindex', 'indexed', 'updated'
+        'id', 'index_name', 'state', 'error', 'reindex', 'indexed', 'updated',
+        # created_at/updated_on let pylon_main's ensure_index_data_has_task_id match
+        # the row's created_on and stamp task_id (task_id itself is injected in
+        # agent_common.on_custom_event, so it needs no allowlist entry here).
+        'created_at', 'updated_on'
     },
     EventTypes.mcp_authorization_required.value: {
         'server_url', 'resource_metadata_url', 'www_authenticate', 'resource_metadata', 'authorization_servers', 'tool_run_id', 'tool_name'
