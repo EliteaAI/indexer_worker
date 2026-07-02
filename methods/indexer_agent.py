@@ -35,6 +35,7 @@ from .agent_common import (
     is_mcp_authorization_required_error,
     build_mcp_auth_pause_result,
     build_mcp_auth_required_result,
+    unsecret_mcp_tools,
 )
 from ..utils.checkpoint_utils import (
     compute_pipeline_state_hash,
@@ -299,6 +300,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 if has_mcp_toolkits
                 else []
             )
+
+            # Resolve {{secret.xxx}} placeholders in MCP tool settings before passing to SDK
+            if version_details and isinstance(version_details.get("tools"), list):
+                version_details["tools"] = unsecret_mcp_tools(version_details["tools"], client)
 
             # Create application agent
             _child_dispatcher = get_child_dispatcher(self.descriptor.config)
