@@ -740,6 +740,12 @@ def emit_response_events(
             content=hitl_interrupt.get('message', 'Awaiting human review...'),
             response_metadata={
                 'thread_id': thread_id_response,
+                # Tenant the chat lives in. Carried so pylon_main's pause handler
+                # can open the correct DB session and PERSIST this interrupt into
+                # the message-group meta (#4823) — without it the interrupt is
+                # live-only and the Approve/Edit/Reject buttons vanish on reload.
+                # Mirrors the mcp_authorization_required pause payload.
+                'chat_project_id': task_meta.get('chat_project_id'),
                 'message': hitl_interrupt.get('message', 'Awaiting human review...'),
                 'hitl_interrupt': hitl_interrupt,
                 'hitl_interrupts': hitl_interrupts,
