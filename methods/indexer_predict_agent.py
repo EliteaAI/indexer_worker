@@ -261,7 +261,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         internal_tools = kwargs.get("internal_tools", [])
         lazy_tools_mode = 'lazy_tools_mode' in internal_tools
 
-        log.debug(f'adhoc_tools "{adhoc_tools}", internal_tools "{internal_tools}"')
+        log.debug(f'adhoc_tools count={len(adhoc_tools)}, internal_tools "{internal_tools}"')
 
         elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
         try:
