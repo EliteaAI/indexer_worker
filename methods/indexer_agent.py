@@ -526,6 +526,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 image_thumbnails=image_thumbnails,
                 context_info=context_info,
                 invoked_skills=invoke_config['configurable'].get('invoked_skills'),
+                attached_skills=invoke_config['configurable'].get('attached_skills'),
             )
 
             # Capture a HITL pause so the final task result carries it: the

@@ -23,6 +23,7 @@ to reduce code duplication and ensure consistent behavior.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -665,6 +666,40 @@ def configure_checkpoint_resume(
 # Response Events
 # =============================================================================
 
+# Fixed prefix of the SDK's LOADED_SKILL_RESULT (elitea_sdk constants) — a
+# load_skill tool_output matching this is a genuine serve, not an
+# already-active/unknown short-circuit. Keep in sync with the SDK constant.
+_LOADED_SKILL_OUTPUT_RE = re.compile(r'^Skill "([^"]+)" is now active')
+
+
+def _collect_applied_skills(invoked_skills, attached_skills, tool_calls):
+    """Union of ~name-invoked skills and skills activated via load_skill this
+    turn, for message.meta.invoked_skills observability parity (#5698)."""
+    applied = [
+        {'skill_id': s.get('skill_id'), 'name': s.get('name')}
+        for s in (invoked_skills or [])
+        if isinstance(s, dict) and s.get('name')
+    ]
+    seen = {(e.get('name') or '').strip().lower() for e in applied}
+    skill_id_by_name = {
+        (s.get('name') or '').strip().lower(): s.get('skill_id')
+        for s in (attached_skills or [])
+        if isinstance(s, dict) and s.get('name')
+    }
+    for tool_call in (tool_calls or {}).values():
+        if getattr(tool_call, 'tool_name', '') != 'load_skill':
+            continue
+        match = _LOADED_SKILL_OUTPUT_RE.match(getattr(tool_call, 'tool_output', '') or '')
+        if not match:
+            continue
+        name = match.group(1)
+        key = name.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            applied.append({'skill_id': skill_id_by_name.get(key), 'name': name})
+    return applied
+
+
 def emit_response_events(
     node_interface: NodeEventInterface,
     response: Dict[str, Any],
@@ -683,7 +718,8 @@ def emit_response_events(
     hitl_value: str = '',
     image_thumbnails: Optional[Dict[str, str]] = None,
     context_info: Optional[Dict[str, Any]] = None,
-    invoked_skills: Optional[List[Dict[str, Any]]] = None
+    invoked_skills: Optional[List[Dict[str, Any]]] = None,
+    attached_skills: Optional[List[Dict[str, Any]]] = None
 ):
     """
     Emit all response-related events.
@@ -804,11 +840,9 @@ def emit_response_events(
             'llm_response_tokens_output': total_tokens_out,
             'should_continue': should_continue,
             'context_info': context_info,
-            'invoked_skills': [
-                {'skill_id': s.get('skill_id'), 'name': s.get('name')}
-                for s in (invoked_skills or [])
-                if isinstance(s, dict) and s.get('name')
-            ],
+            'invoked_skills': _collect_applied_skills(
+                invoked_skills, attached_skills, elitea_callback.tool_calls
+            ),
         }
 
         msg_event_node = NodeEvent(
