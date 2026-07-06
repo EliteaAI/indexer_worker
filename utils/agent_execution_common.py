@@ -29,6 +29,12 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from langchain_core.messages import HumanMessage, AIMessage
 
+try:
+    from elitea_sdk.runtime.langchain.constants import LOADED_SKILL_PREFIX_RE
+except ImportError:
+    # Installed SDK predates the shared pattern — its load_skill serves use this literal.
+    LOADED_SKILL_PREFIX_RE = re.compile(r'^Skill "([^"]+)" is now active')
+
 from pylon.core.tools import log
 
 from tools import worker_core
@@ -666,12 +672,6 @@ def configure_checkpoint_resume(
 # Response Events
 # =============================================================================
 
-# Fixed prefix of the SDK's LOADED_SKILL_RESULT (elitea_sdk constants) — a
-# load_skill tool_output matching this is a genuine serve, not an
-# already-active/unknown short-circuit. Keep in sync with the SDK constant.
-_LOADED_SKILL_OUTPUT_RE = re.compile(r'^Skill "([^"]+)" is now active')
-
-
 def _collect_applied_skills(invoked_skills, attached_skills, tool_calls):
     """Union of ~name-invoked skills and skills activated via load_skill this
     turn, for message.meta.invoked_skills observability parity (#5698)."""
@@ -689,7 +689,7 @@ def _collect_applied_skills(invoked_skills, attached_skills, tool_calls):
     for tool_call in (tool_calls or {}).values():
         if getattr(tool_call, 'tool_name', '') != 'load_skill':
             continue
-        match = _LOADED_SKILL_OUTPUT_RE.match(getattr(tool_call, 'tool_output', '') or '')
+        match = LOADED_SKILL_PREFIX_RE.match(getattr(tool_call, 'tool_output', '') or '')
         if not match:
             continue
         name = match.group(1)
