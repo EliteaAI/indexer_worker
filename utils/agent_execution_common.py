@@ -32,7 +32,9 @@ from langchain_core.messages import HumanMessage, AIMessage
 try:
     from elitea_sdk.runtime.langchain.constants import LOADED_SKILL_PREFIX_RE
 except ImportError:
-    # Installed SDK predates the shared pattern — its load_skill serves use this literal.
+    # Installed SDK predates the shared pattern — its load_skill serves use this
+    # literal. Transitional shim: remove (and drop the import re above if unused)
+    # once every environment pins an elitea-sdk that ships LOADED_SKILL_PREFIX_RE.
     LOADED_SKILL_PREFIX_RE = re.compile(r'^Skill "([^"]+)" is now active')
 
 from pylon.core.tools import log
