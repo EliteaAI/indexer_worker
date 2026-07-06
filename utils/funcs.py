@@ -666,6 +666,7 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
         "status": getattr(exc, "status", None),
         "tool_name": getattr(exc, "tool_name", None),
         "toolkit_type": getattr(exc, "toolkit_type", None),
+        "toolkit_id": getattr(exc, "toolkit_id", None),
     }
 
 

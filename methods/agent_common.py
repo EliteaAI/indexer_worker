@@ -85,6 +85,9 @@ def build_mcp_auth_required_result(
 ) -> dict:
     """Emit mcp_authorization_required with normalized metadata and return stop payload."""
     auth_metadata = _mcp_auth_error_to_metadata(exc)
+    provided_settings = getattr(exc, 'provided_settings', None)
+    if provided_settings:
+        auth_metadata['provided_settings'] = provided_settings
     if chat_project_id is not None:
         auth_metadata["chat_project_id"] = chat_project_id
     node_interface.emit(
@@ -954,6 +957,9 @@ class EliteACallback(BaseCallbackHandler):
                 self.tool_calls[tool_run_id] = tool_call
 
             auth_payload = _mcp_auth_error_to_metadata(tool_exception)
+            provided_settings = getattr(tool_exception, 'provided_settings', None)
+            if provided_settings:
+                auth_payload['provided_settings'] = provided_settings
             auth_tool_name = auth_payload.get("tool_name") or tool_call.tool_name
             auth_payload.update(
                 {

@@ -54,7 +54,7 @@ def _mcp_discovery_url(server_url: str) -> str:
 
 def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
     """Build alias maps for MCP URL resolution and toolkit metadata lookup."""
-    from .funcs import _extract_mcp_server_url
+    from .funcs import _extract_mcp_server_url, mask_secret
 
     alias_map: Dict[str, str] = {}
     alias_meta_map: Dict[str, Dict[str, Any]] = {}
@@ -64,16 +64,20 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         url: Optional[str],
         toolkit_type: Optional[str],
         toolkit_name: Optional[str],
+        provided_settings: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not alias or not url or not _is_http_url(url):
             return
         key = alias.strip().lower()
         alias_map[key] = normalize_mcp_server_url(url)
-        alias_meta_map[key] = {
+        entry = {
             **alias_meta_map.get(key, {}),
             "toolkit_type": toolkit_type,
             "tool_name": toolkit_name or alias,
         }
+        if provided_settings:
+            entry["provided_settings"] = provided_settings
+        alias_meta_map[key] = entry
 
     for tool in tool_configs or []:
         if not isinstance(tool, dict):
@@ -93,10 +97,28 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         if tool_type.startswith("mcp_") and tool_type != "mcp_config":
             aliases.add(tool_type[4:])
 
+        # Build provided_settings if client_id/client_secret are pre-configured
+        _provided: Dict[str, Any] = {}
+        _client_id = settings.get("client_id")
+        _client_secret = settings.get("client_secret")
+        if _client_id:
+            _provided["mcp_client_id"] = _client_id
+        if _client_secret:
+            _secret_val = (
+                _client_secret.get_secret_value()
+                if hasattr(_client_secret, "get_secret_value")
+                else str(_client_secret)
+            )
+            _provided["mcp_client_secret"] = mask_secret(_secret_val)
+        _scopes = settings.get("scopes")
+        if _scopes:
+            _provided["scopes"] = _scopes
+        _provided_settings = _provided if _provided else None
+
         direct_url = _extract_mcp_server_url(settings)
         if _is_http_url(direct_url):
             for alias in aliases:
-                _register(alias, direct_url, tool_type, toolkit_name)
+                _register(alias, direct_url, tool_type, toolkit_name, _provided_settings)
             continue
 
         for alias in list(aliases):
@@ -104,7 +126,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
                 continue
             server_cfg = get_mcp_server_settings(alias) or {}
             cfg_url = _extract_mcp_server_url(server_cfg)
-            _register(alias, cfg_url, tool_type, toolkit_name)
+            _register(alias, cfg_url, tool_type, toolkit_name, _provided_settings)
 
     return alias_map, alias_meta_map
 
@@ -301,6 +323,10 @@ def _make_mcp_auth_tools(
                     exc.tool_name = resolved_tool_name
                 if not getattr(exc, "toolkit_type", None):
                     exc.toolkit_type = meta.get("toolkit_type")
+                if not getattr(exc, "provided_settings", None):
+                    _ps = meta.get("provided_settings")
+                    if _ps:
+                        exc.provided_settings = _ps
                 raise
             except Exception as exc:
                 if is_mcp_authorization_required_error(exc):
@@ -309,6 +335,10 @@ def _make_mcp_auth_tools(
                         setattr(exc, "tool_name", resolved_tool_name)
                     if not getattr(exc, "toolkit_type", None):
                         setattr(exc, "toolkit_type", meta.get("toolkit_type"))
+                    if not getattr(exc, "provided_settings", None):
+                        _ps = meta.get("provided_settings")
+                        if _ps:
+                            setattr(exc, "provided_settings", _ps)
                     raise
                 log.warning("MCP auth discovery failed for %s: %s", normalized_url, exc)
                 return build_mcp_auth_decision_result(
