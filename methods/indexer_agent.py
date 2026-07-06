@@ -408,6 +408,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             }
 
             invoke_config['configurable']['invoked_skills'] = kwargs.get('invoked_skills') or []
+            invoke_config['configurable']['attached_skills'] = kwargs.get('attached_skills') or []
 
             # HITL resume takes precedence over generic checkpoint continuation.
             if hitl_resume:
