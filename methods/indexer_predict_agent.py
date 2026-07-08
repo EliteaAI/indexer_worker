@@ -367,6 +367,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             }
 
             invoke_config["configurable"]["invoked_skills"] = kwargs.get("invoked_skills") or []
+            invoke_config["configurable"]["attached_skills"] = kwargs.get("attached_skills") or []
 
             # HITL resume takes precedence over generic checkpoint continuation.
             if hitl_resume:
@@ -460,6 +461,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 image_thumbnails=image_thumbnails,
                 context_info=context_info,
                 invoked_skills=invoke_config["configurable"].get("invoked_skills"),
+                attached_skills=invoke_config["configurable"].get("attached_skills"),
             )
 
             # Capture a HITL pause for the final task result so the reconcile gate
