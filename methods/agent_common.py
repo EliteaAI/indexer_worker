@@ -605,10 +605,8 @@ class EliteACallback(BaseCallbackHandler):
                 "project_id": self.project_id,
                 "chat_project_id": self.chat_project_id,
                 "thread_id": self.thread_id,
-                "thinking_steps": self.thinking_steps,
-                "tool_calls": {
-                    rid: tc.model_dump() for rid, tc in self.tool_calls.items()
-                },
+                "thinking_steps": [],
+                "tool_calls": {run_id: self.tool_calls[run_id].model_dump()},
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
             },
@@ -896,7 +894,7 @@ class EliteACallback(BaseCallbackHandler):
             content=tool_output,
         )
 
-        # necessary for partial message saving
+        # necessary for partial message saving — send only the single updated entry (delta)
         msg_event_node = NodeEvent(
             type=EventTypes.partial_message,
             stream_id=self.node_interface.stream_id,
@@ -906,11 +904,8 @@ class EliteACallback(BaseCallbackHandler):
                 "chat_project_id": self.chat_project_id,
                 "thread_id": self.thread_id,
                 "application_details": kwargs.get("application", {}),
-                "thinking_steps": self.thinking_steps,
-                "tool_calls": {
-                    run_id: tool_call.model_dump()
-                    for run_id, tool_call in self.tool_calls.items()
-                },
+                "thinking_steps": [],
+                "tool_calls": {tool_run_id: tool_call.model_dump()},
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
             },
@@ -1504,10 +1499,7 @@ class EliteACallback(BaseCallbackHandler):
                 "thread_id": self.thread_id,
                 "application_details": kwargs.get("application", {}),
                 "thinking_steps": self.thinking_steps,
-                "tool_calls": {
-                    run_id: tool_call.model_dump()
-                    for run_id, tool_call in self.tool_calls.items()
-                },
+                "tool_calls": {},
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
             },
