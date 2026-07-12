@@ -60,6 +60,7 @@ from ..utils.agent_execution_common import (
     build_output_message,
     create_summarization_callbacks,
     get_child_dispatcher,
+    is_fanout_child,
     detect_parked_dispatch,
     build_parked_result,
     build_child_launch_payloads,
@@ -306,7 +307,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 version_details["tools"] = unsecret_mcp_tools(version_details["tools"], client)
 
             # Create application agent
-            _child_dispatcher = get_child_dispatcher(self.descriptor.config)
+            # Track-2 dispatcher, EXCEPT for a fan-out child (#5778 Option B).
+            # A tier-2 container launched as a parked child must NOT park AGAIN
+            # for its own tier-3 leaves: pylon_main's task_status_changed branches
+            # mutually-exclusively on `reconcile_epoch`, so a dual-role task (a
+            # child of tier-1 that is also a parent of tier-3) would take the
+            # child-settle branch, never launch its tier-3 children, and silently
+            # hang the run. Suppressing the dispatcher forces this child to run
+            # its OWN fan-out in-process (Track 1 gather) — from tier-1's view it
+            # stays a single opaque task that completes or pauses, exactly like a
+            # single-level Track-2 child does today.
+            _child_dispatcher = (
+                None if is_fanout_child(tasknode_task.meta)
+                else get_child_dispatcher(self.descriptor.config)
+            )
             elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
             agent_executor = client.application(
                 application_id=kwargs.get("application", {})["id"],
@@ -531,7 +545,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Capture a HITL pause so the final task result carries it: the
             # reconcile gate keys off this to keep a paused child OPEN (#4993).
+            # Also capture the FULL list (#5778): a container child can pause on
+            # multiple leaves at once (a parallel_sensitive_tools aggregate), and
+            # the singular only carries one — the plural preserves every pending
+            # card for the Track-2 reconcile reader / UI.
             paused_hitl_interrupt = response.get('hitl_interrupt')
+            paused_hitl_interrupts = response.get('hitl_interrupts')
 
         except InternalSDKError as e:
             return execution_error(
@@ -643,4 +662,4 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt, hitl_interrupts=paused_hitl_interrupts)

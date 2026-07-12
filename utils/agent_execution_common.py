@@ -377,6 +377,23 @@ def create_node_interface(
     )
 
 
+def is_fanout_child(task_meta: Dict[str, Any]) -> bool:
+    """True when this task is a parked parallel fan-out child (#4993 Track 2).
+
+    A fan-out child is a standalone ``indexer_agent`` launched by
+    ``parallel_dispatch_launch_children`` with both ``child_thread_id`` and
+    ``parent_thread_id`` in its meta (the parent→child linkage). Ordinary
+    top-level runs have neither. Extracted to a module-level predicate (was an
+    inline check in ``emit_response_events``) so the dispatcher-suppression logic
+    in ``indexer_agent`` can reuse the exact same definition (issue #5778).
+    """
+    return bool(
+        isinstance(task_meta, dict)
+        and task_meta.get('child_thread_id')
+        and task_meta.get('parent_thread_id')
+    )
+
+
 def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Attribution to stamp onto every event when this task is a fan-out child.
 
@@ -396,13 +413,29 @@ def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[st
     child_thread_id = task_meta.get("child_thread_id")
     if not (child_thread_id and task_meta.get("parent_thread_id")):
         return None
+    subagent_name = task_meta.get("subagent_name") or ""
     overlay = {
-        "parent_agent_name": task_meta.get("subagent_name") or "",
+        "parent_agent_name": subagent_name,
         "child_thread_id": child_thread_id,
         "thread_id": child_thread_id,
     }
-    if task_meta.get("tool_call_id"):
-        overlay["tool_call_id"] = task_meta.get("tool_call_id")
+    tool_call_id = task_meta.get("tool_call_id")
+    if tool_call_id:
+        overlay["tool_call_id"] = tool_call_id
+    # Ancestry chain (#5778): mirror the SDK's in-process `parent_agent_path`
+    # (a list of {name, call_id} per hop, Application._run) on the Track-2
+    # parked-child path so the UI breadcrumb renders identically whether a
+    # sub-agent ran in-process (gather) or as a durable dispatched child. Extend
+    # the inherited chain (pylon_main forwards it on the child's meta once it
+    # tracks depth-2+ dispatch) with THIS child's hop; fall back to a
+    # single-element chain for a direct tier-2 child so a depth-1 consumer is
+    # unaffected (chain length 1 renders as today — no breadcrumb).
+    inherited_path = task_meta.get("parent_agent_path")
+    chain = list(inherited_path) if isinstance(inherited_path, list) else []
+    if subagent_name:
+        chain.append({"name": subagent_name, "call_id": tool_call_id or None})
+    if chain:
+        overlay["parent_agent_path"] = chain
     return overlay
 
 
@@ -750,11 +783,7 @@ def emit_response_events(
     # emitted by the reconciled parent (which reads each child's checkpoint), so
     # a child emitting agent_response/full_message/pipeline_finish here would
     # prematurely end the parent message and overwrite it with one child's output.
-    is_fanout_child = bool(
-        isinstance(task_meta, dict)
-        and task_meta.get('child_thread_id')
-        and task_meta.get('parent_thread_id')
-    )
+    is_fanout_child_task = is_fanout_child(task_meta)
 
     # Emit a dedicated event when execution paused at a HITL node.
     hitl_interrupt = response.get('hitl_interrupt')
@@ -797,7 +826,7 @@ def emit_response_events(
     # Emit pipeline_finish if execution completed. Suppressed for a fan-out child
     # (it must not signal END on the parent's stream — only the reconciled parent
     # does that once every child has settled).
-    if response.get('execution_finished') and not is_fanout_child:
+    if response.get('execution_finished') and not is_fanout_child_task:
         node_interface.emit(
             type=EventTypes.pipeline_finish,
             content=output['content'],
@@ -819,7 +848,7 @@ def emit_response_events(
     # Also skip for a fan-out child: its final answer must NOT land on the
     # parent's message — the reconciled parent emits the real answer after
     # reading each child's checkpoint (#4993 Track 2).
-    if not hitl_interrupt and not is_fanout_child:
+    if not hitl_interrupt and not is_fanout_child_task:
         node_interface.emit(
             type=EventTypes.agent_response,
             content=output['content'],
@@ -944,6 +973,7 @@ def build_success_result(
     context_info: Optional[Dict[str, Any]] = None,
     return_chat_history: bool = False,
     hitl_interrupt: Optional[Dict[str, Any]] = None,
+    hitl_interrupts: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Build successful execution result dict.
@@ -963,6 +993,13 @@ def build_success_result(
             (parallel_dispatch_on_child_terminal) MUST be able to tell the two apart:
             a paused child is NOT terminal and must not advance the gate. Surfacing the
             interrupt in the task result is how the gate detects "still open".
+        hitl_interrupts: The FULL list of paused-child interrupts when a run paused on a
+            parallel/nested aggregate (#5778). ``build_success_result`` previously carried only
+            the singular ``hitl_interrupt`` into the task result, so a Track-2 reconcile reader
+            (which reads the task-result dict, not the live SIO event) saw at most ONE interrupt
+            even when a container paused on multiple leaves at once — the rest were lost. Carry
+            both: the singular (unchanged) keeps ``parallel_dispatch_on_child_terminal``'s truthy
+            "still open" gate working; the plural preserves every pending card for reconcile/UI.
 
     Returns:
         Result dict
@@ -985,6 +1022,13 @@ def build_success_result(
         result['context_info'] = context_info
     if hitl_interrupt:
         result['hitl_interrupt'] = hitl_interrupt
+    # Carry the FULL paused-child list too (#5778). Prefer the explicit plural;
+    # otherwise wrap the singular so a reconcile reader always sees a list when
+    # the run paused. Keeps the singular key intact for the existing gate check.
+    if hitl_interrupts:
+        result['hitl_interrupts'] = hitl_interrupts
+    elif hitl_interrupt:
+        result['hitl_interrupts'] = [hitl_interrupt]
     return result
 
 
