@@ -1069,6 +1069,12 @@ class EliteACallback(BaseCallbackHandler):
                 self.pending_llm_requests[run_id]["parent_agent_name"] = metadata.get(
                     "parent_agent_name"
                 )
+            # Per-invocation key so thinking steps group under the right sub-agent
+            # accordion (same source/purpose as parent_agent_name; read in on_llm_end).
+            if metadata and metadata.get("parent_agent_call_id"):
+                self.pending_llm_requests[run_id]["parent_agent_call_id"] = metadata.get(
+                    "parent_agent_call_id"
+                )
 
         # Use langgraph_node as tool_name if available (for pipeline LLM nodes), otherwise fallback to 'Thinking step'
         llm_tool_name = metadata.get("langgraph_node") if metadata else None
@@ -1354,6 +1360,7 @@ class EliteACallback(BaseCallbackHandler):
         llm_timestamp_start = pending.get("timestamp_start")
         langgraph_node = pending.get("langgraph_node")
         parent_agent_name = pending.get("parent_agent_name")
+        parent_agent_call_id = pending.get("parent_agent_call_id")
         self.pending_llm_requests.pop(run_id, None)
 
         for generation in response.generations:
@@ -1464,6 +1471,10 @@ class EliteACallback(BaseCallbackHandler):
 
                 # Add normalized tool_run_id for UI matching (works for both Anthropic and OpenAI)
                 generation_chunk["tool_run_id"] = str(run_id)
+                # Per-invocation key so a reasoning step groups with the right sub-agent
+                # invocation (matches the tool_call metadata; persisted to trace_step).
+                if parent_agent_call_id:
+                    generation_chunk["parent_agent_call_id"] = parent_agent_call_id
                 # Propagate parent_agent_name so history replay can show the nested agent context
                 if parent_agent_name:
                     generation_chunk["parent_agent_name"] = parent_agent_name
