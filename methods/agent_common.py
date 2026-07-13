@@ -1078,7 +1078,7 @@ class EliteACallback(BaseCallbackHandler):
                 "tool_name": llm_tool_name or "Thinking step",
                 "tool_run_id": str(run_id),
                 "metadata": metadata,
-                "thinking_steps": self.thinking_steps,
+                "thinking_steps": [self.thinking_steps[-1]] if self.thinking_steps else [],
                 "timestamp_start": datetime.now(tz=timezone.utc).isoformat(),
             },
         )
@@ -1483,12 +1483,13 @@ class EliteACallback(BaseCallbackHandler):
             type=EventTypes.agent_llm_end,
             response_metadata={
                 "tool_run_id": str(run_id),
-                "thinking_steps": self.thinking_steps,
+                "thinking_steps": [self.thinking_steps[-1]] if self.thinking_steps else [],
                 "llm_start_timestamp": self.llm_start_timestamp,
             },
         )
 
-        # necessary for partial message saving
+        # necessary for partial message saving — send only the new thinking step (delta)
+        new_thinking_step = self.thinking_steps[-1] if self.thinking_steps else None
         msg_event_node = NodeEvent(
             type=EventTypes.partial_message,
             stream_id=self.node_interface.stream_id,
@@ -1498,7 +1499,7 @@ class EliteACallback(BaseCallbackHandler):
                 "chat_project_id": self.chat_project_id,
                 "thread_id": self.thread_id,
                 "application_details": kwargs.get("application", {}),
-                "thinking_steps": self.thinking_steps,
+                "thinking_steps": [new_thinking_step] if new_thinking_step else [],
                 "tool_calls": {},
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
