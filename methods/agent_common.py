@@ -436,6 +436,23 @@ def execution_error(
     return {"chat_history": chat_history, "error": error}
 
 
+# TS-5 (#5729): cap a single tool_output so no message_trace_step row is
+# pathologically large. Threshold matches EPIC #5431's read-limit cap.
+MAX_TOOL_OUTPUT_CHARS = 200000
+
+
+def _sandwich_truncate(text: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
+    """Cap text at max_chars, keeping head+tail and dropping the middle ("lost in the middle", arxiv.org/abs/2307.03172)."""
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    marker = f"\n...[truncated {omitted} of {len(text)} chars]...\n"
+    keep = max(max_chars - len(marker), 0)
+    head = keep // 2
+    tail = keep - head
+    return text[:head] + marker + text[len(text) - tail:]
+
+
 class ToolCallPayload(BaseModel):
     """Payload model for tool call information"""
 
@@ -851,6 +868,7 @@ class EliteACallback(BaseCallbackHandler):
                     default=lambda o: str(o)
                 )
             )
+            tool_output = _sandwich_truncate(tool_output)
         now = datetime.now(tz=timezone.utc).isoformat()
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "stop"
