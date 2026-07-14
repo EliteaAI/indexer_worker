@@ -60,7 +60,6 @@ from ..utils.agent_execution_common import (
     build_output_message,
     create_summarization_callbacks,
     get_child_dispatcher,
-    is_fanout_child,
     detect_parked_dispatch,
     build_parked_result,
     build_child_launch_payloads,
@@ -70,6 +69,7 @@ from ..utils.agent_execution_common import (
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
+from ..utils.parallel_dispatch_contract import normalize_hitl_pause
 from ..utils.mcp_auth_tools import (
     _make_mcp_auth_tools,
     _has_mcp_toolkits,
@@ -225,6 +225,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # parked fan-out child's HITL pause is distinguishable from a completion —
         # the reconcile gate must NOT treat a paused child as terminal (#4993).
         paused_hitl_interrupt = None
+        paused_hitl_interrupts = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -237,7 +238,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             local_event_node,
             stream_id,
             message_id,
-            tasknode_task.meta
+            tasknode_task.meta,
+            execution_generation=kwargs.get('execution_generation'),
         )
 
         node_interface.emit(type=EventTypes.agent_start)
@@ -317,9 +319,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # its OWN fan-out in-process (Track 1 gather) — from tier-1's view it
             # stays a single opaque task that completes or pauses, exactly like a
             # single-level Track-2 child does today.
-            _child_dispatcher = (
-                None if is_fanout_child(tasknode_task.meta)
-                else get_child_dispatcher(self.descriptor.config)
+            _child_dispatcher = get_child_dispatcher(
+                self.descriptor.config,
+                task_meta=tasknode_task.meta,
+                agent_type=version_details.get("agent_type"),
             )
             elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
             agent_executor = client.application(
@@ -549,8 +552,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # multiple leaves at once (a parallel_sensitive_tools aggregate), and
             # the singular only carries one — the plural preserves every pending
             # card for the Track-2 reconcile reader / UI.
-            paused_hitl_interrupt = response.get('hitl_interrupt')
-            paused_hitl_interrupts = response.get('hitl_interrupts')
+            paused_hitl_interrupt, paused_hitl_interrupts = normalize_hitl_pause(
+                response.get('hitl_interrupt'), response.get('hitl_interrupts'),
+            )
 
         except InternalSDKError as e:
             return execution_error(

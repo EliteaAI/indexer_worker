@@ -50,6 +50,7 @@ from .image_helpers import (
 )
 from .node_interface import NodeEventInterface, NoOpNodeEventInterface, EventTypes, NodeEvent, InitiatorType
 from .langfuse_callback import create_langfuse_callback, flush_langfuse_callback, langfuse_trace_context
+from .parallel_dispatch_contract import durable_dispatch_allowed, normalize_hitl_pause
 
 from ..methods.agent_common import (
     execution_error,
@@ -333,6 +334,7 @@ def create_node_interface(
     message_id: Optional[str],
     task_meta: Dict[str, Any],
     batch_config: Optional[Dict[str, Any]] = None,
+    execution_generation: Optional[str] = None,
 ) -> NodeEventInterface:
     """
     Create NodeEventInterface for emitting events.
@@ -373,6 +375,7 @@ def create_node_interface(
         sio_event=task_meta.get("sio_event"),
         question_id=task_meta.get("question_id"),
         event_metadata_overlay=_child_event_metadata_overlay(task_meta),
+        execution_generation=execution_generation,
         **batch_kwargs,
     )
 
@@ -418,10 +421,14 @@ def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[st
         "parent_agent_name": subagent_name,
         "child_thread_id": child_thread_id,
         "thread_id": child_thread_id,
+        "sibling_ordinal": task_meta.get("sibling_ordinal"),
     }
     tool_call_id = task_meta.get("tool_call_id")
     if tool_call_id:
         overlay["tool_call_id"] = tool_call_id
+    parent_agent_call_id = task_meta.get("parent_agent_call_id") or tool_call_id
+    if parent_agent_call_id:
+        overlay["parent_agent_call_id"] = parent_agent_call_id
     # Ancestry chain (#5778): mirror the SDK's in-process `parent_agent_path`
     # (a list of {name, call_id} per hop, Application._run) on the Track-2
     # parked-child path so the UI breadcrumb renders identically whether a
@@ -432,8 +439,16 @@ def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[st
     # unaffected (chain length 1 renders as today — no breadcrumb).
     inherited_path = task_meta.get("parent_agent_path")
     chain = list(inherited_path) if isinstance(inherited_path, list) else []
-    if subagent_name:
-        chain.append({"name": subagent_name, "call_id": tool_call_id or None})
+    if subagent_name and not (
+        chain
+        and isinstance(chain[-1], dict)
+        and chain[-1].get("call_id") == parent_agent_call_id
+    ):
+        chain.append({
+            "name": subagent_name,
+            "call_id": parent_agent_call_id or None,
+            "sibling_ordinal": task_meta.get("sibling_ordinal"),
+        })
     if chain:
         overlay["parent_agent_path"] = chain
     return overlay
@@ -791,16 +806,9 @@ def emit_response_events(
     # paused child into hitl_interrupts (plural). Forward the full list so the
     # UI can render N stacked approval cards; fall back to the single interrupt
     # for the ordinary one-pause case.
-    hitl_interrupts = response.get('hitl_interrupts')
-    if not hitl_interrupts and hitl_interrupt:
-        hitl_interrupts = [hitl_interrupt]
-    # Bidirectional fallback: a parallel fan-out aggregate may arrive as the
-    # plural list only. Derive the singular from the first entry so BOTH the
-    # interrupt-emission guard below and the skip-normal-message guard further
-    # down (which key off the singular) fire correctly on a plural-only pause —
-    # otherwise a paused child would leak a premature assistant message (#4993).
-    if not hitl_interrupt and hitl_interrupts:
-        hitl_interrupt = hitl_interrupts[0]
+    hitl_interrupt, hitl_interrupts = normalize_hitl_pause(
+        hitl_interrupt, response.get('hitl_interrupts'),
+    )
     if hitl_interrupt:
         node_interface.emit(
             type=EventTypes.agent_hitl_interrupt,
@@ -1004,6 +1012,9 @@ def build_success_result(
     Returns:
         Result dict
     """
+    hitl_interrupt, hitl_interrupts = normalize_hitl_pause(
+        hitl_interrupt, hitl_interrupts,
+    )
     sanitized_steps = json.loads(json.dumps(elitea_callback.thinking_steps, default=str))
     result = {
         'error': None,
@@ -1029,6 +1040,9 @@ def build_success_result(
         result['hitl_interrupts'] = hitl_interrupts
     elif hitl_interrupt:
         result['hitl_interrupts'] = [hitl_interrupt]
+    if hitl_interrupt or hitl_interrupts:
+        result['paused'] = True
+        result['pause_type'] = 'hitl'
     return result
 
 
@@ -1044,15 +1058,24 @@ def build_success_result(
 _PARALLEL_DISPATCH_SENTINEL = object()
 
 
-def get_child_dispatcher(descriptor_config: Dict[str, Any]) -> Optional[Any]:
+def get_child_dispatcher(
+    descriptor_config: Dict[str, Any],
+    *,
+    task_meta: Optional[Dict[str, Any]] = None,
+    agent_type: Optional[str] = None,
+) -> Optional[Any]:
     """Return a non-None sentinel to enable Track 2 park-mode, else None.
 
     Gated on the indexer config flag ``parallel_subagent_dispatch`` so Track 1
-    (in-process gather) stays the default until an operator opts in. The SDK
-    only presence-checks the value, so the marker object's identity is
-    irrelevant — its non-None-ness is the whole switch.
+    (in-process gather) stays the default until an operator opts in. A durable fan-out child and
+    a pipeline parent must always gather in-process: recursive durable dispatch is not supported,
+    and pipelines are tier-transparent parents. The SDK only presence-checks the value.
     """
-    if descriptor_config.get('parallel_subagent_dispatch', False):
+    if durable_dispatch_allowed(
+        descriptor_config.get('parallel_subagent_dispatch', False),
+        is_fanout_child(task_meta or {}),
+        agent_type,
+    ):
         return _PARALLEL_DISPATCH_SENTINEL
     return None
 
@@ -1070,6 +1093,7 @@ def detect_parked_dispatch(response: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return None
     return {
         'parallel_parked': True,
+        'dispatch_epoch': response.get('dispatch_epoch'),
         'parallel_dispatch': response.get('parallel_dispatch') or [],
         'thread_id': response.get('thread_id'),
     }
@@ -1096,6 +1120,7 @@ def build_parked_result(
     return {
         'error': None,
         'parallel_parked': True,
+        'dispatch_epoch': parked.get('dispatch_epoch'),
         'parallel_dispatch': parked.get('parallel_dispatch') or [],
         'reconcile_payload': parked.get('reconcile_payload'),
         'parent_stream_id': stream_id,
@@ -1172,6 +1197,7 @@ def build_child_launch_payloads(
             'should_continue': False,
             'hitl_resume': False,
             'is_regenerate': False,
+            'execution_generation': parent_kwargs.get('execution_generation'),
             'meta': version_details.get('meta', {}),
             'application': {
                 'id': spec.get('application_id'),
@@ -1218,6 +1244,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'debug_mode', 'steps_limit', 'meta', 'context_settings',
         'exception_handling_enabled', 'auto_approve_sensitive_actions',
         'return_chat_history',
+        'execution_generation',
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
     # context_settings is mutated in place at task entry to attach live
