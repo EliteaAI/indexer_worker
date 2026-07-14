@@ -31,6 +31,7 @@ import requests
 from langchain_core.callbacks import BaseCallbackHandler  # pylint: disable=E0401
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, LLMResult
+from elitea_sdk.runtime.utils.trace_limits import cap_trace_json, cap_trace_text
 from pydantic import BaseModel
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
@@ -817,7 +818,7 @@ class EliteACallback(BaseCallbackHandler):
             "tool_name": tool_name,
             "tool_run_id": str(run_id),
             "tool_meta": tool_meta,
-            "tool_inputs": kwargs.get("inputs"),
+            "tool_inputs": cap_trace_json(kwargs.get("inputs")),
             "metadata": tool_metadata,  # Include session_id and other metadata
             "timestamp_start": now,
             "agent_type": tool_metadata.get("agent_type"),  # Optional field for nested agents/pipelines
@@ -874,7 +875,7 @@ class EliteACallback(BaseCallbackHandler):
         if hitl_deferred:
             tool_output = ""
         else:
-            tool_output = (
+            tool_output = cap_trace_text(
                 raw_output
                 if isinstance(raw_output, str)
                 else json.dumps(
@@ -1507,6 +1508,9 @@ class EliteACallback(BaseCallbackHandler):
                         except Exception:
                             pass
                         generation_chunk["text"] = "\n".join(decisions)
+
+                generation_chunk["text"] = cap_trace_text(generation_chunk.get("text"))
+                generation_chunk["thinking"] = cap_trace_text(generation_chunk.get("thinking"))
 
                 # Add normalized tool_run_id for UI matching (works for both Anthropic and OpenAI)
                 generation_chunk["tool_run_id"] = str(run_id)
