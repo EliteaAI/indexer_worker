@@ -1121,7 +1121,7 @@ class EliteACallback(BaseCallbackHandler):
                 "tool_name": llm_tool_name or "Thinking step",
                 "tool_run_id": str(run_id),
                 "metadata": metadata,
-                "thinking_steps": self.thinking_steps,
+                "thinking_steps": [self.thinking_steps[-1]] if self.thinking_steps else [],
                 "timestamp_start": datetime.now(tz=timezone.utc).isoformat(),
             },
         )
@@ -1540,7 +1540,7 @@ class EliteACallback(BaseCallbackHandler):
             type=EventTypes.agent_llm_end,
             response_metadata={
                 "tool_run_id": str(run_id),
-                "thinking_steps": self.thinking_steps,
+                "thinking_steps": [self.thinking_steps[-1]] if self.thinking_steps else [],
                 "llm_start_timestamp": self.llm_start_timestamp,
             },
         )
