@@ -7,8 +7,32 @@ import types
 
 from utils.parallel_dispatch_contract import (
     durable_dispatch_allowed,
+    is_fanout_child,
     normalize_hitl_pause,
 )
+
+
+def test_fanout_child_requires_both_linkage_ids():
+    assert is_fanout_child({
+        'child_thread_id': 'child-1',
+        'parent_thread_id': 'parent-1',
+    }) is True
+    assert is_fanout_child({'child_thread_id': 'child-1'}) is False
+    assert is_fanout_child({'parent_thread_id': 'parent-1'}) is False
+    assert is_fanout_child({}) is False
+    assert is_fanout_child(None) is False
+
+
+def test_execution_error_uses_shared_fanout_predicate():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'agent_common.py'
+    ).read_text()
+    execution_error = source[
+        source.index('def execution_error('):source.index('class ToolCallPayload')
+    ]
+
+    assert 'if not is_fanout_child(tasknode_task_meta):' in execution_error
+    assert 'tasknode_task_meta.get("child_thread_id")' not in execution_error
 
 
 def test_durable_dispatch_only_for_top_level_agent():

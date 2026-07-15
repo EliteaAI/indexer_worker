@@ -50,7 +50,11 @@ from .image_helpers import (
 )
 from .node_interface import NodeEventInterface, NoOpNodeEventInterface, EventTypes, NodeEvent, InitiatorType
 from .langfuse_callback import create_langfuse_callback, flush_langfuse_callback, langfuse_trace_context
-from .parallel_dispatch_contract import durable_dispatch_allowed, normalize_hitl_pause
+from .parallel_dispatch_contract import (
+    durable_dispatch_allowed,
+    is_fanout_child,
+    normalize_hitl_pause,
+)
 
 from ..methods.agent_common import (
     execution_error,
@@ -377,23 +381,6 @@ def create_node_interface(
         event_metadata_overlay=_child_event_metadata_overlay(task_meta),
         execution_generation=execution_generation,
         **batch_kwargs,
-    )
-
-
-def is_fanout_child(task_meta: Dict[str, Any]) -> bool:
-    """True when this task is a parked parallel fan-out child (#4993 Track 2).
-
-    A fan-out child is a standalone ``indexer_agent`` launched by
-    ``parallel_dispatch_launch_children`` with both ``child_thread_id`` and
-    ``parent_thread_id`` in its meta (the parent→child linkage). Ordinary
-    top-level runs have neither. Extracted to a module-level predicate (was an
-    inline check in ``emit_response_events``) so the dispatcher-suppression logic
-    in ``indexer_agent`` can reuse the exact same definition (issue #5778).
-    """
-    return bool(
-        isinstance(task_meta, dict)
-        and task_meta.get('child_thread_id')
-        and task_meta.get('parent_thread_id')
     )
 
 

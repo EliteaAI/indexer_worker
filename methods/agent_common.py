@@ -50,6 +50,7 @@ from ..utils.node_interface import (
     NodeEvent,
     NodeEventInterface,
 )
+from ..utils.parallel_dispatch_contract import is_fanout_child
 
 # Event node names
 EVENTNODE_EVENT_NAME = "application_stream_response"
@@ -440,11 +441,7 @@ def execution_error(
     if execution_time_seconds is not None:
         response_metadata["execution_time_seconds"] = execution_time_seconds
 
-    is_fanout_child = bool(
-        tasknode_task_meta.get("child_thread_id")
-        and tasknode_task_meta.get("parent_thread_id")
-    )
-    if not is_fanout_child:
+    if not is_fanout_child(tasknode_task_meta):
         msg_event_node = NodeEvent(
             type=EventTypes.full_message,
             stream_id=node_interface.stream_id,
