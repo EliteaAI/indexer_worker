@@ -18,7 +18,144 @@
       "path": "mcp_servers",
       "section": "mcp_servers",
       "default": {},
-      "requires_restart": true
+      "requires_restart": false,
+      "value_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "propertyNames": {
+          "type": "string",
+          "minLength": 1
+        },
+        "additionalProperties": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "http",
+                "stdio"
+              ]
+            },
+            "url": {
+              "type": "string",
+              "pattern": "^https?://"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "runtime": {
+              "type": "string",
+              "enum": [
+                "npm",
+                "python"
+              ]
+            },
+            "package": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string"
+            },
+            "display_name": {
+              "type": "string"
+            },
+            "icon_url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "env_mapping": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "timeout": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "ssl_verify": {
+              "type": "boolean"
+            },
+            "stateful": {
+              "type": "boolean"
+            },
+            "config_schema": {
+              "type": "object"
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "selected_tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "excluded_tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "http"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "url"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "stdio"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "command"
+                ]
+              }
+            }
+          ],
+          "additionalProperties": true
+        }
+      }
     }
   }
 }

@@ -17,6 +17,7 @@
 
 """ Module """
 
+from copy import deepcopy
 import os
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
@@ -61,6 +62,9 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         self.index_task_queue_proxy = None
         #
         self.toolkit_validators = None
+        self._mcp_servers_snapshot = deepcopy(
+            self.descriptor.config.get("mcp_servers", {}) or {}
+        )
 
     def preload(self):
         """ Preload handler """
@@ -426,15 +430,42 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             log.exception("Failed to configure sensitive tools")
 
     def reconfig(self):
-        """Re-apply config live on admin save — no pylon restart required.
+        """Re-apply live configuration after an admin save.
 
         The bootstrap handler calls ``descriptor.load_config()`` before this, so
-        ``self.descriptor.config`` already holds the new Guardrails values. The
-        agent pool forks per task at dispatch, so refreshing the SDK guardrail
-        globals in this (main) process is inherited by every agent run started
-        afterwards. In-flight runs keep their own forked copy.
+        ``self.descriptor.config`` already holds the new values. In-flight agent
+        processes keep their existing snapshot; new runs inherit refreshed
+        guardrails and MCP definitions from this process.
         """
         self._apply_toolkit_security()
+        self._reload_mcp_servers()
+
+    def _reload_mcp_servers(self):
+        """Publish changed MCP definitions and rebuild their SDK schema cache."""
+        current = self.descriptor.config.get("mcp_servers", {}) or {}
+        if current == self._mcp_servers_snapshot:
+            return
+        if not isinstance(current, dict):
+            log.error("MCP server configuration must be an object")
+            return
+        if self.agent_event_node is None:
+            log.warning("Cannot publish MCP configuration: worker event node is unavailable")
+            return
+
+        try:
+            from elitea_sdk.runtime.toolkits.mcp_config import (  # pylint: disable=C0415,E0401
+                refresh_mcp_server_configs,
+            )
+
+            refresh_mcp_server_configs(current)
+            self.mcp_prebuilt_config_request(None, None)
+            self.toolkit_configurations_request(None, None)
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to apply updated MCP server configuration")
+            return
+
+        self._mcp_servers_snapshot = deepcopy(current)
+        log.info("Applied %d MCP server definition(s) without restart", len(current))
 
     def deinit(self):
         """ De-init module """
