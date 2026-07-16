@@ -65,6 +65,7 @@ from ..utils.agent_execution_common import (
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
+from ..utils.parallel_dispatch_contract import normalize_hitl_pause
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -224,6 +225,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # parked fan-out child's HITL pause is not mistaken for a completion by the
         # reconcile gate (#4993).
         paused_hitl_interrupt = None
+        paused_hitl_interrupts = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -238,6 +240,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             message_id,
             tasknode_task.meta,
             batch_config=self.descriptor.config.get("llm_chunk_batching", {}),
+            execution_generation=kwargs.get('execution_generation'),
         )
 
         node_interface.emit(type=EventTypes.agent_start)
@@ -317,7 +320,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # parallel_subagent_dispatch is enabled — an ad-hoc predict parent
                 # whose agent has Application tools also fans out and must park.
-                child_dispatcher=get_child_dispatcher(self.descriptor.config),
+                child_dispatcher=get_child_dispatcher(
+                    self.descriptor.config,
+                    task_meta=tasknode_task.meta,
+                    agent_type=(application_data.get('version_details') or {}).get('agent_type'),
+                ),
             )
 
             # Create callbacks
@@ -466,7 +473,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Capture a HITL pause for the final task result so the reconcile gate
             # keeps a paused child OPEN instead of marking it terminal (#4993).
-            paused_hitl_interrupt = response.get('hitl_interrupt')
+            paused_hitl_interrupt, paused_hitl_interrupts = normalize_hitl_pause(
+                response.get('hitl_interrupt'), response.get('hitl_interrupts'),
+            )
 
         except InternalSDKError as e:
             return execution_error(
@@ -581,4 +590,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)
+        return build_success_result(
+            chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info,
+            return_chat_history=return_chat_history,
+            hitl_interrupt=paused_hitl_interrupt,
+            hitl_interrupts=paused_hitl_interrupts,
+        )

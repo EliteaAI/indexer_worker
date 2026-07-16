@@ -69,6 +69,7 @@ from ..utils.agent_execution_common import (
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
+from ..utils.parallel_dispatch_contract import normalize_hitl_pause
 from ..utils.mcp_auth_tools import (
     _make_mcp_auth_tools,
     _has_mcp_toolkits,
@@ -224,6 +225,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # parked fan-out child's HITL pause is distinguishable from a completion —
         # the reconcile gate must NOT treat a paused child as terminal (#4993).
         paused_hitl_interrupt = None
+        paused_hitl_interrupts = None
 
         # Fetch Langfuse config for tracing
         langfuse_config = fetch_langfuse_config(client)
@@ -236,7 +238,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             local_event_node,
             stream_id,
             message_id,
-            tasknode_task.meta
+            tasknode_task.meta,
+            execution_generation=kwargs.get('execution_generation'),
         )
 
         node_interface.emit(type=EventTypes.agent_start)
@@ -306,7 +309,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 version_details["tools"] = unsecret_mcp_tools(version_details["tools"], client)
 
             # Create application agent
-            _child_dispatcher = get_child_dispatcher(self.descriptor.config)
+            # Track-2 dispatcher, EXCEPT for a fan-out child (#5778 Option B).
+            # A tier-2 container launched as a parked child must NOT park AGAIN
+            # for its own tier-3 leaves: pylon_main's task_status_changed branches
+            # mutually-exclusively on `reconcile_epoch`, so a dual-role task (a
+            # child of tier-1 that is also a parent of tier-3) would take the
+            # child-settle branch, never launch its tier-3 children, and silently
+            # hang the run. Suppressing the dispatcher forces this child to run
+            # its OWN fan-out in-process (Track 1 gather) — from tier-1's view it
+            # stays a single opaque task that completes or pauses, exactly like a
+            # single-level Track-2 child does today.
+            _child_dispatcher = get_child_dispatcher(
+                self.descriptor.config,
+                task_meta=tasknode_task.meta,
+                agent_type=version_details.get("agent_type"),
+            )
             elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
             agent_executor = client.application(
                 application_id=kwargs.get("application", {})["id"],
@@ -531,7 +548,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Capture a HITL pause so the final task result carries it: the
             # reconcile gate keys off this to keep a paused child OPEN (#4993).
-            paused_hitl_interrupt = response.get('hitl_interrupt')
+            # Also capture the FULL list (#5778): a container child can pause on
+            # multiple leaves at once (a parallel_sensitive_tools aggregate), and
+            # the singular only carries one — the plural preserves every pending
+            # card for the Track-2 reconcile reader / UI.
+            paused_hitl_interrupt, paused_hitl_interrupts = normalize_hitl_pause(
+                response.get('hitl_interrupt'), response.get('hitl_interrupts'),
+            )
 
         except InternalSDKError as e:
             return execution_error(
@@ -643,4 +666,4 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node.stop()
 
         return_chat_history = kwargs.get('return_chat_history', False)
-        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt)
+        return build_success_result(chat_history, elitea_callback, total_tokens_in, total_tokens_out, context_info, return_chat_history=return_chat_history, hitl_interrupt=paused_hitl_interrupt, hitl_interrupts=paused_hitl_interrupts)

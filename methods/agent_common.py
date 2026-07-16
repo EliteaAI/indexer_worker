@@ -31,6 +31,7 @@ import requests
 from langchain_core.callbacks import BaseCallbackHandler  # pylint: disable=E0401
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, LLMResult
+from elitea_sdk.runtime.utils.trace_limits import cap_trace_json, cap_trace_text
 from pydantic import BaseModel
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
@@ -49,11 +50,21 @@ from ..utils.node_interface import (
     NodeEvent,
     NodeEventInterface,
 )
+from ..utils.parallel_dispatch_contract import is_fanout_child
 
 # Event node names
 EVENTNODE_EVENT_NAME = "application_stream_response"
 EVENTNODE_FULL_RESPONSE_NAME = "application_full_response"
 EVENTNODE_PARTIAL_RESPONSE_NAME = "application_partial_response"
+
+HIERARCHY_METADATA_KEYS = (
+    "parent_agent_name",
+    "parent_agent_call_id",
+    "parent_agent_path",
+    "sibling_ordinal",
+    "child_thread_id",
+    "thread_id",
+)
 
 # Secret name for project PostgreSQL connection string
 PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
@@ -73,6 +84,11 @@ def build_mcp_auth_pause_result(
         return {
             "chat_history": chat_history,
             "error": getattr(elitea_callback, "mcp_auth_pause_message", None) or fallback_error,
+            # Durable-child reconcile must not mistake an auth pause for completion. Resume parity
+            # for an MCP-auth child is intentionally gated/deferred; this explicit state keeps the
+            # parent epoch open instead of producing a partial final answer.
+            "paused": True,
+            "pause_type": "mcp_auth",
         }
     return None
 
@@ -98,6 +114,8 @@ def build_mcp_auth_required_result(
     return {
         "chat_history": chat_history,
         "error": str(exc),
+        "paused": True,
+        "pause_type": "mcp_auth",
     }
 
 
@@ -423,34 +441,18 @@ def execution_error(
     if execution_time_seconds is not None:
         response_metadata["execution_time_seconds"] = execution_time_seconds
 
-    msg_event_node = NodeEvent(
-        type=EventTypes.full_message,
-        stream_id=node_interface.stream_id,
-        message_id=message_id,
-        response_metadata=response_metadata,
-        content=human_readable or error_message,
-        **node_interface.payload_additional_kwargs,
-    ).model_dump_json()
-    msg_event_node = json.loads(msg_event_node)
-    node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
+    if not is_fanout_child(tasknode_task_meta):
+        msg_event_node = NodeEvent(
+            type=EventTypes.full_message,
+            stream_id=node_interface.stream_id,
+            message_id=message_id,
+            response_metadata=response_metadata,
+            content=human_readable or error_message,
+            **node_interface.payload_additional_kwargs,
+        ).model_dump_json()
+        msg_event_node = json.loads(msg_event_node)
+        node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
     return {"chat_history": chat_history, "error": error}
-
-
-# TS-5 (#5729): cap a single tool_output so no message_trace_step row is
-# pathologically large. Threshold matches EPIC #5431's read-limit cap.
-MAX_TOOL_OUTPUT_CHARS = 200000
-
-
-def _sandwich_truncate(text: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
-    """Cap text at max_chars, keeping head+tail and dropping the middle ("lost in the middle", arxiv.org/abs/2307.03172)."""
-    if len(text) <= max_chars:
-        return text
-    omitted = len(text) - max_chars
-    marker = f"\n...[truncated {omitted} of {len(text)} chars]...\n"
-    keep = max(max_chars - len(marker), 0)
-    head = keep // 2
-    tail = keep - head
-    return text[:head] + marker + text[len(text) - tail:]
 
 
 class ToolCallPayload(BaseModel):
@@ -600,6 +602,11 @@ class EliteACallback(BaseCallbackHandler):
             "agent_type": _agent_type,
             "original_name": self.subagent_name,
         }
+        metadata = self.node_interface.apply_metadata_overlay(metadata)
+        # This is the orchestrator's own invocation/result chip. Its owner is
+        # conveyed by the canonical path; leaving parent_agent_name unset keeps
+        # the chip bare rather than labelling it as its own child.
+        metadata.pop("parent_agent_name", None)
         tool_meta = {"name": self.subagent_name, "metadata": dict(metadata)}
         self.tool_calls[run_id] = ToolCallPayload(
             tool_name=self.subagent_name,
@@ -614,6 +621,14 @@ class EliteACallback(BaseCallbackHandler):
             timestamp_start=now,
             timestamp_finish=now,
         )
+        persisted_invocation = self.node_interface.decorate_tool_call_for_persistence(
+            self.tool_calls[run_id].model_dump()
+        )
+        persisted_invocation.get("metadata", {}).pop("parent_agent_name", None)
+        if isinstance(persisted_invocation.get("tool_meta"), dict):
+            persisted_invocation["tool_meta"].get("metadata", {}).pop(
+                "parent_agent_name", None
+            )
         msg_event_node = NodeEvent(
             type=EventTypes.partial_message,
             stream_id=self.node_interface.stream_id,
@@ -623,7 +638,7 @@ class EliteACallback(BaseCallbackHandler):
                 "chat_project_id": self.chat_project_id,
                 "thread_id": self.thread_id,
                 "thinking_steps": [],
-                "tool_calls": {run_id: self.tool_calls[run_id].model_dump()},
+                "tool_calls": {run_id: persisted_invocation},
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
             },
@@ -667,13 +682,11 @@ class EliteACallback(BaseCallbackHandler):
             return
         if self.debug:
             log.debug("on_tool_start(%s, %s)", args, kwargs)
+        # The serialized tool name is the action that actually ran. Execution
+        # metadata.original_name can be the enclosing Application name and must
+        # never replace it (that made configurations/artifact calls look like
+        # repeated sub-orchestrator invocations after reload).
         tool_name = args[0].get("name")
-        tool_metadata_from_kwargs = kwargs.get("metadata", {})
-        if (
-            isinstance(tool_metadata_from_kwargs, dict)
-            and "original_name" in tool_metadata_from_kwargs
-        ):
-            tool_name = tool_metadata_from_kwargs["original_name"]
         now = datetime.now(tz=timezone.utc).isoformat()
 
         # Extract tool metadata (includes MCP session info if available)
@@ -802,7 +815,7 @@ class EliteACallback(BaseCallbackHandler):
             "tool_name": tool_name,
             "tool_run_id": str(run_id),
             "tool_meta": tool_meta,
-            "tool_inputs": kwargs.get("inputs"),
+            "tool_inputs": cap_trace_json(kwargs.get("inputs")),
             "metadata": tool_metadata,  # Include session_id and other metadata
             "timestamp_start": now,
             "agent_type": tool_metadata.get("agent_type"),  # Optional field for nested agents/pipelines
@@ -859,7 +872,7 @@ class EliteACallback(BaseCallbackHandler):
         if hitl_deferred:
             tool_output = ""
         else:
-            tool_output = (
+            tool_output = cap_trace_text(
                 raw_output
                 if isinstance(raw_output, str)
                 else json.dumps(
@@ -868,7 +881,6 @@ class EliteACallback(BaseCallbackHandler):
                     default=lambda o: str(o)
                 )
             )
-            tool_output = _sandwich_truncate(tool_output)
         now = datetime.now(tz=timezone.utc).isoformat()
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "stop"
@@ -923,7 +935,11 @@ class EliteACallback(BaseCallbackHandler):
                 "thread_id": self.thread_id,
                 "application_details": kwargs.get("application", {}),
                 "thinking_steps": [],
-                "tool_calls": {tool_run_id: tool_call.model_dump()},
+                "tool_calls": {
+                    tool_run_id: self.node_interface.decorate_tool_call_for_persistence(
+                        tool_call.model_dump()
+                    )
+                },
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
             },
@@ -1087,12 +1103,12 @@ class EliteACallback(BaseCallbackHandler):
                 self.pending_llm_requests[run_id]["parent_agent_name"] = metadata.get(
                     "parent_agent_name"
                 )
-            # Per-invocation key so thinking steps group under the right sub-agent
-            # accordion (same source/purpose as parent_agent_name; read in on_llm_end).
-            if metadata and metadata.get("parent_agent_call_id"):
-                self.pending_llm_requests[run_id]["parent_agent_call_id"] = metadata.get(
-                    "parent_agent_call_id"
-                )
+            if metadata:
+                self.pending_llm_requests[run_id]["hierarchy_metadata"] = {
+                    key: metadata[key]
+                    for key in HIERARCHY_METADATA_KEYS
+                    if metadata.get(key) is not None
+                }
 
         # Use langgraph_node as tool_name if available (for pipeline LLM nodes), otherwise fallback to 'Thinking step'
         llm_tool_name = metadata.get("langgraph_node") if metadata else None
@@ -1246,6 +1262,9 @@ class EliteACallback(BaseCallbackHandler):
                 type=EventTypes.agent_llm_chunk,
                 response_metadata={
                     "tool_run_id": str(run_id),
+                    "metadata": self.pending_llm_requests.get(run_id, {}).get(
+                        "hierarchy_metadata", {}
+                    ),
                 },
                 content=content_delta if has_content else "",
                 thinking=thinking_delta if has_thinking else "",
@@ -1378,7 +1397,7 @@ class EliteACallback(BaseCallbackHandler):
         llm_timestamp_start = pending.get("timestamp_start")
         langgraph_node = pending.get("langgraph_node")
         parent_agent_name = pending.get("parent_agent_name")
-        parent_agent_call_id = pending.get("parent_agent_call_id")
+        hierarchy_metadata = pending.get("hierarchy_metadata", {})
         self.pending_llm_requests.pop(run_id, None)
 
         for generation in response.generations:
@@ -1487,12 +1506,11 @@ class EliteACallback(BaseCallbackHandler):
                             pass
                         generation_chunk["text"] = "\n".join(decisions)
 
+                generation_chunk["text"] = cap_trace_text(generation_chunk.get("text"))
+                generation_chunk["thinking"] = cap_trace_text(generation_chunk.get("thinking"))
+
                 # Add normalized tool_run_id for UI matching (works for both Anthropic and OpenAI)
                 generation_chunk["tool_run_id"] = str(run_id)
-                # Per-invocation key so a reasoning step groups with the right sub-agent
-                # invocation (matches the tool_call metadata; persisted to trace_step).
-                if parent_agent_call_id:
-                    generation_chunk["parent_agent_call_id"] = parent_agent_call_id
                 # Propagate parent_agent_name so history replay can show the nested agent context
                 if parent_agent_name:
                     generation_chunk["parent_agent_name"] = parent_agent_name
@@ -1502,11 +1520,18 @@ class EliteACallback(BaseCallbackHandler):
                 # accordion in the parent's thinking view. Only fills when unset.
                 elif self.subagent_name:
                     generation_chunk["parent_agent_name"] = self.subagent_name
+                for key, value in hierarchy_metadata.items():
+                    if value is not None:
+                        generation_chunk[key] = value
                 # MUST run after all extraction above and before append.
                 _msg = generation_chunk.get("message")
                 if isinstance(_msg, dict):
                     _msg.pop("content", None)
-                self.thinking_steps.append(generation_chunk)
+                self.thinking_steps.append(
+                    self.node_interface.decorate_thinking_step_for_persistence(
+                        generation_chunk
+                    )
+                )
 
         self.node_interface.emit(
             type=EventTypes.agent_llm_end,

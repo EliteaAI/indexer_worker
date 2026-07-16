@@ -133,6 +133,9 @@ class NodeEvent(BaseModel):
     # Swarm child message fields
     parent_message_id: Optional[str] = None
     agent_name: Optional[str] = None
+    # Fresh-run fence for response rows reused by regenerate. Core rejects
+    # callbacks whose generation no longer matches the row's active execution.
+    execution_generation: Optional[str] = None
 
 
 class NodeEventInterface:
@@ -237,8 +240,82 @@ class NodeEventInterface:
             meta = {}
             rmeta["metadata"] = meta
         for key, value in self.event_metadata_overlay.items():
+            if key == "parent_agent_path" and value:
+                # A durable child may itself run leaves in-process. Prefix the task-level outer
+                # ancestry to the producer's inner path; set-if-absent would otherwise discard B
+                # from B->C events. A resumed child can replay a producer-local leading B hop
+                # with a fresh call id; the task-level durable B hop is authoritative, so remove
+                # that duplicate self-tier before merging.
+                existing = meta.get(key) if isinstance(meta.get(key), list) else []
+                if value and existing:
+                    outer = value[-1] if isinstance(value[-1], dict) else {}
+                    first = existing[0] if isinstance(existing[0], dict) else {}
+                    if outer.get("name") and outer.get("name") == first.get("name"):
+                        existing = existing[1:]
+                combined = []
+                seen = set()
+                for item in [*value, *existing]:
+                    if not isinstance(item, dict):
+                        continue
+                    identity = (
+                        ("call", item.get("call_id"))
+                        if item.get("call_id")
+                        else ("name", item.get("name"), item.get("sibling_ordinal"))
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    combined.append(item)
+                meta[key] = combined
+                continue
             if value and not meta.get(key):
                 meta[key] = value
+
+    def apply_metadata_overlay(self, metadata: Optional[dict] = None) -> dict:
+        """Return metadata with the same durable-child lineage used by live events.
+
+        Partial-message persistence does not pass through :meth:`emit`, so callers
+        saving tool calls or thinking steps must opt into the exact same overlay.
+        Keeping the merge here prevents the live Socket.IO view and the reloaded
+        database view from inventing different sub-agent identities.
+        """
+        decorated = dict(metadata) if isinstance(metadata, dict) else {}
+        if not self.event_metadata_overlay:
+            return decorated
+        envelope = {"response_metadata": {"metadata": decorated}}
+        self._apply_event_metadata_overlay(envelope)
+        return envelope["response_metadata"]["metadata"]
+
+    def decorate_tool_call_for_persistence(self, tool_call: dict) -> dict:
+        """Stamp canonical lineage onto both metadata locations of a tool call."""
+        decorated = dict(tool_call) if isinstance(tool_call, dict) else {}
+        decorated["metadata"] = self.apply_metadata_overlay(
+            decorated.get("metadata")
+        )
+        tool_meta = decorated.get("tool_meta")
+        if isinstance(tool_meta, dict):
+            tool_meta = dict(tool_meta)
+            tool_meta["metadata"] = self.apply_metadata_overlay(
+                tool_meta.get("metadata")
+            )
+            decorated["tool_meta"] = tool_meta
+        return decorated
+
+    def decorate_thinking_step_for_persistence(self, step: dict) -> dict:
+        """Stamp canonical lineage onto a persisted thinking-step payload."""
+        decorated = self.apply_metadata_overlay(step)
+        message = decorated.get("message")
+        if isinstance(message, dict):
+            message = dict(message)
+            response_metadata = message.get("response_metadata")
+            if isinstance(response_metadata, dict):
+                response_metadata = dict(response_metadata)
+                response_metadata["metadata"] = self.apply_metadata_overlay(
+                    response_metadata.get("metadata")
+                )
+                message["response_metadata"] = response_metadata
+            decorated["message"] = message
+        return decorated
 
     def _buffer_chunk(self, kwargs: dict) -> None:
         rmeta = kwargs.get("response_metadata") or {}
