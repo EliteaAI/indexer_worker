@@ -36,6 +36,7 @@ from elitea_sdk.runtime.utils.mcp_oauth import (
 
 from .funcs import (
     _is_http_url,
+    _is_unresolved_mcp_type,
     normalize_mcp_server_url,
     get_mcp_server_settings,
     is_mcp_authorization_required_error,
@@ -54,7 +55,7 @@ def _mcp_discovery_url(server_url: str) -> str:
 
 def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
     """Build alias maps for MCP URL resolution and toolkit metadata lookup."""
-    from .funcs import _extract_mcp_server_url, mask_secret
+    from .funcs import _extract_mcp_server_url, mask_secret, normalize_mcp_toolkit_type
 
     alias_map: Dict[str, str] = {}
     alias_meta_map: Dict[str, Dict[str, Any]] = {}
@@ -73,6 +74,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         entry = {
             **alias_meta_map.get(key, {}),
             "toolkit_type": toolkit_type,
+            "toolkit_name": toolkit_name or alias,
             "tool_name": toolkit_name or alias,
         }
         if provided_settings:
@@ -88,11 +90,16 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
             continue
 
         settings = tool.get("settings") if isinstance(tool.get("settings"), dict) else {}
-        toolkit_name = str(tool.get("toolkit_name") or "").strip()
+        server_name = str(settings.get("server_name") or "").strip()
+        toolkit_type = normalize_mcp_toolkit_type(tool_type, server_name)
+        toolkit_name = str(tool.get("toolkit_name") or tool.get("name") or server_name or toolkit_type).strip()
+        if _is_http_url(toolkit_name) and server_name:
+            toolkit_name = server_name
         aliases = {
             toolkit_name,
-            str(settings.get("server_name") or "").strip(),
+            server_name,
             tool_type,
+            toolkit_type,
         }
         if tool_type.startswith("mcp_") and tool_type != "mcp_config":
             aliases.add(tool_type[4:])
@@ -118,7 +125,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         direct_url = _extract_mcp_server_url(settings)
         if _is_http_url(direct_url):
             for alias in aliases:
-                _register(alias, direct_url, tool_type, toolkit_name, _provided_settings)
+                _register(alias, direct_url, toolkit_type, toolkit_name, _provided_settings)
             continue
 
         for alias in list(aliases):
@@ -126,7 +133,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
                 continue
             server_cfg = get_mcp_server_settings(alias) or {}
             cfg_url = _extract_mcp_server_url(server_cfg)
-            _register(alias, cfg_url, tool_type, toolkit_name, _provided_settings)
+            _register(alias, cfg_url, toolkit_type, toolkit_name, _provided_settings)
 
     return alias_map, alias_meta_map
 
@@ -202,6 +209,17 @@ def _make_mcp_auth_tools(
                 if alias_key in alias_to_tool_meta:
                     resolved_meta = dict(alias_to_tool_meta.get(alias_key) or {})
                     break
+            if not resolved_meta.get("toolkit_type"):
+                # Reverse-lookup: find the alias whose registered URL matches server_url.
+                # This handles prebuild MCPs where the LLM passes the real OAuth server URL
+                # (e.g. https://api.github.com) instead of the symbolic alias (e.g. 'github').
+                normalized_input = normalize_mcp_server_url(server_url)
+                for alias_key, registered_url in alias_to_server_url.items():
+                    if normalize_mcp_server_url(registered_url) == normalized_input:
+                        alias_meta = alias_to_tool_meta.get(alias_key) or {}
+                        if alias_meta.get("toolkit_type"):
+                            resolved_meta = {**alias_meta, **resolved_meta}
+                            break
             if not resolved_meta.get("tool_name"):
                 resolved_meta["tool_name"] = tool_name or server_url
             return normalize_mcp_server_url(server_url), resolved_meta
@@ -319,10 +337,12 @@ def _make_mcp_auth_tools(
                 )
             except McpAuthorizationRequired as exc:
                 setattr(exc, "server_url", normalized_url)
-                if not getattr(exc, "tool_name", None):
+                if not getattr(exc, "tool_name", None) or _is_http_url(getattr(exc, "tool_name", None)):
                     exc.tool_name = resolved_tool_name
-                if not getattr(exc, "toolkit_type", None):
+                if _is_unresolved_mcp_type(getattr(exc, "toolkit_type", None)):
                     exc.toolkit_type = meta.get("toolkit_type")
+                if not getattr(exc, "toolkit_name", None):
+                    exc.toolkit_name = meta.get("toolkit_name") or resolved_tool_name
                 if not getattr(exc, "provided_settings", None):
                     _ps = meta.get("provided_settings")
                     if _ps:
@@ -331,10 +351,12 @@ def _make_mcp_auth_tools(
             except Exception as exc:
                 if is_mcp_authorization_required_error(exc):
                     setattr(exc, "server_url", normalized_url)
-                    if not getattr(exc, "tool_name", None):
+                    if not getattr(exc, "tool_name", None) or _is_http_url(getattr(exc, "tool_name", None)):
                         setattr(exc, "tool_name", resolved_tool_name)
-                    if not getattr(exc, "toolkit_type", None):
+                    if _is_unresolved_mcp_type(getattr(exc, "toolkit_type", None)):
                         setattr(exc, "toolkit_type", meta.get("toolkit_type"))
+                    if not getattr(exc, "toolkit_name", None):
+                        setattr(exc, "toolkit_name", meta.get("toolkit_name") or resolved_tool_name)
                     if not getattr(exc, "provided_settings", None):
                         _ps = meta.get("provided_settings")
                         if _ps:
