@@ -38,6 +38,7 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from ..utils.exceptions import InternalSDKError
 from ..utils.funcs import (
     _is_mcp_authorization_required_error,
+    _is_unresolved_mcp_type,
     _mcp_auth_error_to_metadata,
     is_mcp_authorization_required_error,
     extract_finish_reason,
@@ -986,6 +987,81 @@ class EliteACallback(BaseCallbackHandler):
                 self.tool_calls[tool_run_id] = tool_call
 
             auth_payload = _mcp_auth_error_to_metadata(tool_exception)
+
+            # Some SDK/client paths raise McpAuthorizationRequired without a resolved
+            # toolkit_type (or with the generic placeholder "mcp"/"mcp_config"). Backfill
+            # from the currently running tool metadata so FE receives a stable discriminator.
+            if _is_unresolved_mcp_type(auth_payload.get("toolkit_type")):
+                resolved_toolkit_type = None
+
+                callback_metadata = kwargs.get("metadata")
+                if isinstance(callback_metadata, dict):
+                    resolved_toolkit_type = (
+                        callback_metadata.get("toolkit_type")
+                        or callback_metadata.get("type")
+                    )
+
+                tool_call_metadata = getattr(tool_call, "metadata", None)
+                if not resolved_toolkit_type and isinstance(tool_call_metadata, dict):
+                    resolved_toolkit_type = (
+                        tool_call_metadata.get("toolkit_type")
+                        or tool_call_metadata.get("type")
+                    )
+
+                tool_meta = getattr(tool_call, "tool_meta", None)
+                if not resolved_toolkit_type and isinstance(tool_meta, dict):
+                    nested_meta = tool_meta.get("metadata")
+                    if isinstance(nested_meta, dict):
+                        resolved_toolkit_type = (
+                            nested_meta.get("toolkit_type")
+                            or nested_meta.get("type")
+                        )
+
+                if not resolved_toolkit_type:
+                    resolved_toolkit_type = self.cached_toolkit_type
+
+                if resolved_toolkit_type:
+                    auth_payload["toolkit_type"] = resolved_toolkit_type
+                    try:
+                        setattr(tool_exception, "toolkit_type", resolved_toolkit_type)
+                    except Exception:  # pragma: no cover - defensive only
+                        pass
+
+            if not auth_payload.get("toolkit_name"):
+                resolved_toolkit_name = None
+
+                callback_metadata = kwargs.get("metadata")
+                if isinstance(callback_metadata, dict):
+                    resolved_toolkit_name = callback_metadata.get("toolkit_name")
+
+                tool_call_metadata = getattr(tool_call, "metadata", None)
+                if not resolved_toolkit_name and isinstance(tool_call_metadata, dict):
+                    resolved_toolkit_name = tool_call_metadata.get("toolkit_name")
+
+                tool_meta = getattr(tool_call, "tool_meta", None)
+                if not resolved_toolkit_name and isinstance(tool_meta, dict):
+                    nested_meta = tool_meta.get("metadata")
+                    if isinstance(nested_meta, dict):
+                        resolved_toolkit_name = (
+                            nested_meta.get("toolkit_name")
+                            or nested_meta.get("display_name")
+                        )
+
+                if not resolved_toolkit_name:
+                    resolved_toolkit_name = self.cached_toolkit_name
+
+                if resolved_toolkit_name:
+                    auth_payload["toolkit_name"] = resolved_toolkit_name
+                    if not auth_payload.get("tool_name"):
+                        auth_payload["tool_name"] = resolved_toolkit_name
+                    try:
+                        setattr(tool_exception, "toolkit_name", resolved_toolkit_name)
+                    except Exception:  # pragma: no cover - defensive only
+                        pass
+
+            if auth_payload.get("toolkit_name") and not auth_payload.get("tool_name"):
+                auth_payload["tool_name"] = auth_payload["toolkit_name"]
+
             provided_settings = getattr(tool_exception, 'provided_settings', None)
             if provided_settings:
                 auth_payload['provided_settings'] = provided_settings

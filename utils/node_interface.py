@@ -462,7 +462,8 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
         'created_at', 'updated_on', 'toolkit_id'
     },
     EventTypes.mcp_authorization_required.value: {
-        'server_url', 'resource_metadata_url', 'www_authenticate', 'resource_metadata', 'authorization_servers', 'tool_run_id', 'tool_name'
+        'server_url', 'resource_metadata_url', 'www_authenticate', 'resource_metadata',
+        'authorization_servers', 'tool_run_id', 'tool_name', 'toolkit_name', 'toolkit_type'
     },
     EventTypes.agent_index_data_removed.value: {
         'index_name', 'toolkit_id', 'project_id'
