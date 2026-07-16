@@ -29,7 +29,7 @@ from tools import worker_core  # pylint: disable=E0401
 
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired, extract_user_friendly_mcp_error
 
-from ..utils.funcs import normalize_mcp_auth_metadata_urls, backfill_mcp_auth_metadata
+from ..utils.funcs import normalize_mcp_auth_metadata_urls
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent, InitiatorType
 
 # Import shared components from the agent common module
@@ -61,7 +61,6 @@ def build_mcp_auth_metadata(
         Dictionary containing authorization metadata with provided_settings if applicable
     """
     auth_metadata = normalize_mcp_auth_metadata_urls(exception.to_dict()) or {}
-    backfill_mcp_auth_metadata(auth_metadata, toolkit_config)
 
     if chat_project_id is not None:
         auth_metadata['chat_project_id'] = chat_project_id

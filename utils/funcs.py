@@ -533,56 +533,6 @@ def _mcp_alternate_url(url: Optional[str]) -> Optional[str]:
 # MCP exception helpers
 # ---------------------------------------------------------------------------
 
-def normalize_mcp_toolkit_type(tool_type: str, server_name: str = "") -> str:
-    """Convert a generic MCP type (``mcp`` / ``mcp_config``) to a prebuilt type name.
-
-    Mirrors ``_normalize_mcp_toolkit_type`` in the SDK so that ``indexer_worker``
-    can resolve toolkit identity without importing from the SDK directly.
-    """
-    normalized_type = str(tool_type or "").strip()
-    normalized_server = str(server_name or "").strip()
-    if normalized_type.startswith("mcp_") and normalized_type != "mcp_config":
-        return normalized_type
-    if normalized_type in {"mcp", "mcp_config"} and normalized_server:
-        safe_server = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in normalized_server)
-        safe_server = safe_server.strip("_").lower()
-        if safe_server:
-            return f"mcp_{safe_server}"
-    return normalized_type or "mcp"
-
-
-def _is_unresolved_mcp_type(toolkit_type: Any) -> bool:
-    """Return True when toolkit_type is absent or a generic placeholder that should be promoted."""
-    if not toolkit_type:
-        return True
-    return str(toolkit_type).strip() in {"mcp", "mcp_config"}
-
-
-def backfill_mcp_auth_metadata(metadata: dict, source: dict) -> None:
-    """Backfill missing MCP auth identity fields in-place from a fallback source dict.
-
-    Fills ``toolkit_name``, ``toolkit_type``, and ``tool_name`` when absent or
-    holding a raw URL value.  ``source`` may be kwargs, a toolkit_config dict,
-    or any other mapping that carries these keys.
-
-    Mutates ``metadata`` directly so callers do not need to reassign.
-    """
-    if not metadata.get("toolkit_name"):
-        name = source.get("toolkit_name") or source.get("name") or source.get("tool_name")
-        if name:
-            metadata["toolkit_name"] = name
-
-    if _is_unresolved_mcp_type(metadata.get("toolkit_type")):
-        tt = source.get("toolkit_type") or source.get("type")
-        if tt:
-            metadata["toolkit_type"] = tt
-
-    toolkit_name = metadata.get("toolkit_name")
-    tool_name = metadata.get("tool_name")
-    if toolkit_name and (not tool_name or str(tool_name).startswith("http")):
-        metadata["tool_name"] = toolkit_name
-
-
 def _is_mcp_authorization_required_error(exc: Exception) -> bool:
     """Return True for McpAuthorizationRequired, including reloaded class instances.
 
@@ -620,23 +570,6 @@ def _normalize_authorization_servers(value: Any) -> Optional[list]:
 
 def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
     """Build stable metadata dict for MCP auth required events."""
-    def _resolve_toolkit_name(metadata: dict) -> Optional[str]:
-        toolkit_name = metadata.get("toolkit_name")
-        if isinstance(toolkit_name, str) and toolkit_name.strip():
-            return toolkit_name
-
-        tool_name = metadata.get("tool_name")
-        if isinstance(tool_name, str) and tool_name.strip() and not _is_http_url(tool_name):
-            return tool_name
-
-        resource_metadata = metadata.get("resource_metadata")
-        if isinstance(resource_metadata, dict):
-            resource_name = resource_metadata.get("resource_name")
-            if isinstance(resource_name, str) and resource_name.strip():
-                return resource_name
-
-        return None
-
     if hasattr(exc, "to_dict") and callable(exc.to_dict):
         try:
             metadata = exc.to_dict()
@@ -695,13 +628,6 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
 
             if authorization_servers:
                 metadata["authorization_servers"] = authorization_servers
-
-            toolkit_name = _resolve_toolkit_name(metadata)
-            if toolkit_name:
-                metadata["toolkit_name"] = toolkit_name
-                tool_name = metadata.get("tool_name")
-                if not tool_name or _is_http_url(tool_name):
-                    metadata["tool_name"] = toolkit_name
             return metadata
         except Exception:
             pass
@@ -730,16 +656,6 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
                 **resource_metadata,
                 "authorization_servers": authorization_servers,
             }
-    toolkit_name = getattr(exc, "toolkit_name", None)
-    tool_name = getattr(exc, "tool_name", None)
-    if not toolkit_name and isinstance(tool_name, str) and tool_name and not _is_http_url(tool_name):
-        toolkit_name = tool_name
-    if not toolkit_name and isinstance(resource_metadata, dict):
-        resource_name = resource_metadata.get("resource_name")
-        if isinstance(resource_name, str) and resource_name:
-            toolkit_name = resource_name
-    if toolkit_name and (not tool_name or _is_http_url(tool_name)):
-        tool_name = toolkit_name
     return {
         "message": str(exc),
         "server_url": server_url,
@@ -748,8 +664,7 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
         "resource_metadata": resource_metadata,
         "authorization_servers": authorization_servers,
         "status": getattr(exc, "status", None),
-        "tool_name": tool_name,
-        "toolkit_name": toolkit_name,
+        "tool_name": getattr(exc, "tool_name", None),
         "toolkit_type": getattr(exc, "toolkit_type", None),
         "toolkit_id": getattr(exc, "toolkit_id", None),
     }

@@ -25,7 +25,7 @@ from pylon.core.tools import web
 
 from tools import worker_core
 
-from ..utils.funcs import normalize_mcp_auth_metadata_urls, normalize_mcp_server_url, backfill_mcp_auth_metadata
+from ..utils.funcs import normalize_mcp_auth_metadata_urls, normalize_mcp_server_url
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent
 
 # Import shared components from the agent common module
@@ -185,10 +185,9 @@ class Method:
         
         except McpAuthorizationRequired as e:
             log.info(f"MCP authorization required for server: {url}")
-
+            
             # Get OAuth metadata from the exception
             response_metadata = normalize_mcp_auth_metadata_urls(e.to_dict()) or {}
-            backfill_mcp_auth_metadata(response_metadata, kwargs)
             response_metadata['chat_project_id'] = tasknode_task.meta.get('chat_project_id')
             
             # Emit the mcp_authorization_required event
