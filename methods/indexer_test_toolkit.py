@@ -567,6 +567,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Add callbacks to params
             runtime_config.update({"callbacks": callbacks})
 
+            # Thread the initiator (user/llm/schedule) into runtime_config.metadata so the
+            # SDK's BaseIndexerToolkit can detect scheduler-triggered runs and promote a
+            # successful completion history state from 'completed' to 'scheduled_reindex'.
+            initiator_value = str(tasknode_task.meta.get("initiator", InitiatorType.user))
+            existing_metadata = runtime_config.get("metadata") if isinstance(runtime_config.get("metadata"), dict) else {}
+            existing_metadata = {**existing_metadata, "initiator": initiator_value}
+            runtime_config["metadata"] = existing_metadata
+
             # Call the test_toolkit_tool method
             # Note: agent_tool_start/end events are automatically emitted by EliteACallback
             test_result = client.test_toolkit_tool(
