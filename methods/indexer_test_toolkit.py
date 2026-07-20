@@ -155,7 +155,8 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
 
 def test_error(
         node_interface: NodeEventInterface, toolkit_config: dict, tool_name: str,
-        error_message: str, message_id: str, tasknode_task_meta: dict
+        error_message: str, message_id: str, tasknode_task_meta: dict,
+        execution_generation: Optional[str] = None
 ) -> dict:
     """Handle test execution errors with proper event emission"""
     exception_uid = str(uuid4())
@@ -197,17 +198,21 @@ def test_error(
         "Could not serialize payload_additional_kwargs"
     )
 
+    error_response_metadata = {
+        'project_id': tasknode_task_meta.get("project_id"),
+        'chat_project_id': tasknode_task_meta.get("chat_project_id"),
+        'toolkit_config': clean_toolkit_config,
+        'tool_name': tool_name,
+        'is_error': True
+    }
+    if execution_generation:
+        error_response_metadata['execution_generation'] = execution_generation
+
     msg_event_node = NodeEvent(
         type=EventTypes.full_message,
         stream_id=node_interface.stream_id,
         message_id=message_id,
-        response_metadata={
-            'project_id': tasknode_task_meta.get("project_id"),
-            'chat_project_id': tasknode_task_meta.get("chat_project_id"),
-            'toolkit_config': clean_toolkit_config,
-            'tool_name': tool_name,
-            'is_error': True
-        },
+        response_metadata=error_response_metadata,
         content=error_message,
         **clean_additional_kwargs
     ).model_dump_json()
@@ -468,6 +473,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         project_auth_token = kwargs.get("project_auth_token")
         deployment_url = kwargs.get("deployment_url")
         mcp_tokens = kwargs.get("mcp_tokens")
+        # Must round-trip so chat_message_stream_end's is_current_execution
+        # matches msg_group.meta and persists the tool response.
+        execution_generation = kwargs.get("execution_generation")
 
         # Clean toolkit_config to ensure JSON serializability
         clean_toolkit_config = clean_for_json_serialization(
@@ -490,7 +498,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.error(error_msg)
             return test_error(
                 node_interface, clean_toolkit_config, tool_name, error_msg,
-                message_id, tasknode_task.meta
+                message_id, tasknode_task.meta, execution_generation
             )
 
         if not tool_name:
@@ -498,7 +506,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.error(error_msg)
             return test_error(
                 node_interface, clean_toolkit_config, tool_name, error_msg,
-                message_id, tasknode_task.meta
+                message_id, tasknode_task.meta, execution_generation
             )
 
         # Resolve MCP credentials from pylon config if toolkit is MCP type and credentials are missing
@@ -668,21 +676,25 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 "Could not serialize payload_additional_kwargs"
             )
 
+            full_message_response_metadata = {
+                'project_id': tasknode_task.meta.get("project_id"),
+                'chat_project_id': tasknode_task.meta.get("chat_project_id"),
+                'toolkit_config': clean_toolkit_config,
+                'tool_name': tool_name,
+                # Use cleaned SDK result directly instead of duplicating data
+                'test_result': clean_test_result,
+                'execution_time_seconds': execution_time,
+                'is_error': not success,
+                'content_type': content_type  # For toolkit testing page formatting
+            }
+            if execution_generation:
+                full_message_response_metadata['execution_generation'] = execution_generation
+
             msg_event_node = NodeEvent(
                 type=EventTypes.full_message,
                 stream_id=node_interface.stream_id,
                 message_id=message_id,
-                response_metadata={
-                    'project_id': tasknode_task.meta.get("project_id"),
-                    'chat_project_id': tasknode_task.meta.get("chat_project_id"),
-                    'toolkit_config': clean_toolkit_config,
-                    'tool_name': tool_name,
-                    # Use cleaned SDK result directly instead of duplicating data
-                    'test_result': clean_test_result,
-                    'execution_time_seconds': execution_time,
-                    'is_error': not success,
-                    'content_type': content_type  # For toolkit testing page formatting
-                },
+                response_metadata=full_message_response_metadata,
                 # Use formatted content (already serialized for JSON types)
                 content=formatted_content,
                 **clean_additional_kwargs
@@ -749,7 +761,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.exception(error_msg)
             return test_error(
                 node_interface, clean_toolkit_config, tool_name, error_msg,
-                message_id, tasknode_task.meta
+                message_id, tasknode_task.meta, execution_generation
             )
         finally:
             # Stop event node if forked (following indexer_agent.py pattern)
