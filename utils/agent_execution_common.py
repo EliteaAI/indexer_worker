@@ -858,11 +858,8 @@ def emit_response_events(
             'chat_project_id': task_meta.get("chat_project_id"),
             'application_details': application_details,
             'thread_id': thread_id_response,
-            'thinking_steps': elitea_callback.thinking_steps,
-            'tool_calls': {
-                run_id: tool_call.model_dump()
-                for run_id, tool_call in elitea_callback.tool_calls.items()
-            },
+            # tool_calls/thinking_steps omitted: already delta-synced into message_trace_step
+            # via on_tool_end/on_llm_end's partial_message events during streaming
             'llm_start_timestamp': elitea_callback.llm_start_timestamp,
             'additional_response_meta': elitea_custom_callback.additional_response_meta,
             'files_modified': elitea_custom_callback.modified_files,
