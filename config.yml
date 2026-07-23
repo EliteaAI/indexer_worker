@@ -19,8 +19,25 @@ llm_chunk_batching:
 # Values MUST be strings (os.environ requires str). Absent => SDK safe defaults.
 #   SANDBOX_MAX_CONCURRENT: "0"      disables the concurrency gate
 #   SANDBOX_MEMORY_PRESSURE_PCT: "0" disables the memory-pressure gate
+#
+# TLS trust overrides for sandbox outbound HTTPS. Both DEFAULT EMPTY = feature
+# OFF (the deno run flag is only appended when the var is non-empty):
+#   PYODIDE_ROOT_CA_PATH     SECURE. Absolute path to a PEM root CA file,
+#                            readable inside the container, that Deno trusts via
+#                            `--cert=<path>`. Takes precedence over
+#                            ALLOWED_PYODIDE_DOMAINS — prefer this whenever the
+#                            org's root CA can be mounted into the container.
+#   ALLOWED_PYODIDE_DOMAINS  UNSAFE FALLBACK, used only when PYODIDE_ROOT_CA_PATH
+#                            is unset. Comma-separated hostnames that BYPASS TLS
+#                            certificate validation via Deno's
+#                            `--unsafely-ignore-certificate-errors=<list>`.
+#                            Scoped to the listed hosts, but validation is fully
+#                            disabled for them — use only when distributing the
+#                            root CA is not feasible.
 env_vars:
   SANDBOX_TIMEOUT_SECONDS: "55"       # per-execution wall-clock kill
   SANDBOX_WASM_MAX_MEM_MB: "512"      # per-execution Pyodide WASM heap cap
   SANDBOX_MAX_CONCURRENT: "16"        # max concurrent deno sandboxes (per pod)
   SANDBOX_MEMORY_PRESSURE_PCT: "85"   # reject new runs above this container mem %
+  PYODIDE_ROOT_CA_PATH: ""            # secure: PEM path -> --cert (default off)
+  ALLOWED_PYODIDE_DOMAINS: ""         # unsafe fallback: comma-separated hosts -> --unsafely-ignore-certificate-errors (default off)
