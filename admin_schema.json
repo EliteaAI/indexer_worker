@@ -14,7 +14,7 @@
     "mcp_servers": {
       "type": "object",
       "title": "MCP Server Definitions",
-      "description": "Pre-configured MCP servers that appear as selectable toolkits. Supports stdio (local subprocess) and http (remote) server types.",
+      "description": "Pre-configured MCP servers that appear as selectable toolkits. Supports stdio (local subprocess) and http (remote) server types. Set \"group\" on an entry (\"Elitea\", \"EPAM\", or \"Other\") to place it under that sub-section in the toolkit picker and Types filter; omitted entries default to \"Other\".",
       "path": "mcp_servers",
       "section": "mcp_servers",
       "default": {},
@@ -72,6 +72,14 @@
             },
             "icon_url": {
               "type": "string"
+            },
+            "group": {
+              "type": "string",
+              "enum": [
+                "Elitea",
+                "EPAM",
+                "Other"
+              ]
             },
             "headers": {
               "type": "object",
