@@ -1183,6 +1183,11 @@ def build_child_launch_payloads(
             'is_regenerate': False,
             'execution_generation': parent_kwargs.get('execution_generation'),
             'meta': version_details.get('meta', {}),
+            # Moved, not copied: the bodies would otherwise ride the checkpoint write
+            # and both RPC hops twice, once here and once inside version_details.
+            # Safe only because _jsonsafe_spec deep-copies per call id, so parallel
+            # calls to one sub-agent hold distinct dicts and none is enriched twice.
+            'attached_skills': version_details.pop('attached_skills', None) or [],
             'application': {
                 'id': spec.get('application_id'),
                 'name': spec.get('name'),
@@ -1229,6 +1234,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'exception_handling_enabled', 'auto_approve_sensitive_actions',
         'return_chat_history',
         'execution_generation',
+        'attached_skills', 'invoked_skills',
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
     # context_settings is mutated in place at task entry to attach live
