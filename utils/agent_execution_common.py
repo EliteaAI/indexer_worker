@@ -709,17 +709,29 @@ def configure_checkpoint_resume(
 # Response Events
 # =============================================================================
 
-def _collect_applied_skills(invoked_skills, attached_skills, tool_calls):
-    """Union of ~name-invoked skills and skills activated via load_skill this
-    turn, for message.meta.invoked_skills observability parity (#5698)."""
-    applied = [
-        {'skill_id': s.get('skill_id'), 'name': s.get('name')}
-        for s in (invoked_skills or [])
-        if isinstance(s, dict) and s.get('name')
-    ]
-    seen = {(e.get('name') or '').strip().lower() for e in applied}
-    skill_id_by_name = {
-        (s.get('name') or '').strip().lower(): s.get('skill_id')
+def _collect_applied_skills(applied_skills, attached_skills, tool_calls):
+    """Every skill in effect this turn, without the instruction bodies.
+
+    ``applied_skills`` is what was known at dispatch; skills the model loads on
+    demand are only knowable here, from the load_skill tool outputs.
+    """
+    applied = []
+    seen = set()
+    for skill in (applied_skills or []):
+        if not isinstance(skill, dict) or not skill.get('name'):
+            continue
+        key = skill['name'].strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        applied.append({
+            'skill_id': skill.get('skill_id'),
+            'name': skill.get('name'),
+            'icon_meta': skill.get('icon_meta'),
+        })
+    # A load_skill output carries only the name; the registry supplies id and icon.
+    by_name = {
+        (s.get('name') or '').strip().lower(): s
         for s in (attached_skills or [])
         if isinstance(s, dict) and s.get('name')
     }
@@ -733,7 +745,12 @@ def _collect_applied_skills(invoked_skills, attached_skills, tool_calls):
         key = name.strip().lower()
         if key not in seen:
             seen.add(key)
-            applied.append({'skill_id': skill_id_by_name.get(key), 'name': name})
+            registered = by_name.get(key) or {}
+            applied.append({
+                'skill_id': registered.get('skill_id'),
+                'name': name,
+                'icon_meta': registered.get('icon_meta'),
+            })
     return applied
 
 
@@ -755,8 +772,9 @@ def emit_response_events(
     hitl_value: str = '',
     image_thumbnails: Optional[Dict[str, str]] = None,
     context_info: Optional[Dict[str, Any]] = None,
-    invoked_skills: Optional[List[Dict[str, Any]]] = None,
-    attached_skills: Optional[List[Dict[str, Any]]] = None
+    applied_skills: Optional[List[Dict[str, Any]]] = None,
+    attached_skills: Optional[List[Dict[str, Any]]] = None,
+    parallel_reconcile: Optional[Any] = None
 ):
     """
     Emit all response-related events.
@@ -868,9 +886,14 @@ def emit_response_events(
             'chat_history_tokens_input': total_tokens_in,
             'llm_response_tokens_output': total_tokens_out,
             'should_continue': should_continue,
+            # Both mark a run resuming an existing turn, so the meta writer keeps the
+            # earlier round's skills. build_parent_reconcile_payload forces the other
+            # flags off, making this the reconcile run's only signal.
+            'hitl_resume': hitl_resume,
+            'parallel_reconcile': bool(parallel_reconcile),
             'context_info': context_info,
             'invoked_skills': _collect_applied_skills(
-                invoked_skills, attached_skills, elitea_callback.tool_calls
+                applied_skills, attached_skills, elitea_callback.tool_calls
             ),
         }
 
@@ -1236,6 +1259,9 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'return_chat_history',
         'execution_generation',
         'attached_skills', 'invoked_skills',
+        # A parked parent emits no full_message, so the reconcile re-invoke is what
+        # persists the turn. Never fed to the model.
+        'applied_skills',
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
     # context_settings is mutated in place at task entry to attach live
