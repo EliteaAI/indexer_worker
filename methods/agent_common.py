@@ -441,7 +441,23 @@ def execution_error(
         content=error,
     )
 
-    node_interface.emit(type=EventTypes.agent_exception, content=error_message)
+    # Carry the user-facing text and budget scope on the exception event too. Surfaces
+    # that consume the stream directly (skill test panel) never see full_message, which
+    # only reaches persisted chat conversations, so error_message alone would leave them
+    # showing an internal label like "InternalSDKError on user input".
+    exception_meta = {}
+    #
+    if human_readable:
+        exception_meta["human_readable"] = human_readable
+    #
+    if budget_error_code:
+        exception_meta["budget_error_code"] = budget_error_code
+    #
+    node_interface.emit(
+        type=EventTypes.agent_exception,
+        content=error_message,
+        response_metadata=exception_meta,
+    )
 
     # build response metadata with execution_time_seconds if available
     response_metadata = {
