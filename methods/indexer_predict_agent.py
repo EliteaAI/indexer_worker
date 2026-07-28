@@ -243,7 +243,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             execution_generation=kwargs.get('execution_generation'),
         )
 
-        node_interface.emit(type=EventTypes.agent_start)
+        # Message-invoked skills produce no tool call, so this is their only live
+        # signal. Never added to invoke_config: it must not reach the model.
+        applied_skills = kwargs.get("applied_skills") or []
+        node_interface.emit(
+            type=EventTypes.agent_start,
+            response_metadata={'invoked_skills': applied_skills},
+        )
 
         execution_start_time = datetime.now(tz=timezone.utc)
 
@@ -336,6 +342,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 tasknode_task.id,
                 debug=kwargs.get("debug", False)
             )
+
+            # Stop and HITL pause end a run with no terminal event; partial saves
+            # are the only chance to persist which skills applied.
+            elitea_callback.applied_skills = applied_skills
+            elitea_callback.skills_by_name = {
+                (s.get('name') or '').strip().lower(): s
+                for s in (kwargs.get('attached_skills') or [])
+                if isinstance(s, dict) and s.get('name')
+            }
 
             # Create Langfuse callback
             application_name = application_data.get("name", "predict-agent")
@@ -467,8 +482,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 hitl_value=hitl_value,
                 image_thumbnails=image_thumbnails,
                 context_info=context_info,
-                invoked_skills=invoke_config["configurable"].get("invoked_skills"),
+                applied_skills=applied_skills,
                 attached_skills=invoke_config["configurable"].get("attached_skills"),
+                parallel_reconcile=kwargs.get("parallel_reconcile"),
             )
 
             # Capture a HITL pause for the final task result so the reconcile gate
