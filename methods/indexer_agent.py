@@ -29,6 +29,8 @@ from ..utils.node_interface import EventTypes
 # Import shared components
 from .agent_common import (
     execution_error,
+    budget_exceeded_error_code,
+    BUDGET_EXCEEDED_MESSAGES,
     _fetch_pgvector_connstr_with_retry,
     temp_elitea_client,
     fetch_langfuse_config,
@@ -557,12 +559,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             )
 
         except InternalSDKError as e:
+            # A budget block is an expected policy outcome, not an SDK failure
+            budget_code = getattr(e, 'budget_error_code', None)
+            #
             return execution_error(
                 node_interface, user_input, chat_history,
                 f"InternalSDKError on user input",
                 thread_id, message_id, tasknode_task.meta,
-                human_readable=f"Internal SDK error occurred while processing your request, {e}",
-                execution_start_time=execution_start_time
+                human_readable=(
+                    BUDGET_EXCEEDED_MESSAGES[budget_code] if budget_code
+                    else f"Internal SDK error occurred while processing your request, {e}"
+                ),
+                execution_start_time=execution_start_time,
+                budget_error_code=budget_code,
             )
         except ValidationError:
             return execution_error(
@@ -620,6 +629,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     e,
                     tasknode_task.meta.get('chat_project_id'),
                     chat_history,
+                )
+
+            # A budget rejection is an expected policy outcome, not a platform failure,
+            # so it must not surface as a raw SDK error. Checked before the branches
+            # below because it arrives as a plain 400.
+            budget_code = budget_exceeded_error_code(e)
+            if budget_code:
+                return execution_error(
+                    node_interface, user_input, chat_history,
+                    f"Budget exceeded on user input: {budget_code}",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=BUDGET_EXCEEDED_MESSAGES[budget_code],
+                    execution_start_time=execution_start_time,
+                    budget_error_code=budget_code,
                 )
 
             # Check for LLM authentication/authorization errors (model access denied, invalid keys, etc.)

@@ -40,6 +40,7 @@ from ..utils.funcs import (
     _is_mcp_authorization_required_error,
     _is_unresolved_mcp_type,
     _mcp_auth_error_to_metadata,
+    budget_exceeded_error_code,
     is_mcp_authorization_required_error,
     extract_finish_reason,
     extract_token_usage,
@@ -66,6 +67,18 @@ HIERARCHY_METADATA_KEYS = (
     "child_thread_id",
     "thread_id",
 )
+
+# Deliberately period-neutral, so the copy holds whatever the budget period is
+BUDGET_EXCEEDED_MESSAGES = {
+    "project_budget_exceeded": (
+        "This project's budget has been reached. AI requests are unavailable until "
+        "the budget resets or a project admin increases the limit."
+    ),
+    "member_budget_exceeded": (
+        "Your budget for this project has been reached. Your AI requests are unavailable "
+        "until the budget resets or a project admin increases your limit."
+    ),
+}
 
 # Secret name for project PostgreSQL connection string
 PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
@@ -379,6 +392,7 @@ def execution_error(
     tasknode_task_meta: dict,
     human_readable: str = None,
     execution_start_time: Optional[datetime] = None,
+    budget_error_code: Optional[str] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -393,6 +407,7 @@ def execution_error(
         tasknode_task_meta: Task metadata containing project info
         human_readable: Human-readable error message (optional)
         execution_start_time: Execution start timestamp for duration calculation (optional)
+        budget_error_code: Budget scope that blocked the call, for the UI to link to usage (optional)
 
     Returns:
         Dict containing chat_history and error information
@@ -441,6 +456,12 @@ def execution_error(
     # Add execution_time_seconds for accurate duration calculation (Issue #3134)
     if execution_time_seconds is not None:
         response_metadata["execution_time_seconds"] = execution_time_seconds
+
+    # additional_response_meta is the supported way onto the persisted message meta;
+    # a bare response_metadata key is dropped by elitea_core's whitelist, and the UI
+    # needs this after a reload, not just on the live socket update
+    if budget_error_code:
+        response_metadata["additional_response_meta"] = {"budget_error_code": budget_error_code}
 
     if not is_fanout_child(tasknode_task_meta):
         msg_event_node = NodeEvent(
@@ -1416,6 +1437,10 @@ class EliteACallback(BaseCallbackHandler):
         self.pending_llm_requests.pop(run_id, None)
         #
         if args:
+            # Wrapping loses the structured body, so carry the budget scope across it —
+            # a budget block needs a friendly message, not a raw provider error
+            budget_code = budget_exceeded_error_code(args[0])
+            #
             try:
                 status_code: int = args[0].status_code
                 error_message = self._parse_llm_error_message(args[0].body)
@@ -1424,6 +1449,8 @@ class EliteACallback(BaseCallbackHandler):
                 )
             except (AttributeError, TypeError, KeyError):
                 self.llm_error = InternalSDKError(str(args[0]))
+            #
+            self.llm_error.budget_error_code = budget_code
         else:
             self.llm_error = InternalSDKError("Unknown LLM error occurred")
         # exception = args[0]
