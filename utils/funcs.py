@@ -602,6 +602,33 @@ def is_mcp_authorization_required_error(exc: Exception) -> bool:
     return _is_mcp_authorization_required_error(exc)
 
 
+# Scope codes the LLM proxy sets on a budget rejection; the UI maps them to its own
+# wording and usage links
+BUDGET_ERROR_CODES = ("project_budget_exceeded", "member_budget_exceeded")
+
+
+def budget_exceeded_error_code(exc: Exception) -> Optional[str]:
+    """Budget scope code if this exception is a budget rejection, else None.
+
+    Keyed off the structured body rather than the exception class: a budget rejection
+    arrives as a plain 400, which is far too broad to branch on. The OpenAI SDK strips
+    the "error" wrapper and the Anthropic one does not, so read through both shapes.
+    """
+    body = getattr(exc, "body", None)
+    #
+    if not isinstance(body, dict):
+        return None
+    #
+    detail = body.get("error") if isinstance(body.get("error"), dict) else body
+    #
+    if detail.get("type") != "budget_exceeded":
+        return None
+    #
+    code = detail.get("code")
+    #
+    return code if code in BUDGET_ERROR_CODES else BUDGET_ERROR_CODES[0]
+
+
 def _normalize_authorization_servers(value: Any) -> Optional[list]:
     """Normalize a single URL string or list of URLs for MCP authorization_servers fields."""
     if isinstance(value, str):
