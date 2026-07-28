@@ -35,6 +35,18 @@ from elitea_sdk.runtime.utils.trace_limits import cap_trace_json, cap_trace_text
 from pydantic import BaseModel
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
+try:
+    from elitea_sdk.runtime.langchain.constants import (
+        LOAD_SKILL_ALREADY_ACTIVE_RE,
+        LOADED_SKILL_PREFIX_RE,
+    )
+except ImportError:
+    # Shim for SDKs predating the shared patterns; such an SDK says "is already
+    # active for this turn", hence the alternation. Duplicated, not imported from
+    # utils.agent_execution_common: that module imports this one.
+    LOADED_SKILL_PREFIX_RE = re.compile(r'^Skill "([^"]+)" is now active')
+    LOAD_SKILL_ALREADY_ACTIVE_RE = re.compile(r'^Skill "([^"]+)" is already (?:loaded|active)')
+
 from ..utils.exceptions import InternalSDKError
 from ..utils.funcs import (
     _is_mcp_authorization_required_error,
@@ -551,6 +563,8 @@ class EliteACallback(BaseCallbackHandler):
         # Set post-construction by indexer_agent (which has the child's
         # version_details in scope); defaults None for an ordinary top-level run.
         self.subagent_agent_type: str = None
+        self.applied_skills: list = []
+        self.skills_by_name: dict = {}
         self.thinking_steps: list[dict] = []
         self.tokens_in = 0
         self.tokens_out = 0
@@ -813,6 +827,17 @@ class EliteACallback(BaseCallbackHandler):
             tool_meta["metadata"]["parent_agent_name"] = self.subagent_name
             tool_metadata["parent_agent_name"] = self.subagent_name
 
+        # Trace rows drop tool_inputs, so without this stamp a reload degrades the
+        # chip to the generic toolkit label. The icon rides tool_metadata: the
+        # live event's toolMeta is built from `metadata`, not tool_meta.
+        if tool_name == "load_skill":
+            requested = (kwargs.get("inputs") or {}).get("skill")
+            if isinstance(requested, str) and requested.strip():
+                registered = self.skills_by_name.get(requested.strip().lower()) or {}
+                tool_meta["loaded_skill"] = registered.get("name") or requested.strip()
+                if registered.get("icon_meta"):
+                    tool_metadata["icon_meta"] = registered["icon_meta"]
+
         # Extract icon_meta from tool_metadata (kwargs['metadata']) and add directly to tool_meta
         # This is where LangGraph passes execution context metadata including icon_meta
         if "icon_meta" in tool_metadata:
@@ -877,6 +902,40 @@ class EliteACallback(BaseCallbackHandler):
             type=EventTypes.agent_tool_start,
             response_metadata=tool_call.model_dump(include=include_fields),
         )
+
+    def _applied_skills_for_partial(self, tool_call=None) -> list:
+        """Applied skills to ride a partial save.
+
+        ``full_message`` is the only other writer and never fires on Stop or at a
+        HITL pause. The meta writer unions partial saves, so emitting the
+        dispatch-time set plus this step's own load_skill accumulates the same list
+        one step at a time.
+        """
+        applied = [
+            {
+                'skill_id': skill.get('skill_id'),
+                'name': skill.get('name'),
+                'icon_meta': skill.get('icon_meta'),
+            }
+            for skill in (self.applied_skills or [])
+            if isinstance(skill, dict) and skill.get('name')
+        ]
+        if tool_call is not None and getattr(tool_call, 'tool_name', '') == 'load_skill':
+            tool_output = getattr(tool_call, 'tool_output', '') or ''
+            # An "already loaded" answer still means the skill is in effect this turn.
+            match = LOADED_SKILL_PREFIX_RE.match(tool_output) or LOAD_SKILL_ALREADY_ACTIVE_RE.match(tool_output)
+            if match:
+                name = match.group(1)
+                seen = {(entry['name'] or '').strip().lower() for entry in applied}
+                key = name.strip().lower()
+                if key not in seen:
+                    registered = self.skills_by_name.get(key) or {}
+                    applied.append({
+                        'skill_id': registered.get('skill_id'),
+                        'name': name,
+                        'icon_meta': registered.get('icon_meta'),
+                    })
+        return applied
 
     def on_tool_end(self, *args, run_id: UUID, **kwargs):
         """Callback"""
@@ -980,6 +1039,7 @@ class EliteACallback(BaseCallbackHandler):
                 },
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
+                "invoked_skills": self._applied_skills_for_partial(tool_call),
             },
             content=None,
             **self.node_interface.payload_additional_kwargs,
@@ -1676,6 +1736,7 @@ class EliteACallback(BaseCallbackHandler):
                 "tool_calls": {},
                 "llm_start_timestamp": self.llm_start_timestamp,
                 "additional_response_meta": {},
+                "invoked_skills": self._applied_skills_for_partial(),
             },
             content=None,
             **self.node_interface.payload_additional_kwargs,
