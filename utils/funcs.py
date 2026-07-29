@@ -610,10 +610,17 @@ BUDGET_ERROR_CODES = ("project_budget_exceeded", "member_budget_exceeded")
 def budget_exceeded_error_code(exc: Exception) -> Optional[str]:
     """Budget scope code if this exception is a budget rejection, else None.
 
-    Keyed off the structured body rather than the exception class: a budget rejection
-    arrives as a plain 400, which is far too broad to branch on. The OpenAI SDK strips
-    the "error" wrapper and the Anthropic one does not, so read through both shapes.
+    Two shapes reach us. The SDK raises its own BudgetExceededError, which carries the
+    scope directly. A raw provider error instead carries a structured body, and is keyed
+    off that rather than its class because it arrives as a plain 400 - far too broad to
+    branch on. The OpenAI SDK strips the "error" wrapper and the Anthropic one does not,
+    so read through both shapes.
     """
+    scope = getattr(exc, "scope", None)
+    #
+    if isinstance(scope, str) and scope in BUDGET_ERROR_CODES:
+        return scope
+    #
     body = getattr(exc, "body", None)
     #
     if not isinstance(body, dict):
