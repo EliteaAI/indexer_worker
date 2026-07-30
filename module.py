@@ -458,6 +458,11 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             )
 
             refresh_mcp_server_configs(current)
+            # Validator models are built lazily and kept in-process (light tasks
+            # run in threads, not forks), so the snapshot must be dropped or new
+            # MCP types stay "not supported" until the pylon restarts.
+            self.toolkit_validators = None
+            self.toolkits_request(None, None)
             self.mcp_prebuilt_config_request(None, None)
             self.toolkit_configurations_request(None, None)
         except Exception:  # pylint: disable=W0718
