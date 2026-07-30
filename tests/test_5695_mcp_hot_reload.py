@@ -69,12 +69,16 @@ def test_changed_mcp_config_refreshes_sdk_and_broadcasts_both_views(monkeypatch)
     instance.descriptor = types.SimpleNamespace(config={"mcp_servers": new})
     instance.agent_event_node = object()
     instance._mcp_servers_snapshot = old
+    instance.toolkit_validators = {"stale": object()}
+    instance.toolkits_request = Mock()
     instance.toolkit_configurations_request = Mock()
     instance.mcp_prebuilt_config_request = Mock()
 
     instance._reload_mcp_servers()
 
     refresh.assert_called_once_with(new)
+    assert instance.toolkit_validators is None
+    instance.toolkits_request.assert_called_once_with(None, None)
     instance.toolkit_configurations_request.assert_called_once_with(None, None)
     instance.mcp_prebuilt_config_request.assert_called_once_with(None, None)
     assert instance._mcp_servers_snapshot == new
@@ -87,10 +91,12 @@ def test_unchanged_mcp_config_avoids_expensive_schema_rebuild(monkeypatch):
     instance.descriptor = types.SimpleNamespace(config={"mcp_servers": current})
     instance.agent_event_node = object()
     instance._mcp_servers_snapshot = current.copy()
+    instance.toolkits_request = Mock()
     instance.toolkit_configurations_request = Mock()
     instance.mcp_prebuilt_config_request = Mock()
 
     instance._reload_mcp_servers()
 
+    instance.toolkits_request.assert_not_called()
     instance.toolkit_configurations_request.assert_not_called()
     instance.mcp_prebuilt_config_request.assert_not_called()
