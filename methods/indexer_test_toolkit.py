@@ -29,11 +29,16 @@ from tools import worker_core  # pylint: disable=E0401
 
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired, extract_user_friendly_mcp_error
 
-from ..utils.funcs import normalize_mcp_auth_metadata_urls, backfill_mcp_auth_metadata
+from ..utils.funcs import (
+    normalize_mcp_auth_metadata_urls,
+    backfill_mcp_auth_metadata,
+    budget_exceeded_error_code,
+)
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent, InitiatorType
 
 # Import shared components from the agent common module
 from .agent_common import (
+    BUDGET_EXCEEDED_MESSAGES,
     EVENTNODE_EVENT_NAME,
     EVENTNODE_FULL_RESPONSE_NAME,
     EVENTNODE_PARTIAL_RESPONSE_NAME,
@@ -157,9 +162,14 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
 def test_error(
         node_interface: NodeEventInterface, toolkit_config: dict, tool_name: str,
         error_message: str, message_id: str, tasknode_task_meta: dict,
-        execution_generation: Optional[str] = None
+        execution_generation: Optional[str] = None,
+        budget_error_code: Optional[str] = None
 ) -> dict:
-    """Handle test execution errors with proper event emission"""
+    """Handle test execution errors with proper event emission
+
+    budget_error_code carries the budget scope that blocked the call, so the UI can show
+    its own wording and a usage link instead of the raw provider payload.
+    """
     exception_uid = str(uuid4())
     error = str(traceback.format_exc())
 
@@ -169,28 +179,43 @@ def test_error(
         "Could not serialize toolkit_config"
     )
 
-    node_interface.emit(
-        type=EventTypes.agent_tool_start,
-        response_metadata={
-            "tool_name": "Toolkit Test Exception",
-            "tool_run_id": exception_uid,
-            "tool_meta": {"toolkit_config": clean_toolkit_config, "tool_name": tool_name},
-            "tool_inputs": ''
-        }
-    )
-    node_interface.emit(
-        type=EventTypes.agent_tool_end,
-        response_metadata={
-            "tool_name": "Toolkit Test Exception",
-            "tool_run_id": exception_uid,
-            'finish_reason': 'error'
-        },
-        content=error
-    )
+    # The stacktrace is surfaced as a synthetic tool call so it can be inspected, but for a
+    # budget block it is noise: the trace is already reachable from the error frame's
+    # "Error debugging info" expander, and rendering it as tool output puts a wall of
+    # provider internals above the one sentence the user needs.
+    if not budget_error_code:
+        node_interface.emit(
+            type=EventTypes.agent_tool_start,
+            response_metadata={
+                "tool_name": "Toolkit Test Exception",
+                "tool_run_id": exception_uid,
+                "tool_meta": {"toolkit_config": clean_toolkit_config, "tool_name": tool_name},
+                "tool_inputs": ''
+            }
+        )
+        node_interface.emit(
+            type=EventTypes.agent_tool_end,
+            response_metadata={
+                "tool_name": "Toolkit Test Exception",
+                "tool_run_id": exception_uid,
+                'finish_reason': 'error'
+            },
+            content=error
+        )
 
+    # The scope rides the exception event too: surfaces reading the live stream never see
+    # full_message, which only reaches persisted conversations
+    exception_meta = {"budget_error_code": budget_error_code} if budget_error_code else {}
+    #
+    # For a budget block the headline comes from the scope code, so the exception content is
+    # free to carry the stacktrace -- which is what the error frame's expander shows. That
+    # keeps the provider detail available for diagnosis without putting it above the one
+    # sentence the user needs. Other failures keep the message here and their trace in the
+    # synthetic tool call above.
     node_interface.emit(
         type=EventTypes.agent_exception,
-        content=error_message
+        content=error if budget_error_code else error_message,
+        response_metadata=exception_meta,
     )
 
     # Clean the additional kwargs to avoid serialization issues
@@ -204,10 +229,21 @@ def test_error(
         'chat_project_id': tasknode_task_meta.get("chat_project_id"),
         'toolkit_config': clean_toolkit_config,
         'tool_name': tool_name,
-        'is_error': True
+        'is_error': True,
+        # Persisted so the error frame's expander still has the trace after a reload, as it
+        # does live. Chat's execution_error already stores it here.
+        'error': error,
     }
     if execution_generation:
         error_response_metadata['execution_generation'] = execution_generation
+
+    # additional_response_meta is the supported way onto the persisted message meta; a bare
+    # response_metadata key is dropped by elitea_core's whitelist, and the UI needs this
+    # after a reload, not just on the live socket update
+    if budget_error_code:
+        error_response_metadata['additional_response_meta'] = {
+            "budget_error_code": budget_error_code,
+        }
 
     msg_event_node = NodeEvent(
         type=EventTypes.full_message,
@@ -652,6 +688,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     }
                 )
             else:
+                # A budget rejection reaches the except branch below as a raised
+                # BudgetExceededError, so anything arriving here as a returned error is a
+                # genuine tool failure and keeps its own message
                 node_interface.emit(
                     type=EventTypes.agent_exception,
                     content=debug_error
@@ -731,6 +770,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             }
 
         except Exception as e:
+            # A budget block is an expected policy outcome, not a toolkit failure. Both the
+            # persisted index error below and the message the user reads are replaced with
+            # the platform's own wording, or they would show the raw provider payload.
+            budget_code = budget_exceeded_error_code(e)
+            budget_message = BUDGET_EXCEEDED_MESSAGES[budget_code] if budget_code else None
+            #
             # For index_data tool, emit special event for metadata handling
             # Only emit if SDK didn't already record a failed status via EliteACustomCallback
             _sdk_recorded_failure = any(
@@ -745,7 +790,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         'task_id': tasknode_task.id,
                         'index_name': tool_params.get('index_name'),
                         'state': 'failed',
-                        'error': f"Failed to execute index_data tool: {str(e)}",
+                        'error': budget_message or f"Failed to execute index_data tool: {str(e)}",
                         'toolkit_config': clean_toolkit_config,
                         'tool_params': clean_for_json_serialization(tool_params, "Could not serialize tool_params"),
                         'indexed': 0,
@@ -758,11 +803,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 )
 
             # For all exceptions (including index_data after emitting event), handle as errors
-            error_msg = f"Failed to test toolkit tool: {str(e)}"
-            log.exception(error_msg)
+            error_msg = budget_message or f"Failed to test toolkit tool: {str(e)}"
+            log.exception("Failed to test toolkit tool: %s", e)
             return test_error(
                 node_interface, clean_toolkit_config, tool_name, error_msg,
-                message_id, tasknode_task.meta, execution_generation
+                message_id, tasknode_task.meta, execution_generation,
+                budget_error_code=budget_code,
             )
         finally:
             # Stop event node if forked (following indexer_agent.py pattern)
