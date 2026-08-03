@@ -268,7 +268,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Accept mid-turn user input injections for this turn (Phase 0 POC).
         try:
-            predict_router.register(local_event_node, thread_id)
+            predict_router.register(
+                local_event_node, thread_id, node_interface,
+                task_meta=tasknode_task.meta,
+            )
         except Exception as _inj_exc:
             log.warning(f"predict_router.register failed for thread {thread_id}: {_inj_exc}")
 
@@ -628,7 +631,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # Flush any buffered streamed text before tearing down the event node.
             node_interface.flush()
 
-            # Stop accepting mid-turn injections for this thread (Phase 0 POC).
+            # Report which injections this turn actually folded in, then stop
+            # accepting them. Must precede unregister(), which clears the state.
+            try:
+                predict_router.report_consumed(node_interface, thread_id)
+            except Exception as _inj_exc:
+                log.warning(f"predict_router.report_consumed failed for {thread_id}: {_inj_exc}")
             try:
                 predict_router.unregister(thread_id)
             except Exception:
