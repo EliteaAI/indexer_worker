@@ -79,8 +79,10 @@ def delete_checkpoints_by_thread_ids(memory_config: dict, thread_ids: list):
             cursor = conn.cursor()
             try:
                 for thread_id in thread_ids:
-                    for table in ["checkpoint_writes", "checkpoint_blobs", "checkpoints"]:
-                        cursor.execute(f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,))
+                    for table in ["writes", "checkpoints"]:
+                        cursor.execute(
+                            f"DELETE FROM {table} WHERE thread_id = ?", (thread_id,)
+                        )
                         log.debug(f"Deleted from {table} where thread_id={thread_id}")
                 conn.commit()
             except Exception as e:
