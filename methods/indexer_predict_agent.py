@@ -68,6 +68,7 @@ from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_co
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import normalize_hitl_pause
+from ..utils import predict_router
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -264,6 +265,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Ensure thread_id is valid
         thread_id = ensure_thread_id(thread_id, conversation_id)
+
+        # Accept mid-turn user input injections for this turn.
+        try:
+            predict_router.register(
+                local_event_node, thread_id, node_interface,
+                task_meta=tasknode_task.meta,
+            )
+        except Exception as _inj_exc:
+            log.warning(f"predict_router.register failed for thread {thread_id}: {_inj_exc}")
 
         # Get tools and internal_tools - SDK handles internal_tools processing now
         adhoc_tools = kwargs.get("tools", [])
@@ -620,6 +630,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         finally:
             # Flush any buffered streamed text before tearing down the event node.
             node_interface.flush()
+
+            # Report which injections this turn actually folded in, then stop
+            # accepting them. Must precede unregister(), which clears the state.
+            try:
+                predict_router.report_consumed(node_interface, thread_id)
+            except Exception as _inj_exc:
+                log.warning(f"predict_router.report_consumed failed for {thread_id}: {_inj_exc}")
+            try:
+                predict_router.unregister(thread_id)
+            except Exception:
+                pass
 
             # Flush Langfuse traces
             flush_langfuse_callback(langfuse_client, langfuse_callback)

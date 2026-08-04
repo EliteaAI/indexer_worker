@@ -114,6 +114,11 @@ class EventTypes(StrEnum):
     # HITL events
     agent_hitl_interrupt = 'agent_hitl_interrupt'
 
+    # Mid-turn user input injection
+    injection_ready = 'injection_ready'
+    injection_consumed_report = 'injection_consumed_report'
+    agent_midturn_injection_consumed = 'agent_midturn_injection_consumed'
+
     # Summarization events - for context management progress visibility
     summarization_started = 'summarization_started'
     summarization_finished = 'summarization_finished'
@@ -447,6 +452,9 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     },
     EventTypes.agent_on_transitional_edge.value: {
         'state', 'next_step',
+    },
+    EventTypes.agent_midturn_injection_consumed.value: {
+        'injection_id', 'text',
     },
     EventTypes.agent_thinking_step.value: {
         'message', 'tool_name', 'toolkit'
