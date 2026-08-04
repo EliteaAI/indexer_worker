@@ -454,7 +454,7 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
         'state', 'next_step',
     },
     EventTypes.agent_midturn_injection_consumed.value: {
-        'injection_id',
+        'injection_id', 'text',
     },
     EventTypes.agent_thinking_step.value: {
         'message', 'tool_name', 'toolkit'

@@ -1800,6 +1800,55 @@ class EliteACustomCallback(BaseCallbackHandler):
 
         super().__init__()
 
+    def _persist_injection_marker(self, payload: dict) -> None:
+        """Persist a consumed injection as a trace-step delta on the partial_message channel.
+
+        Rides the SDK's existing accumulator path (partial_message -> sync_trace_steps) so the
+        table keeps a single writer. Writing the row from pylon_main's inject endpoint instead
+        would race that accumulator, which deletes any row it cannot reconstruct from its own
+        delta.
+
+        Shaped as a thinking step with an injection marker in generation_info: the pin renders
+        via the existing thinking branch, and the marker is what tells the UI to draw it as a
+        user interjection.
+        """
+        text = payload.get("text")
+        injection_id = payload.get("injection_id")
+        if not text or not injection_id:
+            return
+        now = datetime.now(tz=timezone.utc).isoformat()
+        step = {
+            # run_id is the writer's natural key; prefixing keeps it clear of tool run ids.
+            "tool_run_id": f"injection_{injection_id}",
+            "type": "midturn_injection",
+            "text": text,
+            "thinking": "",
+            "timestamp_start": now,
+            "timestamp_finish": now,
+            "generation_info": {"midturn_injection_id": injection_id},
+            "message": {"response_metadata": {"midturn_injection_id": injection_id}},
+        }
+        try:
+            event = NodeEvent(
+                type=EventTypes.partial_message,
+                stream_id=self.node_interface.stream_id,
+                message_id=self.message_id,
+                response_metadata={
+                    "project_id": self.project_id,
+                    "chat_project_id": self.chat_project_id,
+                    "thinking_steps": [step],
+                    "tool_calls": {},
+                    "additional_response_meta": {},
+                },
+                content=None,
+                **self.node_interface.payload_additional_kwargs,
+            ).model_dump_json()
+            self.node_interface.event_node.emit(
+                EVENTNODE_PARTIAL_RESPONSE_NAME, json.loads(event)
+            )
+        except Exception as e:
+            log.warning(f"Failed to persist injection marker {injection_id}: {e}")
+
     def on_custom_event(
         self,
         name: str,
@@ -1921,6 +1970,12 @@ class EliteACustomCallback(BaseCallbackHandler):
                     self.node_interface.emit(
                         type=event_type_value, response_metadata=emit_payload
                     )
+
+                # Place a consumed mid-turn injection in the turn's timeline, so it
+                # renders among the tool/thinking pins at the point it was folded in
+                # rather than only inside the user's (scrolled-away) bubble.
+                if event_type_value == EventTypes.agent_midturn_injection_consumed.value:
+                    self._persist_injection_marker(payload)
 
                 # Special handling for file modification events - collect file info
                 if event_type_value == EventTypes.agent_file_modified.value:
