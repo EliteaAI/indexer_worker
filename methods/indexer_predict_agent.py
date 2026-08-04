@@ -266,7 +266,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Ensure thread_id is valid
         thread_id = ensure_thread_id(thread_id, conversation_id)
 
-        # Accept mid-turn user input injections for this turn (Phase 0 POC).
+        # Accept mid-turn user input injections for this turn.
         try:
             predict_router.register(
                 local_event_node, thread_id, node_interface,
