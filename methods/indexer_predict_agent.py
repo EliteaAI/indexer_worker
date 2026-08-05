@@ -56,6 +56,7 @@ from ..utils.agent_execution_common import (
     prepare_invoke_input,
     extract_response_content,
     build_output_message,
+    maybe_emit_next_input_suggestion,
     create_summarization_callbacks,
     get_child_dispatcher,
     detect_parked_dispatch,
@@ -498,6 +499,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 attached_skills=invoke_config["configurable"].get("attached_skills"),
                 parallel_reconcile=kwargs.get("parallel_reconcile"),
             )
+
+            # Best-effort, ephemeral suggestion for the user's likely next
+            # message. Runs strictly after emit_response_events above so its
+            # bounded latency never delays the primary response.
+            if not tasknode_task.meta.get("non_interactive"):
+                maybe_emit_next_input_suggestion(
+                    local_event_node,
+                    client,
+                    kwargs.get("next_input_suggestion") or {},
+                    output['content'],
+                    stream_id,
+                    message_id,
+                )
 
             # Capture a HITL pause for the final task result so the reconcile gate
             # keeps a paused child OPEN instead of marking it terminal (#4993).

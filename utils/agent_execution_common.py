@@ -24,6 +24,7 @@ to reduce code duplication and ensure consistent behavior.
 
 import json
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -922,6 +923,96 @@ def emit_response_events(
         chat_history.append(output)
 
     return total_tokens_in, total_tokens_out, thread_id_response
+
+
+# =============================================================================
+# Next-Input Suggestion (best-effort, ephemeral — never persisted, never
+# allowed to affect the primary response)
+# =============================================================================
+
+_EN_NEXT_INPUT_SUGGESTION_READY = "next_input_suggestion_ready"
+
+_NEXT_INPUT_SUGGESTION_PROMPT = (
+    "You suggest a likely next user message in a chat, based on the "
+    "assistant's latest reply. Reply with ONLY the suggested next user "
+    "message, or the single word NONE if the reply doesn't make one "
+    "obvious (e.g. a greeting, a simple acknowledgement, or a final "
+    "answer with no natural follow-up). Keep it short — one sentence, "
+    "written as if the user typed it.\n\n"
+    "Examples:\n"
+    "Assistant: Hi! How can I help you today?\n"
+    "Suggestion: NONE\n\n"
+    "Assistant: I've fixed the bug. Want me to also add a test for it?\n"
+    "Suggestion: Yes, please add a test.\n\n"
+    "Assistant: The capital of France is Paris.\n"
+    "Suggestion: NONE\n\n"
+    "Assistant reply:\n{reply}\n\nSuggestion:"
+)
+
+
+def maybe_emit_next_input_suggestion(
+    local_event_node,
+    client,
+    cfg: Dict[str, Any],
+    output_text: str,
+    stream_id: Optional[str],
+    message_id: Optional[str],
+) -> None:
+    """Best-effort: generate and emit a suggested next user input.
+
+    Must run strictly AFTER emit_response_events so the primary response is
+    already on the wire before this call's bounded latency (up to
+    cfg['timeout_seconds']) can add any delay. Never raises.
+    """
+    try:
+        sid = cfg.get("sid")
+        if not cfg.get("enabled") or not sid:
+            log.debug("next_input_suggestion: skipped (disabled or no sid)")
+            return
+        min_chars = cfg.get("min_response_chars", 150)
+        if len(output_text or "") < min_chars:
+            log.debug(f"next_input_suggestion: skipped (reply below min_chars={min_chars})")
+            return
+
+        llm = client.get_low_tier_llm(max_tokens=64)
+        if llm is None:
+            log.debug("next_input_suggestion: skipped (no low-tier model available)")
+            return
+
+        prompt = _NEXT_INPUT_SUGGESTION_PROMPT.format(reply=output_text)
+        result_container = []
+
+        def _run():
+            try:
+                result_container.append(llm.invoke(prompt))
+            except Exception as exc:  # pylint: disable=W0703
+                log.warning(f"next_input_suggestion generation failed: {exc}")
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=cfg.get("timeout_seconds", 15))
+        if thread.is_alive():
+            log.debug("next_input_suggestion: skipped (generation timed out)")
+            return
+        if not result_container:
+            log.debug("next_input_suggestion: skipped (generation failed, see warning above)")
+            return
+
+        suggestion = getattr(result_container[0], "content", result_container[0])
+        suggestion = str(suggestion or "").strip()
+        if not suggestion or suggestion.upper() == "NONE":
+            log.debug("next_input_suggestion: skipped (model returned NONE/empty)")
+            return
+
+        log.info(f"next_input_suggestion: emitting suggestion for stream_id={stream_id}")
+        local_event_node.emit(_EN_NEXT_INPUT_SUGGESTION_READY, {
+            "sid": sid,
+            "stream_id": stream_id,
+            "message_id": message_id,
+            "suggestion": suggestion,
+        })
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning(f"maybe_emit_next_input_suggestion failed: {exc}")
 
 
 # =============================================================================
