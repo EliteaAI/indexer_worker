@@ -67,6 +67,7 @@ from ..utils.agent_execution_common import (
     build_child_launch_payloads,
     build_parent_reconcile_payload,
     apply_parallel_reconcile,
+    maybe_emit_next_input_suggestion,
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
@@ -573,6 +574,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 attached_skills=invoke_config['configurable'].get('attached_skills'),
                 parallel_reconcile=parallel_reconcile,
             )
+
+            # Best-effort, ephemeral suggestion for the user's likely next
+            # message. Runs strictly after emit_response_events above so its
+            # bounded latency never delays the primary response.
+            if not tasknode_task.meta.get("non_interactive"):
+                maybe_emit_next_input_suggestion(
+                    local_event_node,
+                    client,
+                    kwargs.get("next_input_suggestion") or {},
+                    output['content'],
+                    stream_id,
+                    message_id,
+                )
 
             # Capture a HITL pause so the final task result carries it: the
             # reconcile gate keys off this to keep a paused child OPEN (#4993).
