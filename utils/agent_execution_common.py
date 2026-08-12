@@ -150,7 +150,7 @@ def normalize_response_content(content: Any) -> str:
                     continue
                 else:
                     # Unknown/non-text block: skip it to avoid leaking JSON artifacts like '{}'.
-                    continue
+                    log.warning('normalize_response_content: skipping unknown dict block type=%r', block.get('type'))
             elif isinstance(block, str):
                 if block:
                     text_parts.append(block)
