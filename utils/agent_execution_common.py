@@ -133,34 +133,33 @@ def normalize_response_content(content: Any) -> str:
     if isinstance(content, list):
         # Handle Claude's list format: [{'type': 'text', 'text': '...'}]
         text_parts = []
-        has_only_tool_blocks = True
         for block in content:
             if isinstance(block, dict):
                 # Standard Claude format with type='text'
-                if block.get('type') == 'text':
-                    text_parts.append(block.get('text', ''))
-                    has_only_tool_blocks = False
+                if block.get('type') in ('text', 'output_text'):
+                    text_value = block.get('text')
+                    if isinstance(text_value, str) and text_value:
+                        text_parts.append(text_value)
                 # Alternative format with just 'text' key
                 elif 'text' in block and 'type' not in block:
-                    text_parts.append(block.get('text', ''))
-                    has_only_tool_blocks = False
-                # Content blocks might have other types we should skip (tool_use, tool_result, thinking)
-                elif block.get('type') in ('tool_use', 'tool_result', 'thinking'):
+                    text_value = block.get('text')
+                    if isinstance(text_value, str) and text_value:
+                        text_parts.append(text_value)
+                # Content blocks might have other types we should skip
+                elif block.get('type') in ('tool_use', 'tool_result', 'thinking', 'reasoning'):
                     continue
                 else:
-                    # Unknown dict format - serialize it
-                    text_parts.append(json.dumps(block, ensure_ascii=False))
-                    has_only_tool_blocks = False
+                    # Unknown/non-text block: skip it to avoid leaking JSON artifacts like '{}'.
+                    continue
             elif isinstance(block, str):
-                text_parts.append(block)
-                has_only_tool_blocks = False
+                if block:
+                    text_parts.append(block)
             else:
-                # Unknown type in list - serialize it
-                text_parts.append(str(block))
-                has_only_tool_blocks = False
+                # Unknown non-string item in list: skip it.
+                continue
 
-        # If list only had tool_use/tool_result blocks, return empty string (not JSON)
-        if has_only_tool_blocks and not text_parts:
+        # If list had no user-visible text blocks, return empty string.
+        if not text_parts:
             return ''
         return ''.join(text_parts)
 
@@ -582,6 +581,7 @@ def configure_checkpoint_resume(
     user_input: Optional[str] = None,
     user_declined_mcp_servers: Optional[List[Dict[str, Any]]] = None,
     mcp_tokens: Optional[Dict[str, Any]] = None,
+    truncated_content: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Configure checkpoint resume if needed.
@@ -702,7 +702,19 @@ def configure_checkpoint_resume(
             invoke_config['should_continue'] = True
             log.debug(f'Resuming execution from checkpoint: {checkpoint_id}')
         else:
-            log.warning('No checkpoint available to resume from, will start fresh')
+            if truncated_content and truncated_content.strip():
+                # Token-limit truncation: no real LangGraph checkpoint to resume.
+                # The continuation context (tail + instruction) is already baked
+                # into invoke_input by pylon_main. Start a fresh run — do NOT set
+                # should_continue, which would make the SDK try to resume from a
+                # stale completed checkpoint and produce no output.
+                log.info(
+                    'No resumable checkpoint for thread %s; starting fresh run '
+                    'with token-limit continuation input',
+                    thread_id,
+                )
+            else:
+                log.warning('No checkpoint available to resume from, will start fresh')
     except Exception as e:
         log.error(f'Checkpoint configuration failed: {e}')
 
@@ -1476,7 +1488,10 @@ def prepare_invoke_input(
     # Prepend attachment system message only when the attachment toolkit is
     # actually present in this invocation — avoids polluting the LLM context
     # with bucket names that have no corresponding tool.
-    if conversation_id and include_attachment_system_message:
+    # Skip when chat_history is empty: in token-limit continuation turns the
+    # history is [] and adding [ATTACHMENTS] as the sole context message causes
+    # the model to echo it instead of continuing the response.
+    if conversation_id and include_attachment_system_message and invoke_messages:
         invoke_messages = prepend_attachment_system_message(invoke_messages, str(conversation_id))
     
     # Prepend vision system message if images are present
