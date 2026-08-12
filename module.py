@@ -245,6 +245,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 multiprocessing_context=self.descriptor.config.get(
                     "agents_multiprocessing_context", "fork"
                 ),
+                kill_on_stop=True,
                 task_retention_period=3600,
                 housekeeping_interval=60,
                 thread_scan_interval=0.1,
