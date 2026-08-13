@@ -1326,13 +1326,19 @@ class EliteACallback(BaseCallbackHandler):
                 if isinstance(msg_content, list):
                     # Extract text items
                     if not content:
-                        text_items = [
-                            item.get("text", "")
-                            for item in msg_content
-                            if isinstance(item, dict)
-                            and item.get("type") == "text"
-                            and item.get("text")
-                        ]
+                        text_items = []
+                        for item in msg_content:
+                            # Anthropic adaptive thinking returns the final answer
+                            # as a bare string list item; capture it as text.
+                            if isinstance(item, str):
+                                if item:
+                                    text_items.append(item)
+                            elif (
+                                isinstance(item, dict)
+                                and item.get("type") == "text"
+                                and item.get("text")
+                            ):
+                                text_items.append(item.get("text"))
                         if text_items:
                             content = "\n".join(text_items)
                     # Extract thinking items (extended thinking / reasoning)
@@ -1604,6 +1610,13 @@ class EliteACallback(BaseCallbackHandler):
                     text_items = []
                     thinking_items = []
                     for item in msg_content:
+                        # Anthropic adaptive thinking returns the final answer as
+                        # a bare string list item (content=['', {thinking...},
+                        # 'answer text']); capture non-empty strings as text.
+                        if isinstance(item, str):
+                            if item:
+                                text_items.append(item)
+                            continue
                         if not isinstance(item, dict):
                             continue
                         item_type = item.get("type")
