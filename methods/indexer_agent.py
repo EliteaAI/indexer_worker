@@ -24,6 +24,7 @@ from pylon.core.tools import log
 from pylon.core.tools import web
 
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
+from ..utils.fork_dns_probe import build_probe_failed_result, check_fork_dns
 from ..utils.node_interface import EventTypes
 
 # Import shared components
@@ -119,6 +120,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         self.indexer_enable_logging()
         #
         log.debug(f'indexer_agent start stream_id={stream_id}, message_id={message_id}')
+        #
+        # Before anything that resolves a hostname (event node, client, vault): a child
+        # that inherited a locked resolver mutex must die now, not hang unkillably (#6245)
+        import tasknode_task  # pylint: disable=E0401,C0415
+        if not check_fork_dns(self.descriptor.config, tasknode_task.id):
+            return build_probe_failed_result(
+                stream_id, message_id, kwargs.get("execution_generation"),
+            )
         #
         try:
             # Extract client args - will be used to create EliteAClient after fork
