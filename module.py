@@ -27,6 +27,8 @@ import arbiter  # pylint: disable=E0401
 
 from tools import worker_core  # pylint: disable=E0401
 
+from .utils.pgvector_warm import agent_task_approver
+
 
 REQUIRED_NLTK_PATHS = (
     os.path.join("tokenizers", "punkt_tab", "english", "collocations.tab"),
@@ -381,11 +383,15 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             self.agent_event_node.subscribe("indexer_delete_checkpoint", self.delete_checkpoint)
 
             # Tasks: agent
+            # Approver only warms the parent-side connstr cache; it always approves.
+            # Without a parent-side writer the cache never survives a fork (#6245).
+            pgvector_warm_approver = agent_task_approver(self.descriptor.config)
+            #
             self.agent_task_node.register_task(
-                self.indexer_agent, "indexer_agent"
+                self.indexer_agent, "indexer_agent", pgvector_warm_approver
             )
             self.agent_task_node.register_task(
-                self.indexer_predict_agent, "indexer_predict_agent"
+                self.indexer_predict_agent, "indexer_predict_agent", pgvector_warm_approver
             )
             self.agent_task_node.register_task(
                 self.indexer_mcp_sync_tools, "indexer_mcp_sync_tools"

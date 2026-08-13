@@ -32,8 +32,7 @@ from .agent_common import (
     budget_exceeded_error_code,
     BUDGET_EXCEEDED_MESSAGES,
     EVENTNODE_EVENT_NAME,
-    _fetch_pgvector_connstr_with_retry,
-    temp_elitea_client,
+    resolve_pgvector_connstr,
     fetch_langfuse_config,
     unsecret_mcp_tools,
     is_mcp_authorization_required_error,
@@ -132,11 +131,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             api_token = kwargs.get("api_token", client_args.get("api_key", None))
             api_extra_headers = kwargs.get("api_extra_headers", client_args.get("api_extra_headers", {}))
 
-            # Fetch pgvector connection string for memory (PostgresSaver) and cleanup using context manager
-            with temp_elitea_client(client_args, api_token, api_extra_headers) as temp_client:
-                pgvector_connstr = _fetch_pgvector_connstr_with_retry(
-                    temp_client, project_id=client_args.get("project_id")
-                )
+            # No-op unless memory is postgres; prefers the parent-resolved value (#6245)
+            pgvector_connstr = resolve_pgvector_connstr(
+                self.descriptor.config, client_args, api_token, api_extra_headers,
+                prefetched=kwargs.get("pgvector_connstr"),
+            )
 
             # Setup memory configuration
             memory_type, memory_config = setup_memory(
