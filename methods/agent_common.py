@@ -104,9 +104,19 @@ def build_mcp_auth_pause_result(
     elitea_callback,
     chat_history: list,
     fallback_error: str = "Authorization required",
+    node_interface: Optional[NodeEventInterface] = None,
 ) -> Optional[dict]:
-    """Return pause result when callback already emitted MCP auth-required event."""
+    """Emit/return the legacy exception-based pause when no durable guard exists."""
     if getattr(elitea_callback, "mcp_auth_pause_payload", None):
+        if node_interface is not None:
+            node_interface.emit(
+                type=EventTypes.mcp_authorization_required,
+                content=(
+                    getattr(elitea_callback, "mcp_auth_pause_message", None)
+                    or fallback_error
+                ),
+                response_metadata=elitea_callback.mcp_auth_pause_payload,
+            )
         return {
             "chat_history": chat_history,
             "error": getattr(elitea_callback, "mcp_auth_pause_message", None) or fallback_error,
@@ -1175,11 +1185,11 @@ class EliteACallback(BaseCallbackHandler):
             self.mcp_auth_pause_payload = auth_payload
             self.mcp_auth_pause_message = error_str
 
-            self.node_interface.emit(
-                type=EventTypes.mcp_authorization_required,
-                response_metadata=auth_payload,
-                content=error_str,
-            )
+            # Do not emit here.  Modern SDKs catch this exception and return a
+            # checkpoint-backed mcp_auth interrupt with exact nested routing.
+            # The post-invoke path emits that authoritative payload.  Older SDK
+            # paths fall back to build_mcp_auth_pause_result(), which emits this
+            # cached metadata once after invoke/exception handling.
             return
 
         error_str = "".join(traceback.format_exception(tool_exception))

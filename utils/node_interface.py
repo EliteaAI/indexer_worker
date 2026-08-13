@@ -471,7 +471,11 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     },
     EventTypes.mcp_authorization_required.value: {
         'server_url', 'resource_metadata_url', 'www_authenticate', 'resource_metadata',
-        'authorization_servers', 'tool_run_id', 'tool_name', 'toolkit_name', 'toolkit_type'
+        'authorization_servers', 'tool_run_id', 'tool_name', 'toolkit_name', 'toolkit_type',
+        'interrupt_id', 'guardrail_type', 'node_name', 'tool_call_id', 'thread_id',
+        'root_thread_id', 'child_thread_id', 'checkpoint_ns', 'parent_agent_name',
+        'parent_agent_call_id', 'parent_agent_path', 'sibling_ordinal', 'available_actions',
+        'chat_project_id', 'message', 'status', 'resume_strategy',
     },
     EventTypes.agent_index_data_removed.value: {
         'index_name', 'toolkit_id', 'project_id'

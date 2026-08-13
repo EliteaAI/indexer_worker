@@ -68,7 +68,7 @@ from ..utils.agent_execution_common import (
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
-from ..utils.parallel_dispatch_contract import normalize_hitl_pause
+from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils import predict_router
 
 from pydantic import ValidationError
@@ -225,6 +225,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Parallel sub-agent fan-out (#4993): per-child decisions for resuming
         # multiple paused sub-agents in one turn (keyed by tool_call_id).
         hitl_decisions = kwargs.get('hitl_decisions') or None
+        mcp_auth_resume = kwargs.get('mcp_auth_resume', False)
+        mcp_auth_action = kwargs.get('mcp_auth_action', 'skip')
+        mcp_auth_decisions = kwargs.get('mcp_auth_decisions') or None
         # Set when THIS run paused at a HITL node; surfaced in the task result so a
         # parked fan-out child's HITL pause is not mistaken for a completion by the
         # reconcile gate (#4993).
@@ -405,7 +408,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             invoke_config["configurable"]["attached_skills"] = kwargs.get("attached_skills") or []
 
             # HITL resume takes precedence over generic checkpoint continuation.
-            if hitl_resume:
+            if mcp_auth_resume:
+                invoke_input['mcp_auth_resume'] = True
+                invoke_input['mcp_auth_action'] = mcp_auth_action
+                if mcp_auth_decisions:
+                    invoke_input['mcp_auth_decisions'] = mcp_auth_decisions
+                log.info(f'[MCP_AUTH] Resume action: {mcp_auth_action}')
+            elif hitl_resume:
                 invoke_input['hitl_resume'] = True
                 invoke_input['hitl_action'] = hitl_action
                 invoke_input['hitl_value'] = hitl_value
@@ -438,7 +447,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Callback-path MCP auth interruption: pause immediately and do not
             # emit regular response completion events for this run.
-            pause_result = build_mcp_auth_pause_result(elitea_callback, chat_history)
+            pause_result = None
+            if not has_mcp_auth_interrupt(response):
+                pause_result = build_mcp_auth_pause_result(
+                    elitea_callback, chat_history, node_interface=node_interface,
+                )
             if pause_result:
                 return pause_result
 
@@ -543,7 +556,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except McpAuthorizationRequired as e:
-            pause_result = build_mcp_auth_pause_result(elitea_callback, chat_history, fallback_error=str(e))
+            pause_result = build_mcp_auth_pause_result(
+                elitea_callback, chat_history, fallback_error=str(e),
+                node_interface=node_interface,
+            )
             if pause_result:
                 return pause_result
             return build_mcp_auth_required_result(
