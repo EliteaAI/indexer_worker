@@ -27,8 +27,6 @@ import arbiter  # pylint: disable=E0401
 
 from tools import worker_core  # pylint: disable=E0401
 
-from .utils.pgvector_warm import agent_task_approver
-
 
 REQUIRED_NLTK_PATHS = (
     os.path.join("tokenizers", "punkt_tab", "english", "collocations.tab"),
@@ -385,6 +383,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             # Tasks: agent
             # Approver only warms the parent-side connstr cache; it always approves.
             # Without a parent-side writer the cache never survives a fork (#6245).
+            # Imported here, not at module scope: module.py is loaded standalone in tests.
+            from .utils.pgvector_warm import agent_task_approver  # pylint: disable=C0415
             pgvector_warm_approver = agent_task_approver(self.descriptor.config)
             #
             self.agent_task_node.register_task(
