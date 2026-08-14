@@ -703,7 +703,25 @@ async function main() {
     } else if (options.stdin) {
       // Read code from stdin - avoids Linux kernel's MAX_ARG_STRLEN 128KB limit
       // on individual CLI arguments when passing large code payloads
-      pythonCode = await new Response(Deno.stdin.readable).text();
+      const stdinTimeoutMs = 30000;
+      const stdinPromise = new Response(Deno.stdin.readable).text();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`stdin read timeout after ${stdinTimeoutMs}ms`)), stdinTimeoutMs)
+      );
+
+      try {
+        pythonCode = await Promise.race([stdinPromise, timeoutPromise]);
+      } catch (err) {
+        console.error(`Error: Failed to read code from stdin: ${err.message}`);
+        Deno.exit(1);
+        return;
+      }
+
+      if (!pythonCode || !pythonCode.trim()) {
+        console.error("Error: No code received from stdin (empty input).");
+        Deno.exit(1);
+        return;
+      }
     } else if (options.code) {
       pythonCode = options.code;
     }
