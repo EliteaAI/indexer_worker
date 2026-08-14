@@ -372,6 +372,7 @@ function parseCliArgs(args) {
     help: false,
     version: false,
     stateful: false,
+    stdin: false,
   };
 
   const takeValue = (index, flag) => {
@@ -430,6 +431,10 @@ function parseCliArgs(args) {
         }
         case "--stateful": {
           flags.stateful = parseBoolean(value, true);
+          break;
+        }
+        case "--stdin": {
+          flags.stdin = true;
           break;
         }
         case "--help": {
@@ -635,6 +640,7 @@ Run Python code in a sandboxed environment using Pyodide
 OPTIONS:
   -c, --code <code>            Python code to execute
   -f, --file <path>            Path to Python file to execute
+      --stdin                  Read Python code from stdin
   -s, --stateful <bool>        Use a stateful session
   -b, --session-bytes <bytes>  Session bytes
   -m, --session-metadata       Session metadata
@@ -664,9 +670,9 @@ async function main() {
       return;
     }
 
-    if (!flags.code && !flags.file) {
+    if (!flags.code && !flags.file && !flags.stdin) {
       console.error(
-        "Error: You must provide Python code using either -c/--code or -f/--file option.\nUse --help for usage information.",
+        "Error: You must provide Python code using -c/--code, -f/--file, or --stdin option.\nUse --help for usage information.",
       );
       Deno.exit(1);
       return;
@@ -675,6 +681,7 @@ async function main() {
     const options = {
       code: flags.code,
       file: flags.file,
+      stdin: flags.stdin,
       stateful: flags.stateful,
       sessionBytes: flags["session-bytes"],
       sessionMetadata: flags["session-metadata"],
@@ -693,6 +700,10 @@ async function main() {
         Deno.exit(1);
         return;
       }
+    } else if (options.stdin) {
+      // Read code from stdin - avoids Linux kernel's MAX_ARG_STRLEN 128KB limit
+      // on individual CLI arguments when passing large code payloads
+      pythonCode = await new Response(Deno.stdin.readable).text();
     } else if (options.code) {
       pythonCode = options.code;
     }
