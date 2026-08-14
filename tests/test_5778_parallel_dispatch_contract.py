@@ -92,6 +92,16 @@ def test_worker_resume_paths_forward_mcp_auth_command_fields():
         assert "invoke_input['mcp_auth_decisions'] = mcp_auth_decisions" in source
 
 
+def test_hitl_event_publishes_worker_owned_resume_strategy():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / 'utils' / 'agent_execution_common.py'
+    ).read_text()
+    hitl_emit = source[source.index("type=EventTypes.agent_hitl_interrupt"):]
+
+    assert "'aggregate_child' if is_fanout_child_task else 'root'" in hitl_emit
+
+
 def test_outer_durable_child_path_prefixes_inner_leaf_path():
     pylon = types.ModuleType('pylon')
     pylon_core = types.ModuleType('pylon.core')

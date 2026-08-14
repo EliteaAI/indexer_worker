@@ -866,6 +866,13 @@ def emit_response_events(
                 'message': hitl_interrupt.get('message', 'Awaiting human review...'),
                 'hitl_interrupt': hitl_interrupt,
                 'hitl_interrupts': hitl_interrupts,
+                # A nested SDK Application may carry its own child_thread_id,
+                # but only a standalone worker fan-out child has a Redis-backed
+                # durable resume route. Publish that ownership explicitly so
+                # Core and the UI never infer it from the nested leaf payload.
+                'resume_strategy': (
+                    'aggregate_child' if is_fanout_child_task else 'root'
+                ),
                 'node_name': hitl_interrupt.get('node_name'),
                 'available_actions': hitl_interrupt.get('available_actions', []),
                 'routes': hitl_interrupt.get('routes', {}),
