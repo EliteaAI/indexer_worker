@@ -86,8 +86,8 @@ def request_warm(project_id, client_args, api_token, api_extra_headers):
 
 def agent_task_approver(descriptor_config):
     """ Arbiter task approver that warms the cache before fork; always approves """
-    # Called from on_start_query, which (unlike on_start_request) does not hold
-    # start_task_rlock — so a slow warm here cannot gate the whole pool.
+    # Arbiter also calls approvers from on_start_request while holding start_task_rlock,
+    # so this must stay non-blocking (request_warm only does put_nowait) or it gates the pool.
     from ..methods.agent_common import pgvector_connstr_needed  # pylint: disable=C0415
     #
     def _approver(event_name, event_payload):

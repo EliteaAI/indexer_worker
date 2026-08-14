@@ -72,9 +72,25 @@ def dns_probe_timeout(descriptor_config: dict) -> float:
     return float(config.get("timeout_seconds", 2.0))
 
 
+def running_in_fork_child() -> bool:
+    """ True only when this task body runs in its own forked process """
+    # Both arbiter executors stamp this on the tasknode_task module, so trust it over
+    # plugin config: it reflects how *this* task was actually dispatched.
+    try:
+        import tasknode_task  # pylint: disable=C0415,E0401
+        return getattr(tasknode_task, "multiprocessing_context", None) == "fork"
+    except ImportError:
+        return False
+
+
 def check_fork_dns(descriptor_config: dict, task_id: str = None) -> bool:
-    """ True when the child is safe to continue; False when it must abort """
+    """ True when the task is safe to continue; False when it must abort """
     if not dns_probe_enabled(descriptor_config):
+        return True
+    #
+    # Threading mode shares one process, so no lock can be inherited across a fork and
+    # there is nothing to detect. Skip the probe rather than tax every task for it.
+    if not running_in_fork_child():
         return True
     #
     if probe_dns_usable(dns_probe_timeout(descriptor_config)):
@@ -89,7 +105,8 @@ def check_fork_dns(descriptor_config: dict, task_id: str = None) -> bool:
     #
     # Returning a result only works under the file transport. Every other transport
     # delivers it over the event node, i.e. needs the lookup this process cannot do —
-    # so exit instead of wedging in the reply. No UI report, but no orphan either.
+    # so exit instead of wedging in the reply. Safe because the check above proved this
+    # process is a dedicated fork child: os._exit takes nothing else down with it.
     if descriptor_config.get("agents_result_transport", "files") != "files":
         log.error("Result transport is not 'files'; exiting task %s without a result", task_id)
         os._exit(1)  # pylint: disable=W0212
