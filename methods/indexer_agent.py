@@ -24,6 +24,7 @@ from pylon.core.tools import log
 from pylon.core.tools import web
 
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
+from ..utils.fork_dns_probe import build_probe_failed_result, check_fork_dns
 from ..utils.node_interface import EventTypes
 
 # Import shared components
@@ -31,8 +32,7 @@ from .agent_common import (
     execution_error,
     budget_exceeded_error_code,
     BUDGET_EXCEEDED_MESSAGES,
-    _fetch_pgvector_connstr_with_retry,
-    temp_elitea_client,
+    resolve_pgvector_connstr,
     fetch_langfuse_config,
     is_mcp_authorization_required_error,
     build_mcp_auth_pause_result,
@@ -121,17 +121,25 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         log.debug(f'indexer_agent start stream_id={stream_id}, message_id={message_id}')
         #
+        # Before anything that resolves a hostname (event node, client, vault): a child
+        # that inherited a locked resolver mutex must die now, not hang unkillably (#6245)
+        import tasknode_task  # pylint: disable=E0401,C0415
+        if not check_fork_dns(self.descriptor.config, tasknode_task.id):
+            return build_probe_failed_result(
+                stream_id, message_id, kwargs.get("execution_generation"),
+            )
+        #
         try:
             # Extract client args - will be used to create EliteAClient after fork
             client_args = kwargs.get("llm", {}).get("kwargs", {})
             api_token = kwargs.get("api_token", client_args.get("api_key", None))
             api_extra_headers = kwargs.get("api_extra_headers", client_args.get("api_extra_headers", {}))
 
-            # Fetch pgvector connection string for memory (PostgresSaver) and cleanup using context manager
-            with temp_elitea_client(client_args, api_token, api_extra_headers) as temp_client:
-                pgvector_connstr = _fetch_pgvector_connstr_with_retry(
-                    temp_client, project_id=client_args.get("project_id")
-                )
+            # No-op unless memory is postgres; prefers the parent-resolved value (#6245)
+            pgvector_connstr = resolve_pgvector_connstr(
+                self.descriptor.config, client_args, api_token, api_extra_headers,
+                prefetched=kwargs.get("pgvector_connstr"),
+            )
 
             # Setup memory configuration
             memory_type, memory_config = setup_memory(

@@ -47,6 +47,7 @@ except ImportError:
     LOADED_SKILL_PREFIX_RE = re.compile(r'^Skill "([^"]+)" is now active')
     LOAD_SKILL_ALREADY_ACTIVE_RE = re.compile(r'^Skill "([^"]+)" is already (?:loaded|active)')
 
+from ..utils.constants import DEFAULT_MEMORY_CONFIG
 from ..utils.exceptions import InternalSDKError
 from ..utils.funcs import (
     _is_mcp_authorization_required_error,
@@ -247,6 +248,37 @@ def _fetch_pgvector_connstr_with_retry(
                     max_retries, PGVECTOR_PROJECT_CONNSTR_SECRET, last_error
                 )
     return None
+
+
+def pgvector_connstr_needed(descriptor_config: dict) -> bool:
+    """ True only when the checkpointer is postgres; otherwise the connstr is discarded """
+    memory_config = descriptor_config.get("agent_memory_config") or DEFAULT_MEMORY_CONFIG
+    return memory_config.get("type") == "postgres"
+
+
+def resolve_pgvector_connstr(
+    descriptor_config: dict, client_args: dict, api_token: str, api_extra_headers: dict,
+    prefetched: Optional[str] = None,
+) -> Optional[str]:
+    """ Resolve the pgvector connstr, avoiding post-fork DNS where possible """
+    # Cheapest first: not-postgres, then parent-resolved, then inherited cache.
+    # The vault call is last because post-fork getaddrinfo can hang forever (#6245).
+    if not pgvector_connstr_needed(descriptor_config):
+        return None
+
+    if prefetched is not None:
+        return prefetched
+
+    project_id = client_args.get("project_id")
+    if project_id is not None and project_id in _pgvector_connstr_cache:
+        return _pgvector_connstr_cache[project_id]
+
+    log.warning(
+        "pgvector_connstr not prefetched for project_id=%s — falling back to a post-fork "
+        "vault call, which is exposed to the fork/getaddrinfo hang", project_id
+    )
+    with temp_elitea_client(client_args, api_token, api_extra_headers) as temp_client:
+        return _fetch_pgvector_connstr_with_retry(temp_client, project_id=project_id)
 
 
 def _unsecret_vault_references(data: dict, client) -> dict:

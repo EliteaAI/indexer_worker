@@ -6,6 +6,13 @@ task_limit: null
 nltk_data: /tmp/nltk_data
 tasknode_tmp: /tmp/tasknode
 
+# Abort a forked agent task that inherited a locked glibc resolver mutex, instead of
+# letting it hang unkillably holding a full CoW copy of the parent heap. Set
+# enabled: false to restore the previous behaviour.
+fork_dns_probe:
+  enabled: true
+  timeout_seconds: 2.0
+
 # Coalesce streamed agent_llm_chunk token-deltas into fewer, larger emits.
 # Reduces Redis/pickle/sio/UI work per streamed response. Set enabled: false
 # to revert to per-delta emits.
