@@ -108,6 +108,20 @@ def build_mcp_auth_pause_result(
     node_interface: Optional[NodeEventInterface] = None,
 ) -> Optional[dict]:
     """Emit/return the legacy exception-based pause when no durable guard exists."""
+    # A modern SDK can report the underlying McpAuthorizationRequired through
+    # on_tool_error and then publish the authoritative checkpoint-backed
+    # parallel_hitl_interrupt a moment later. Callback ordering is not a safe
+    # way to distinguish those paths: a late on_tool_error can repopulate the
+    # legacy cache after the durable event cleared it. Once this invocation has
+    # exposed any durable auth interrupt, never synthesize the legacy UUID card
+    # at turn end; the exact interrupt id and nested caller already own resume.
+    durable_interrupt_seen = getattr(
+        elitea_callback, "mcp_auth_durable_interrupt_seen", False,
+    ) or getattr(elitea_callback, "parallel_hitl_run_state", {}).get(
+        "mcp_auth_durable_interrupt_seen", False,
+    )
+    if durable_interrupt_seen:
+        return None
     if getattr(elitea_callback, "mcp_auth_pause_payload", None):
         if node_interface is not None:
             node_interface.emit(
@@ -626,6 +640,8 @@ class EliteACallback(BaseCallbackHandler):
         # If an MCP auth-required tool error is observed in callback flow,
         # capture it so caller can pause execution and avoid emitting normal completion.
         self.mcp_auth_pause_payload: Optional[dict] = None
+        self.mcp_auth_durable_interrupt_seen = False
+        self.parallel_hitl_run_state: dict = {}
         self.mcp_auth_pause_message: Optional[str] = None
         self.toolkit_metadata: dict = toolkit_metadata or {}
         # Extract and cache toolkit_name and toolkit_type from toolkit_metadata for injection
@@ -644,7 +660,19 @@ class EliteACallback(BaseCallbackHandler):
         super().__init__()
 
     def _is_mcp_auth_paused(self) -> bool:
-        """Return True when this run is paused waiting for MCP authorization."""
+        """Return True only while legacy exception-based auth owns this run.
+
+        A durable nested auth interrupt is reported by EliteACustomCallback,
+        while tool lifecycle events are handled by this callback instance.  The
+        original exception payload can remain cached here after the durable
+        supervisor takes ownership; treating that cache as an active pause
+        suppresses every later child on_tool_start/on_tool_end and leaves the UI
+        accordions empty.  Shared run state is therefore authoritative.
+        """
+        if self.parallel_hitl_run_state.get(
+            "mcp_auth_durable_interrupt_seen", False,
+        ):
+            return False
         return self.mcp_auth_pause_payload is not None
 
     def emit_subagent_invocation_chip(self, task_text, response, agent_type=None):
@@ -1849,6 +1877,11 @@ class EliteACustomCallback(BaseCallbackHandler):
         self.modified_files = []  # List to store modified file information
         self.generated_image_filepaths = []  # Filepaths of tool-generated images for thumbnail resolution
         self.index_statuses = []  # List to store index operation statuses
+        # create_callbacks() replaces this with the same dict owned by the
+        # regular callback.  LangChain dispatches custom events and tool errors
+        # to separate callback objects, so durable-auth suppression must be
+        # shared across both objects for the lifetime of this run.
+        self.parallel_hitl_run_state: dict = {}
         # self.pending_llm_requests = defaultdict(int)
         # self.current_model_name = 'gpt-4'
         # self.stream_id = node_interface.stream_id
@@ -1904,6 +1937,106 @@ class EliteACustomCallback(BaseCallbackHandler):
         except Exception as e:
             log.warning(f"Failed to persist injection marker {injection_id}: {e}")
 
+    def _persist_mcp_auth_decision(
+        self,
+        payload: dict,
+        event_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist a synthetically completed auth call as a normal tool step.
+
+        SDK auth resume closes the original ``mcp_auth_control`` call with a
+        structured ToolMessage instead of executing the tool again. That keeps
+        checkpoint semantics correct but bypasses ``on_tool_end``. Mirror its
+        delta contract here so live and reloaded child accordions retain the
+        LLM -> auth tool -> LLM timeline.
+        """
+        tool_output = cap_trace_text(payload.get("tool_output") or "")
+        tool_name = str(payload.get("tool_name") or "mcp_auth_control")
+        tool_run_id = str(payload.get("tool_call_id") or uuid4())
+        if not tool_output:
+            return
+
+        now = datetime.now(tz=timezone.utc).isoformat()
+        # Unlike ordinary on_tool_end callbacks, this synthetic completion is
+        # dispatched from inside the SDK leaf graph. Its canonical in-process
+        # ancestry therefore arrives in the custom event's Runnable metadata,
+        # not in the worker's static NodeInterface overlay. Persist the selected
+        # hierarchy fields as well, otherwise a reload moves the auth chip from
+        # its Surname Resolver accordion back to the root timeline.
+        lineage = {
+            key: event_metadata.get(key)
+            for key in HIERARCHY_METADATA_KEYS
+            if (
+                isinstance(event_metadata, dict)
+                and event_metadata.get(key) is not None
+            )
+        }
+        tool_metadata = self.node_interface.apply_metadata_overlay({
+            "toolkit_name": payload.get("toolkit_name") or "",
+            "toolkit_type": payload.get("toolkit_type") or "",
+            **lineage,
+        })
+        tool_call = ToolCallPayload(
+            tool_name=tool_name,
+            tool_run_id=tool_run_id,
+            run_id=tool_run_id,
+            tool_meta={
+                "name": tool_name,
+                "metadata": dict(tool_metadata),
+            },
+            tool_inputs={"action": payload.get("action") or "skip"},
+            metadata=tool_metadata,
+            tool_output=tool_output,
+            finish_reason="stop",
+            timestamp_start=now,
+            timestamp_finish=now,
+        )
+        include_fields = {
+            "tool_name",
+            "tool_run_id",
+            "tool_meta",
+            "finish_reason",
+            "tool_output",
+            "timestamp_start",
+            "timestamp_finish",
+            "metadata",
+            "agent_type",
+        }
+        self.node_interface.emit(
+            type=EventTypes.agent_tool_end,
+            response_metadata=tool_call.model_dump(include=include_fields),
+            content=tool_output,
+        )
+
+        try:
+            event = NodeEvent(
+                type=EventTypes.partial_message,
+                stream_id=self.node_interface.stream_id,
+                message_id=self.message_id,
+                response_metadata={
+                    "project_id": self.project_id,
+                    "chat_project_id": self.chat_project_id,
+                    "thinking_steps": [],
+                    "tool_calls": {
+                        tool_run_id: self.node_interface.decorate_tool_call_for_persistence(
+                            tool_call.model_dump()
+                        )
+                    },
+                    "additional_response_meta": {},
+                },
+                content=None,
+                **self.node_interface.payload_additional_kwargs,
+            ).model_dump_json()
+            self.node_interface.event_node.emit(
+                EVENTNODE_PARTIAL_RESPONSE_NAME, json.loads(event)
+            )
+        except Exception as exc:
+            log.warning(
+                "Failed to persist MCP auth decision tool step %s: %s",
+                tool_run_id,
+                exc,
+            )
+
     def on_custom_event(
         self,
         name: str,
@@ -1917,6 +2050,64 @@ class EliteACustomCallback(BaseCallbackHandler):
         """Callback containing a group of custom events"""
         if self.debug:
             log.debug(f"on_custom_event name={name}, data_keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
+
+        # The SDK supervisor publishes one typed early pause event regardless of
+        # guard kind. Split it here into the established transport contracts so
+        # Core/UI keep using the same auth and HITL persistence/rendering paths.
+        if name == "parallel_hitl_interrupt" and isinstance(data, dict):
+            entries = data.get("hitl_interrupts") or [data.get("hitl_interrupt")]
+            entries = [item for item in entries if isinstance(item, dict)]
+            common = {
+                "chat_project_id": self.chat_project_id,
+                "root_thread_id": data.get("root_thread_id"),
+                "resume_strategy": "supervised_child",
+            }
+            auth_entries = [
+                item for item in entries
+                if item.get("guardrail_type") == "mcp_auth"
+            ]
+            if auth_entries:
+                # The SDK has converted the callback exception into an exact,
+                # checkpoint-backed interrupt and the supervisor now owns it.
+                # Do not let the callback cache survive until the outer invoke
+                # returns: build_mcp_auth_pause_result() would otherwise emit a
+                # second legacy UUID/tool-run authorization after the durable
+                # child already consumed its structured decision.
+                self.mcp_auth_pause_payload = None
+                self.mcp_auth_pause_message = None
+                self.mcp_auth_durable_interrupt_seen = True
+                self.parallel_hitl_run_state[
+                    "mcp_auth_durable_interrupt_seen"
+                ] = True
+            for item in auth_entries:
+                self.node_interface.emit(
+                    type=EventTypes.mcp_authorization_required,
+                    content=item.get("message", "Toolkit authorization required"),
+                    # Keep the checkpoint-owning leaf thread on the flattened
+                    # authorization event.  ``data['thread_id']`` is the
+                    # supervisor/root mailbox and must never replace it: doing
+                    # so renders a SurnameResolver authorization at the root and
+                    # makes Continue restart the orchestrator instead of
+                    # resuming the exact child checkpoint.
+                    response_metadata={**item, **common},
+                )
+            hitl_entries = [item for item in entries if item not in auth_entries]
+            if hitl_entries:
+                self.node_interface.emit(
+                    type=EventTypes.agent_hitl_interrupt,
+                    content=hitl_entries[0].get("message", "Awaiting human review..."),
+                    response_metadata={
+                        **common,
+                        "message": hitl_entries[0].get("message"),
+                        "hitl_interrupt": hitl_entries[0],
+                        "hitl_interrupts": hitl_entries,
+                    },
+                )
+            return
+
+        if name == "mcp_auth_decision" and isinstance(data, dict):
+            self._persist_mcp_auth_decision(data, metadata)
+            return
 
         event_key = f"agent_{name}"
         fields = ELITEA_SDK_CUSTOM_EVENTS_MAPPER.get(event_key, set())
@@ -2016,6 +2207,14 @@ class EliteACustomCallback(BaseCallbackHandler):
                     emit_payload = payload
                     if (
                         event_type_value == EventTypes.agent_swarm_agent_response.value
+                        and self.chat_project_id
+                    ):
+                        emit_payload = {
+                            **payload,
+                            "chat_project_id": self.chat_project_id,
+                        }
+                    if (
+                        event_type_value == EventTypes.agent_parallel_hitl_state.value
                         and self.chat_project_id
                     ):
                         emit_payload = {

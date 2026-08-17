@@ -523,6 +523,14 @@ def create_callbacks(
         task_id=task_id,
     )
 
+    # Tool lifecycle events and SDK custom events are handled by different
+    # callback instances.  Share one run-local state so a durable nested auth
+    # interrupt observed by EliteACustomCallback suppresses the later legacy
+    # exception fallback built from EliteACallback.
+    parallel_hitl_run_state: Dict[str, Any] = {}
+    elitea_callback.parallel_hitl_run_state = parallel_hitl_run_state
+    elitea_custom_callback.parallel_hitl_run_state = parallel_hitl_run_state
+
     return elitea_callback, elitea_custom_callback
 
 

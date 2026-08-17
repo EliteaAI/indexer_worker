@@ -69,7 +69,7 @@ from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_co
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
-from ..utils import predict_router
+from ..utils import parallel_hitl_router, predict_router
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -284,6 +284,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node, thread_id, node_interface,
                 task_meta=tasknode_task.meta,
             )
+            parallel_hitl_router.register(
+                local_event_node, thread_id, node_interface,
+                task_meta=tasknode_task.meta,
+            )
         except Exception as _inj_exc:
             log.warning(f"predict_router.register failed for thread {thread_id}: {_inj_exc}")
 
@@ -355,6 +359,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     task_meta=tasknode_task.meta,
                     agent_type=(application_data.get('version_details') or {}).get('agent_type'),
                 ),
+                independent_parallel_hitl=(
+                    not self.descriptor.config.get(
+                        "parallel_subagent_dispatch", False,
+                    )
+                    and self.descriptor.config.get(
+                        "independent_parallel_hitl", True,
+                    )
+                ),
+                parallel_hitl_max_concurrency=self.descriptor.config.get(
+                    "parallel_hitl_max_concurrency", 8,
+                ),
             )
 
             # Create callbacks
@@ -409,7 +424,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             )
             invoke_config = {
                 "callbacks": callbacks,
-                "configurable": {"thread_id": thread_id},
+                "configurable": {
+                    "thread_id": thread_id,
+                    # Applications derive nested checkpoint thread ids. Keep
+                    # the worker-owned mailbox address stable across every
+                    # boundary for live supervised decisions.
+                    "__parallel_hitl_root_thread_id__": thread_id,
+                },
             }
 
             invoke_config["configurable"]["invoked_skills"] = kwargs.get("invoked_skills") or []
@@ -678,6 +699,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 log.warning(f"predict_router.report_consumed failed for {thread_id}: {_inj_exc}")
             try:
                 predict_router.unregister(thread_id)
+                parallel_hitl_router.unregister(thread_id)
             except Exception:
                 pass
 

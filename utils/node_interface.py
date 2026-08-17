@@ -113,6 +113,10 @@ class EventTypes(StrEnum):
 
     # HITL events
     agent_hitl_interrupt = 'agent_hitl_interrupt'
+    parallel_hitl_interrupt = 'parallel_hitl_interrupt'
+    agent_parallel_hitl_state = 'parallel_hitl_state'
+    parallel_hitl_ready = 'parallel_hitl_ready'
+    parallel_hitl_decision_ack = 'parallel_hitl_decision_ack'
 
     # Mid-turn user input injection
     injection_ready = 'injection_ready'
@@ -411,6 +415,10 @@ class NoOpNodeEventInterface(NodeEventInterface):
         EventTypes.agent_index_data_removed.value,   # drives index state machine
         EventTypes.mcp_authorization_required.value,  # pauses stream + DB row
         EventTypes.agent_hitl_interrupt.value,        # resumability
+        EventTypes.parallel_hitl_interrupt.value,     # early resumability
+        EventTypes.agent_parallel_hitl_state.value,   # durable fan-out roster
+        EventTypes.parallel_hitl_ready.value,         # live decision routing
+        EventTypes.parallel_hitl_decision_ack.value,  # offer/commit ownership
         EventTypes.agent_requires_confirmation.value,  # resumability
         EventTypes.agent_exception.value,             # error reporting
         EventTypes.agent_swarm_agent_response.value,  # triggers chat_child_message_save (DB)
@@ -492,5 +500,18 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     },
     EventTypes.agent_hitl_interrupt.value: {
         'node_name', 'message', 'available_actions', 'routes', 'edit_state_key',
+        'interrupt_id', 'guardrail_type', 'tool_name', 'toolkit_name',
+        'toolkit_type', 'tool_call_id', 'thread_id', 'root_thread_id',
+        'child_thread_id', 'checkpoint_ns', 'parent_agent_name',
+        'parent_agent_call_id', 'parent_agent_path', 'sibling_ordinal',
+        'resume_strategy', 'hitl_interrupt', 'hitl_interrupts',
+    },
+    EventTypes.parallel_hitl_interrupt.value: {
+        'message', 'thread_id', 'root_thread_id', 'resume_strategy',
+        'hitl_interrupt', 'hitl_interrupts',
+    },
+    'agent_parallel_hitl_state': {
+        'state', 'thread_id', 'root_thread_id', 'interrupt_id',
+        'tool_call_id', 'child_thread_id', 'parent_agent_path',
     },
 }
