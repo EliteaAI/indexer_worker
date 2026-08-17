@@ -58,6 +58,7 @@ from .parallel_dispatch_contract import (
     durable_dispatch_allowed,
     is_fanout_child,
     normalize_hitl_pause,
+    split_mcp_auth_interrupts,
 )
 
 from ..methods.agent_common import (
@@ -829,9 +830,27 @@ def emit_response_events(
     # paused child into hitl_interrupts (plural). Forward the full list so the
     # UI can render N stacked approval cards; fall back to the single interrupt
     # for the ordinary one-pause case.
-    hitl_interrupt, hitl_interrupts = normalize_hitl_pause(
+    auth_interrupts, hitl_interrupt, hitl_interrupts = split_mcp_auth_interrupts(
         hitl_interrupt, response.get('hitl_interrupts'),
     )
+    for auth_interrupt in auth_interrupts:
+        auth_metadata = {
+            **auth_interrupt,
+            'tool_run_id': (
+                auth_interrupt.get('interrupt_id')
+                or auth_interrupt.get('tool_call_id')
+            ),
+            'chat_project_id': task_meta.get('chat_project_id'),
+            'root_thread_id': thread_id_response,
+            'resume_strategy': (
+                'aggregate_child' if is_fanout_child_task else 'root'
+            ),
+        }
+        node_interface.emit(
+            type=EventTypes.mcp_authorization_required,
+            content=auth_interrupt.get('message', 'Toolkit authorization required'),
+            response_metadata=auth_metadata,
+        )
     if hitl_interrupt:
         node_interface.emit(
             type=EventTypes.agent_hitl_interrupt,
@@ -847,6 +866,13 @@ def emit_response_events(
                 'message': hitl_interrupt.get('message', 'Awaiting human review...'),
                 'hitl_interrupt': hitl_interrupt,
                 'hitl_interrupts': hitl_interrupts,
+                # A nested SDK Application may carry its own child_thread_id,
+                # but only a standalone worker fan-out child has a Redis-backed
+                # durable resume route. Publish that ownership explicitly so
+                # Core and the UI never infer it from the nested leaf payload.
+                'resume_strategy': (
+                    'aggregate_child' if is_fanout_child_task else 'root'
+                ),
                 'node_name': hitl_interrupt.get('node_name'),
                 'available_actions': hitl_interrupt.get('available_actions', []),
                 'routes': hitl_interrupt.get('routes', {}),
@@ -879,7 +905,7 @@ def emit_response_events(
     # Also skip for a fan-out child: its final answer must NOT land on the
     # parent's message — the reconciled parent emits the real answer after
     # reading each child's checkpoint (#4993 Track 2).
-    if not hitl_interrupt and not is_fanout_child_task:
+    if not hitl_interrupt and not auth_interrupts and not is_fanout_child_task:
         node_interface.emit(
             type=EventTypes.agent_response,
             content=output['content'],

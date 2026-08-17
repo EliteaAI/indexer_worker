@@ -22,3 +22,27 @@ def normalize_hitl_pause(hitl_interrupt, hitl_interrupts):
         plural = [hitl_interrupt]
     singular = hitl_interrupt or (plural[0] if plural else None)
     return singular, plural
+
+
+def split_mcp_auth_interrupts(hitl_interrupt, hitl_interrupts):
+    """Partition durable authorization guards from ordinary HITL prompts."""
+    _, plural = normalize_hitl_pause(hitl_interrupt, hitl_interrupts)
+    auth = [
+        item for item in plural
+        if isinstance(item, dict) and item.get('guardrail_type') == 'mcp_auth'
+    ]
+    review = [
+        item for item in plural
+        if not (isinstance(item, dict) and item.get('guardrail_type') == 'mcp_auth')
+    ]
+    return auth, (review[0] if review else None), review
+
+
+def has_mcp_auth_interrupt(response):
+    """Return whether an SDK response paused on a durable auth guard."""
+    if not isinstance(response, dict):
+        return False
+    auth, _, _ = split_mcp_auth_interrupts(
+        response.get('hitl_interrupt'), response.get('hitl_interrupts'),
+    )
+    return bool(auth)

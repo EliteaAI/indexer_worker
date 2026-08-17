@@ -7,8 +7,10 @@ import types
 
 from utils.parallel_dispatch_contract import (
     durable_dispatch_allowed,
+    has_mcp_auth_interrupt,
     is_fanout_child,
     normalize_hitl_pause,
+    split_mcp_auth_interrupts,
 )
 
 
@@ -54,6 +56,50 @@ def test_singular_pause_derives_complete_one_item_list():
     normalized_singular, plural = normalize_hitl_pause(singular, None)
     assert normalized_singular == singular
     assert plural == [singular]
+
+
+def test_mcp_auth_interrupts_are_partitioned_from_sensitive_hitl():
+    auth = {
+        'interrupt_id': 'auth-1',
+        'guardrail_type': 'mcp_auth',
+        'tool_call_id': 'leaf-auth',
+    }
+    review = {
+        'interrupt_id': 'review-1',
+        'guardrail_type': 'sensitive_tool',
+        'tool_call_id': 'leaf-review',
+    }
+
+    auth_items, review_singular, review_items = split_mcp_auth_interrupts(
+        None, [auth, review],
+    )
+
+    assert auth_items == [auth]
+    assert review_singular == review
+    assert review_items == [review]
+    assert has_mcp_auth_interrupt({'hitl_interrupts': [auth, review]}) is True
+
+
+def test_worker_resume_paths_forward_mcp_auth_command_fields():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for relative_path in (
+        'methods/indexer_agent.py',
+        'methods/indexer_predict_agent.py',
+    ):
+        source = (root / relative_path).read_text()
+        assert "invoke_input['mcp_auth_resume'] = True" in source
+        assert "invoke_input['mcp_auth_action'] = mcp_auth_action" in source
+        assert "invoke_input['mcp_auth_decisions'] = mcp_auth_decisions" in source
+
+
+def test_hitl_event_publishes_worker_owned_resume_strategy():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / 'utils' / 'agent_execution_common.py'
+    ).read_text()
+    hitl_emit = source[source.index("type=EventTypes.agent_hitl_interrupt"):]
+
+    assert "'aggregate_child' if is_fanout_child_task else 'root'" in hitl_emit
 
 
 def test_outer_durable_child_path_prefixes_inner_leaf_path():
