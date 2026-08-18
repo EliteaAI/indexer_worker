@@ -73,7 +73,7 @@ from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_co
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
-from ..utils import predict_router
+from ..utils import parallel_hitl_router, predict_router
 from ..utils.mcp_auth_tools import (
     _make_mcp_auth_tools,
     _has_mcp_toolkits,
@@ -283,6 +283,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 local_event_node, thread_id, node_interface,
                 task_meta=tasknode_task.meta,
             )
+            parallel_hitl_router.register(
+                local_event_node, thread_id, node_interface,
+                task_meta=tasknode_task.meta,
+            )
         except Exception as _inj_exc:
             log.warning(f"predict_router.register failed for thread {thread_id}: {_inj_exc}")
 
@@ -373,6 +377,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 # the operator enabled parallel_subagent_dispatch — switches the
                 # SDK from in-process gather to park-by-returning. None = Track 1.
                 child_dispatcher=_child_dispatcher,
+                independent_parallel_hitl=(
+                    _child_dispatcher is None
+                    and self.descriptor.config.get(
+                        "independent_parallel_hitl", True,
+                    )
+                ),
+                parallel_hitl_max_concurrency=self.descriptor.config.get(
+                    "parallel_hitl_max_concurrency", 8,
+                ),
                 tools=additional_tools if additional_tools else None,
             )
 
@@ -454,7 +467,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 
             invoke_config = {
                 'callbacks': callbacks,
-                'configurable': {'thread_id': thread_id},
+                'configurable': {
+                    'thread_id': thread_id,
+                    # Applications derive nested checkpoint thread ids. Keep
+                    # the worker-owned mailbox address stable across every
+                    # boundary for live supervised decisions.
+                    '__parallel_hitl_root_thread_id__': thread_id,
+                },
                 'recursion_limit': meta.get("step_limit", 25),
                 'metadata': (
                     {'pipeline_state_defaults_hash': current_state_hash}
@@ -755,6 +774,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 log.warning(f"predict_router.report_consumed failed for {thread_id}: {_inj_exc}")
             try:
                 predict_router.unregister(thread_id)
+                parallel_hitl_router.unregister(thread_id)
             except Exception:
                 pass
 
