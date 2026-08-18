@@ -117,17 +117,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             **kwargs,
     ):
         """ Run task target """
-        self.indexer_enable_logging()
-        #
-        log.debug(f'indexer_agent start stream_id={stream_id}, message_id={message_id}')
-        #
-        # Before anything that resolves a hostname (event node, client, vault): a child
-        # that inherited a locked resolver mutex must die now, not hang unkillably (#6245)
+        # First statement on purpose: a poisoned child cannot log at all, because the
+        # eventnode handler publishes to Redis and that needs DNS (#6284)
         import tasknode_task  # pylint: disable=E0401,C0415
         if not check_fork_dns(self.descriptor.config, tasknode_task.id):
             return build_probe_failed_result(
                 stream_id, message_id, kwargs.get("execution_generation"),
             )
+        #
+        self.indexer_enable_logging()
+        #
+        log.debug(f'indexer_agent start stream_id={stream_id}, message_id={message_id}')
         #
         try:
             # Extract client args - will be used to create EliteAClient after fork
