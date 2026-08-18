@@ -17,11 +17,10 @@
 
 """ Detect a forked child that inherited a locked glibc resolver mutex (#6245) """
 
+import logging
 import os
 import socket
 import threading
-
-from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 
 PROBE_FAILED_ERROR = "fork_dns_probe_failed"
@@ -30,11 +29,34 @@ PROBE_USER_MESSAGE = "Temporary server error, please try again"
 # Three shapes on purpose: a resolvable name, a name that must NXDOMAIN, and a bare
 # IP. Each takes a different NSS path, and probing only one lets ~15% of poisoned
 # children through (measured).
+# The NXDOMAIN name is fully qualified (trailing dot) so it is not retried against every
+# resolv.conf search-domain — that walk can outlast the probe timeout and abort a healthy
+# child (measured: 8.7s vs 0.01s on a 9-domain search list).
 _PROBE_TARGETS = (
     ("localhost", 80),
-    ("elitea-fork-probe.invalid", 80),
+    ("elitea-fork-probe.invalid.", 80),
     ("127.0.0.1", 0),
 )
+
+
+def _stderr_note(message: str) -> None:
+    """ Diagnostic that cannot wedge: no logging, no formatting, no name resolution """
+    try:
+        os.write(2, message.encode("utf-8", "replace") + b"\n")
+    except Exception:  # pylint: disable=W0718
+        pass
+
+
+def _detach_resolving_log_handlers() -> None:
+    """ Keep only stream handlers: eventnode ones publish to Redis, which needs DNS (#6284) """
+    try:
+        for handler in list(logging.root.handlers):
+            if isinstance(handler, logging.StreamHandler):
+                continue
+            # No close(): closing an eventnode handler stops its node, which can talk Redis
+            logging.root.removeHandler(handler)
+    except Exception:  # pylint: disable=W0718
+        pass
 
 
 def probe_dns_usable(timeout: float = 2.0) -> bool:
@@ -96,11 +118,15 @@ def check_fork_dns(descriptor_config: dict, task_id: str = None) -> bool:
     if probe_dns_usable(dns_probe_timeout(descriptor_config)):
         return True
     #
+    # Everything from here to process exit must be resolution-free, so drop the log
+    # handlers that reach Redis before writing anything at all (#6284).
+    _detach_resolving_log_handlers()
+    #
     # Cannot be recovered in-process: the mutex was inherited locked and its owner
     # thread does not exist here, so it is held for this child's whole life.
-    log.error(
-        "DNS is unusable in forked task %s — inherited a locked resolver mutex (#6245). "
-        "Aborting before the agent wedges unkillably", task_id,
+    _stderr_note(
+        f"[fork_dns_probe] DNS is unusable in forked task {task_id} - inherited a locked "
+        "resolver mutex (#6245). Aborting before the agent wedges unkillably"
     )
     #
     # Returning a result only works under the file transport. Every other transport
@@ -108,7 +134,10 @@ def check_fork_dns(descriptor_config: dict, task_id: str = None) -> bool:
     # so exit instead of wedging in the reply. Safe because the check above proved this
     # process is a dedicated fork child: os._exit takes nothing else down with it.
     if descriptor_config.get("agents_result_transport", "files") != "files":
-        log.error("Result transport is not 'files'; exiting task %s without a result", task_id)
+        _stderr_note(
+            f"[fork_dns_probe] result transport is not 'files'; "
+            f"exiting task {task_id} without a result"
+        )
         os._exit(1)  # pylint: disable=W0212
     #
     return False
