@@ -643,6 +643,7 @@ class EliteACallback(BaseCallbackHandler):
         self.mcp_auth_durable_interrupt_seen = False
         self.parallel_hitl_run_state: dict = {}
         self.mcp_auth_pause_message: Optional[str] = None
+        self.created_entities: list = []  # Entities created via MCP tools during this run
         self.toolkit_metadata: dict = toolkit_metadata or {}
         # Extract and cache toolkit_name and toolkit_type from toolkit_metadata for injection
         self.cached_toolkit_name = None
@@ -1090,6 +1091,87 @@ class EliteACallback(BaseCallbackHandler):
             response_metadata=tool_call.model_dump(include=include_fields),
             content=tool_output,
         )
+
+        _tool_name_for_entity = kwargs.get("name") or (
+            self.tool_calls[tool_run_id].tool_name if tool_run_id in self.tool_calls else None
+        )
+        _ENTITY_TOOL_NAMES = frozenset({
+            "post_elitea_core_applications",
+            "post_elitea_core_versions",
+            "post_elitea_core_skills",
+            "post_elitea_core_toolkits",
+            "post_elitea_core_tools",
+            "put_project_context_project-context",
+        })
+        if _tool_name_for_entity in _ENTITY_TOOL_NAMES:
+            try:
+                _resp = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                _entity_id = _resp.get("id")
+                _entity_payload = None
+
+                if _tool_name_for_entity in ("post_elitea_core_applications", "post_elitea_core_versions"):
+                    _entity_name = _resp.get("name", "")
+                    _vd = _resp.get("version_details") or {}
+                    _version_id = _vd.get("id")
+                    _agent_type = _vd.get("agent_type") or _resp.get("agent_type") or "openai"
+                    if _entity_id and _version_id:
+                        _etype = "pipeline" if _agent_type == "pipeline" else "agent"
+                        _entity_payload = {
+                            "entity_type": _etype,
+                            "entity_id": _entity_id,
+                            "version_id": _version_id,
+                            "entity_name": _entity_name,
+                        }
+
+                elif _tool_name_for_entity == "post_elitea_core_skills":
+                    _entity_name = _resp.get("name", "")
+                    _vd = _resp.get("version_details") or {}
+                    _version_id = _vd.get("id")
+                    if _entity_id and _version_id:
+                        _entity_payload = {
+                            "entity_type": "skill",
+                            "entity_id": _entity_id,
+                            "version_id": _version_id,
+                            "entity_name": _entity_name,
+                        }
+
+                elif _tool_name_for_entity in ("post_elitea_core_toolkits", "post_elitea_core_tools"):
+                    _entity_name = _resp.get("name", "")
+                    _toolkit_type = _resp.get("type", "")
+                    _is_mcp = bool(_toolkit_type and (
+                        _toolkit_type == "mcp" or _toolkit_type.startswith("mcp_")
+                    ))
+                    if _entity_id:
+                        _entity_payload = {
+                            "entity_type": "toolkit",
+                            "entity_id": _entity_id,
+                            "version_id": None,
+                            "entity_name": _entity_name,
+                            "is_mcp": _is_mcp,
+                        }
+
+                elif _tool_name_for_entity == "put_project_context_project-context":
+                    if _entity_id:
+                        _entity_payload = {
+                            "entity_type": "project_context",
+                            "entity_id": _entity_id,
+                            "version_id": None,
+                            "entity_name": "Project Context",
+                        }
+
+                if _entity_payload:
+                    self.node_interface.emit(
+                        type=EventTypes.agent_entity_created,
+                        response_metadata=_entity_payload,
+                    )
+                    self.created_entities.append(_entity_payload)
+                    log.info(
+                        "[ENTITY_CREATED] Detected %s creation via MCP tool: id=%s version_id=%s name=%r",
+                        _entity_payload["entity_type"], _entity_payload["entity_id"],
+                        _entity_payload["version_id"], _entity_payload["entity_name"],
+                    )
+            except Exception as _exc:
+                log.debug("[ENTITY_CREATED] Could not parse entity from tool output: %s", _exc)
 
         # necessary for partial message saving — send only the single updated entry (delta)
         msg_event_node = NodeEvent(

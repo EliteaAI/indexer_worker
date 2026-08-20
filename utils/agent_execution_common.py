@@ -931,7 +931,14 @@ def emit_response_events(
             # tool_calls/thinking_steps omitted: already delta-synced into message_trace_step
             # via on_tool_end/on_llm_end's partial_message events during streaming
             'llm_start_timestamp': elitea_callback.llm_start_timestamp,
-            'additional_response_meta': elitea_custom_callback.additional_response_meta,
+            'additional_response_meta': {
+                **elitea_custom_callback.additional_response_meta,
+                **(
+                    {'created_entities': elitea_callback.created_entities}
+                    if elitea_callback.created_entities
+                    else {}
+                ),
+            },
             'files_modified': elitea_custom_callback.modified_files,
             'image_thumbnails': image_thumbnails or {},
             'index_statuses': elitea_custom_callback.index_statuses,
