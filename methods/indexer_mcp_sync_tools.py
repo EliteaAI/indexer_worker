@@ -27,7 +27,6 @@ from tools import worker_core
 
 from ..utils.funcs import normalize_mcp_auth_metadata_urls, normalize_mcp_server_url, backfill_mcp_auth_metadata
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent
-from ..utils.fork_dns_probe import check_fork_dns, PROBE_FAILED_ERROR, PROBE_USER_MESSAGE
 
 # Import shared components from the agent common module
 from .agent_common import (
@@ -80,17 +79,7 @@ class Method:
         Returns:
             Dictionary with tools list or authorization requirement
         """
-        # First statement on purpose: a poisoned child cannot log at all, because the
-        # eventnode handler publishes to Redis and that needs DNS (#6284)
         import tasknode_task  # pylint: disable=E0401,C0415
-        if not check_fork_dns(self.descriptor.config, tasknode_task.id):
-            return {
-                'success': False,
-                'error': PROBE_FAILED_ERROR,
-                'human_readable': PROBE_USER_MESSAGE,
-                'fork_dns_probe_failed': True,
-                'server_url': url,
-            }
         #
         normalized_url = normalize_mcp_server_url(url)
         log.debug(f"MCP sync tools task started: url={normalized_url}, project_id={project_id}")

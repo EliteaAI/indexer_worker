@@ -35,7 +35,6 @@ from ..utils.funcs import (
     budget_exceeded_error_code,
 )
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent, InitiatorType
-from ..utils.fork_dns_probe import check_fork_dns, PROBE_FAILED_ERROR, PROBE_USER_MESSAGE
 
 # Import shared components from the agent common module
 from .agent_common import (
@@ -461,19 +460,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             **kwargs,
     ):
         """ Test a single toolkit tool """
-        # First statement on purpose: a poisoned child cannot log at all, because the
-        # eventnode handler publishes to Redis and that needs DNS (#6284)
-        import tasknode_task  # pylint: disable=E0401,C0415
-        if not check_fork_dns(self.descriptor.config, tasknode_task.id):
-            return {
-                'success': False,
-                'error': PROBE_FAILED_ERROR,
-                'human_readable': PROBE_USER_MESSAGE,
-                'fork_dns_probe_failed': True,
-                'toolkit_config': kwargs.get("toolkit_config", {}),
-                'tool_name': kwargs.get("tool_name", ""),
-            }
-        #
         self.indexer_enable_logging()
         #
         log.debug(f'indexer_test_toolkit_tool start stream_id={stream_id}, message_id={message_id}')
@@ -859,20 +845,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         This is ideal for auth checks as it validates the connection without
         requiring any tool execution.
         """
-        # First statement on purpose: a poisoned child cannot log at all, because the
-        # eventnode handler publishes to Redis and that needs DNS (#6284)
-        import tasknode_task  # pylint: disable=E0401,C0415
-        if not check_fork_dns(self.descriptor.config, tasknode_task.id):
-            return {
-                'success': False,
-                'error': PROBE_FAILED_ERROR,
-                'human_readable': PROBE_USER_MESSAGE,
-                'fork_dns_probe_failed': True,
-                'toolkit_config': kwargs.get("toolkit_config", {}),
-                'tools': [],
-                'tools_count': 0,
-            }
-        #
         self.indexer_enable_logging()
         #
         log.debug(f'indexer_test_mcp_connection start stream_id={stream_id}, message_id={message_id}')
