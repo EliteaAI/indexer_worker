@@ -11,26 +11,6 @@
       "default": false,
       "requires_restart": false
     },
-    "fork_dns_probe_enabled": {
-      "type": "boolean",
-      "title": "Fork DNS Probe",
-      "description": "Checks that hostname resolution still works at the start of each forked agent task. A child that inherited a locked system resolver lock can never recover and would otherwise hang forever holding several GB of memory, leaving the chat spinner running. When enabled such a task fails fast with a retryable error instead. Disable only if this check causes false failures.",
-      "path": "fork_dns_probe.enabled",
-      "section": "runtime",
-      "default": true,
-      "requires_restart": false
-    },
-    "fork_dns_probe_timeout_seconds": {
-      "type": "number",
-      "title": "Fork DNS Probe Timeout (seconds)",
-      "description": "How long the resolution check may take before the task is treated as unrecoverable. Lower values fail faster but risk aborting healthy tasks on a slow DNS server.",
-      "path": "fork_dns_probe.timeout_seconds",
-      "section": "runtime",
-      "default": 2.0,
-      "requires_restart": false,
-      "minimum": 0.5,
-      "maximum": 30
-    },
     "mcp_servers": {
       "type": "object",
       "title": "MCP Server Definitions",
