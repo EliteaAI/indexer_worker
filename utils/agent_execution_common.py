@@ -986,20 +986,20 @@ def emit_response_events(
 _EN_NEXT_INPUT_SUGGESTION_READY = "next_input_suggestion_ready"
 
 _NEXT_INPUT_SUGGESTION_PROMPT = (
-    "You suggest a likely next user message in a chat, based on the "
-    "assistant's latest reply. Reply with ONLY the suggested next user "
-    "message, or the single word NONE if the reply doesn't make one "
-    "obvious (e.g. a greeting, a simple acknowledgement, or a final "
-    "answer with no natural follow-up). Keep it short — one sentence, "
-    "written as if the user typed it.\n\n"
+    "You suggest 3 likely next user messages in a chat, based on the "
+    "assistant's latest reply. Reply with ONLY a JSON array of 3 strings, "
+    "or the array [\"NONE\"] if the reply doesn't make follow-ups obvious "
+    "(e.g. a greeting, a simple acknowledgement, or a final answer). "
+    "Keep each suggestion short — one sentence, written as if the user typed it. "
+    "Vary the suggestions (different angles: deeper dive, practical application, related topic).\n\n"
     "Examples:\n"
     "Assistant: Hi! How can I help you today?\n"
-    "Suggestion: NONE\n\n"
+    "Suggestions: [\"NONE\"]\n\n"
     "Assistant: I've fixed the bug. Want me to also add a test for it?\n"
-    "Suggestion: Yes, please add a test.\n\n"
-    "Assistant: The capital of France is Paris.\n"
-    "Suggestion: NONE\n\n"
-    "Assistant reply:\n{reply}\n\nSuggestion:"
+    "Suggestions: [\"Yes, please add a test.\", \"How long does it take?\", \"Can I see the fix?\"]\n\n"
+    "Assistant: The capital of France is Paris. It's known for the Eiffel Tower.\n"
+    "Suggestions: [\"What are the must-see attractions?\", \"How do I get there?\", \"When is the best time to visit?\"]\n\n"
+    "Assistant reply:\n{reply}\n\nSuggestions (JSON array of 3 strings):"
 )
 
 
@@ -1027,7 +1027,7 @@ def maybe_emit_next_input_suggestion(
             log.debug(f"next_input_suggestion: skipped (reply below min_chars={min_chars})")
             return
 
-        llm = client.get_low_tier_llm(max_tokens=64)
+        llm = client.get_low_tier_llm(max_tokens=200)
         if llm is None:
             log.debug("next_input_suggestion: skipped (no low-tier model available)")
             return
@@ -1051,18 +1051,36 @@ def maybe_emit_next_input_suggestion(
             log.debug("next_input_suggestion: skipped (generation failed, see warning above)")
             return
 
-        suggestion = getattr(result_container[0], "content", result_container[0])
-        suggestion = str(suggestion or "").strip()
-        if not suggestion or suggestion.upper() == "NONE":
-            log.debug("next_input_suggestion: skipped (model returned NONE/empty)")
+        suggestions_text = getattr(result_container[0], "content", result_container[0])
+        suggestions_text = str(suggestions_text or "").strip()
+        if not suggestions_text:
+            log.debug("next_input_suggestion: skipped (model returned empty)")
             return
 
-        log.info(f"next_input_suggestion: emitting suggestion for stream_id={stream_id}")
+        try:
+            suggestions = json.loads(suggestions_text)
+            if not isinstance(suggestions, list):
+                return
+        except (json.JSONDecodeError, ValueError):
+            log.debug("next_input_suggestion: skipped (model returned invalid JSON)")
+            return
+
+        # Filter out NONE markers and empty strings
+        suggestions = [
+            s for s in suggestions
+            if isinstance(s, str) and s.strip() and s.upper() != "NONE"
+        ]
+
+        if not suggestions:
+            log.debug("next_input_suggestion: skipped (no valid suggestions after filtering)")
+            return
+
+        log.info(f"next_input_suggestion: emitting {len(suggestions)} suggestions for stream_id={stream_id}")
         local_event_node.emit(_EN_NEXT_INPUT_SUGGESTION_READY, {
             "sid": sid,
             "stream_id": stream_id,
             "message_id": message_id,
-            "suggestion": suggestion,
+            "suggestions": suggestions[:3],  # Cap at 3
         })
     except Exception as exc:  # pylint: disable=W0703
         log.warning(f"maybe_emit_next_input_suggestion failed: {exc}")

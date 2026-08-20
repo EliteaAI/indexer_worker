@@ -12,6 +12,7 @@ Run from this directory:
 """
 
 import ast
+import json
 import pathlib
 import threading
 import typing
@@ -32,6 +33,7 @@ def _load_target():
             pass
 
     namespace = {
+        'json': json,
         'threading': threading,
         'Optional': typing.Optional,
         'Dict': typing.Dict,
@@ -151,7 +153,9 @@ def test_empty_string_skips():
 
 def test_happy_path_emits():
     node = FakeEventNode()
-    maybe_emit_next_input_suggestion(node, FakeClient(FakeLLM("Yes, please add a test.")), BASE_CFG,
+    # Mock LLM returns JSON array of 3 suggestions
+    llm_response = '["Yes, please add a test.", "How long does it take?", "Can I see the fix?"]'
+    maybe_emit_next_input_suggestion(node, FakeClient(FakeLLM(llm_response)), BASE_CFG,
                                       LONG_REPLY, "stream-1", "msg-1")
     assert len(node.emitted) == 1
     channel, payload = node.emitted[0]
@@ -160,8 +164,15 @@ def test_happy_path_emits():
         "sid": "sid-1",
         "stream_id": "stream-1",
         "message_id": "msg-1",
-        "suggestion": "Yes, please add a test.",
+        "suggestions": ["Yes, please add a test.", "How long does it take?", "Can I see the fix?"],
     }
+
+
+def test_invalid_json_skips():
+    node = FakeEventNode()
+    maybe_emit_next_input_suggestion(node, FakeClient(FakeLLM('["truncated...')), BASE_CFG,
+                                      LONG_REPLY, "s1", "m1")
+    assert node.emitted == []
 
 
 def test_never_raises_on_client_blowup():
