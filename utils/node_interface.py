@@ -127,6 +127,9 @@ class EventTypes(StrEnum):
     summarization_started = 'summarization_started'
     summarization_finished = 'summarization_finished'
 
+    # Entity creation events - fired when an MCP tool creates an Agent/Pipeline/Skill/ProjectContext
+    agent_entity_created = 'agent_entity_created'
+
 
 class NodeEvent(BaseModel):
     type: EventTypes
@@ -513,5 +516,8 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     'agent_parallel_hitl_state': {
         'state', 'thread_id', 'root_thread_id', 'interrupt_id',
         'tool_call_id', 'child_thread_id', 'parent_agent_path',
+    },
+    EventTypes.agent_entity_created.value: {
+        'entity_type', 'entity_id', 'version_id', 'entity_name', 'is_mcp',
     },
 }
