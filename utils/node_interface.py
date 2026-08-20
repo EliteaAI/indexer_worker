@@ -518,6 +518,6 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
         'tool_call_id', 'child_thread_id', 'parent_agent_path',
     },
     EventTypes.agent_entity_created.value: {
-        'entity_type', 'entity_id', 'version_id', 'entity_name',
+        'entity_type', 'entity_id', 'version_id', 'entity_name', 'is_mcp',
     },
 }
