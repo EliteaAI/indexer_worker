@@ -1109,7 +1109,7 @@ class EliteACallback(BaseCallbackHandler):
                 _entity_id = _resp.get("id")
                 _entity_payload = None
 
-                if _tool_name_for_entity in ("post_elitea_core_applications", "post_elitea_core_versions"):
+                if _tool_name_for_entity == "post_elitea_core_applications":
                     _entity_name = _resp.get("name", "")
                     _vd = _resp.get("version_details") or {}
                     _version_id = _vd.get("id")
@@ -1119,6 +1119,20 @@ class EliteACallback(BaseCallbackHandler):
                         _entity_payload = {
                             "entity_type": _etype,
                             "entity_id": _entity_id,
+                            "version_id": _version_id,
+                            "entity_name": _entity_name,
+                        }
+
+                elif _tool_name_for_entity == "post_elitea_core_versions":
+                    _entity_name = _resp.get("name", "")
+                    _version_id = _resp.get("id")
+                    _app_id = _resp.get("application_id")
+                    _agent_type = _resp.get("agent_type") or "openai"
+                    if _app_id and _version_id:
+                        _etype = "pipeline" if _agent_type == "pipeline" else "agent"
+                        _entity_payload = {
+                            "entity_type": _etype,
+                            "entity_id": _app_id,
                             "version_id": _version_id,
                             "entity_name": _entity_name,
                         }
