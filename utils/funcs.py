@@ -141,6 +141,7 @@ def extract_token_usage(response: LLMResult) -> Optional[Dict[str, int]]:
 LENGTH_STOP_REASONS = {
     'length',
     'max_tokens',
+    'max_output_tokens',
     'STOP_REASON_MAX_TOKENS',
 }
 
@@ -179,6 +180,10 @@ def extract_finish_reason(response: LLMResult, generation_chunk: Dict = None) ->
                     if isinstance(response_metadata, dict):
                         # Try stop_reason (Anthropic) then finish_reason (others)
                         finish_reason = response_metadata.get('stop_reason') or response_metadata.get('finish_reason')
+                        if not finish_reason and response_metadata.get('status') == 'incomplete':
+                            incomplete_details = response_metadata.get('incomplete_details') or {}
+                            if isinstance(incomplete_details, dict):
+                                finish_reason = incomplete_details.get('reason')
 
         # Method 2: Check response.generations directly
         if not finish_reason and response and response.generations:
@@ -197,6 +202,10 @@ def extract_finish_reason(response: LLMResult, generation_chunk: Dict = None) ->
                             resp_meta = msg.response_metadata
                             if isinstance(resp_meta, dict):
                                 finish_reason = resp_meta.get('stop_reason') or resp_meta.get('finish_reason')
+                                if not finish_reason and resp_meta.get('status') == 'incomplete':
+                                    incomplete_details = resp_meta.get('incomplete_details') or {}
+                                    if isinstance(incomplete_details, dict):
+                                        finish_reason = incomplete_details.get('reason')
                                 if finish_reason:
                                     break
                 if finish_reason:
@@ -205,6 +214,10 @@ def extract_finish_reason(response: LLMResult, generation_chunk: Dict = None) ->
         # Method 3: Check llm_output (legacy format)
         if not finish_reason and response and response.llm_output:
             finish_reason = response.llm_output.get('stop_reason') or response.llm_output.get('finish_reason')
+            if not finish_reason and response.llm_output.get('status') == 'incomplete':
+                incomplete_details = response.llm_output.get('incomplete_details') or {}
+                if isinstance(incomplete_details, dict):
+                    finish_reason = incomplete_details.get('reason')
 
         # Normalize length-related stop reasons
         if finish_reason and finish_reason in LENGTH_STOP_REASONS:
@@ -215,6 +228,21 @@ def extract_finish_reason(response: LLMResult, generation_chunk: Dict = None) ->
     except Exception as e:
         log.debug(f"Failed to extract finish reason from API response: {e}")
         return None
+
+
+def should_emit_output_limit_confirmation(
+    finish_reason: Optional[str],
+    hierarchy_metadata: Optional[Dict[str, Any]],
+) -> bool:
+    """Only a top-level truncated response may request root-level Continue."""
+    if finish_reason != 'length':
+        return False
+    metadata = hierarchy_metadata or {}
+    return not bool(
+        metadata.get('parent_agent_path')
+        or metadata.get('parent_agent_name')
+        or metadata.get('child_thread_id')
+    )
 
 
 def num_tokens_from_messages(messages: List[BaseMessage] | List[str], model="gpt-3.5-turbo-0613", is_chunk=False):
