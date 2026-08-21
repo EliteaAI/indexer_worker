@@ -34,7 +34,11 @@ import json
 import threading
 import time
 
+from urllib.parse import quote
+
 from pylon.core.tools import log, web
+
+from ..utils.audio_backend import audio_headers, audio_model_name, audio_ws_url
 from tools import worker_core
 
 from ..utils.voice_router import register as voice_register, unregister as voice_unregister
@@ -82,9 +86,19 @@ class Method:
         """
         local_event_node = worker_core.event_node
 
-        litellm_model = f"{project_id}_{model_name}"
-        ws_url = f"ws://127.0.0.1:8081/v1/realtime?model={litellm_model}&intent=transcription"
-        ws_headers = [f"Authorization: Bearer {project_llm_key}", "OpenAI-Beta: realtime=v1"]
+        # The wire name differs per backend: LiteLLM addressed a project-prefixed
+        # model group, the gateway resolves the project's own configuration row.
+        wire_model = audio_model_name(project_id, model_name)
+        # `intent` is forwarded to the provider by both backends; the gateway
+        # carries it on an explicit allowlist.
+        ws_url = audio_ws_url(
+            f"/realtime?model={quote(wire_model)}&intent=transcription"
+        )
+        ws_headers = [
+            f"{name}: {value}"
+            for name, value in audio_headers(project_id, project_llm_key).items()
+        ]
+        ws_headers.append("OpenAI-Beta: realtime=v1")
 
         stop_event = threading.Event()
         # Tracks whether the stop came from the user (asr_stop) vs a WS error.
