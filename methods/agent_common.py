@@ -58,6 +58,7 @@ from ..utils.funcs import (
     extract_finish_reason,
     extract_token_usage,
     num_tokens_from_messages,
+    should_emit_output_limit_confirmation,
 )
 from ..utils.node_interface import (
     ELITEA_SDK_CUSTOM_EVENTS_MAPPER,
@@ -1719,6 +1720,10 @@ class EliteACallback(BaseCallbackHandler):
         if self.debug:
             log.debug("on_llm_end(%s, %s)", response, kwargs)
 
+        # Track which steps belong to this callback. ``thinking_steps`` spans
+        # the whole agent run and may already contain earlier LLM calls.
+        previous_step_count = len(self.thinking_steps)
+
         # Try to get token usage from API response
         token_usage = extract_token_usage(response)
 
@@ -1895,13 +1900,19 @@ class EliteACallback(BaseCallbackHandler):
             type=EventTypes.agent_llm_end,
             response_metadata={
                 "tool_run_id": str(run_id),
-                "thinking_steps": [self.thinking_steps[-1]] if self.thinking_steps else [],
+                "thinking_steps": (
+                    [self.thinking_steps[-1]]
+                    if len(self.thinking_steps) > previous_step_count else []
+                ),
                 "llm_start_timestamp": self.llm_start_timestamp,
             },
         )
 
         # necessary for partial message saving — send only the new thinking step (delta)
-        new_thinking_step = self.thinking_steps[-1] if self.thinking_steps else None
+        new_thinking_step = (
+            self.thinking_steps[-1]
+            if len(self.thinking_steps) > previous_step_count else None
+        )
         msg_event_node = NodeEvent(
             type=EventTypes.partial_message,
             stream_id=self.node_interface.stream_id,
@@ -1924,20 +1935,22 @@ class EliteACallback(BaseCallbackHandler):
         self.node_interface.event_node.emit(
             EVENTNODE_PARTIAL_RESPONSE_NAME, msg_event_node
         )
-        # Check if the last thinking step
-        # was truncated (finish_reason == 'length')
-        if self.thinking_steps:
-            last_step = self.thinking_steps[-1]
-            finish_reason = extract_finish_reason(response, generation_chunk=last_step)
-            if finish_reason == "length":
-                self.node_interface.emit(
-                    type=EventTypes.agent_requires_confirmation,
-                    content="Continue",
-                    response_metadata={
-                        "tool_run_id": str(run_id),
-                        "finish_reason": finish_reason,
-                    },
-                )
+        # A provider can report token exhaustion with no generation at all
+        # (notably reasoning output through the OpenAI Responses API). Detect
+        # the terminal reason from the complete response, not only from the
+        # most recently persisted step.
+        last_step = new_thinking_step
+        finish_reason = extract_finish_reason(response, generation_chunk=last_step)
+        if should_emit_output_limit_confirmation(finish_reason, hierarchy_metadata):
+            self.node_interface.emit(
+                type=EventTypes.agent_requires_confirmation,
+                content="Continue",
+                response_metadata={
+                    "tool_run_id": str(run_id),
+                    "thread_id": self.thread_id,
+                    "finish_reason": finish_reason,
+                },
+            )
 
 
 class EliteACustomCallback(BaseCallbackHandler):
