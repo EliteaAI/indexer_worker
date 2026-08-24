@@ -498,13 +498,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         else:
             local_event_node = worker_core.event_node
         #
+        # Must round-trip so is_current_execution matches msg_group.meta and core
+        # persists what this task streams: the callback-emitted partial_message
+        # events carrying tool_calls/thinking_steps, and the final tool response.
+        execution_generation = kwargs.get("execution_generation")
+        #
         node_interface = NodeEventInterface(
             event_node=local_event_node,
             node_event_name=EVENTNODE_EVENT_NAME,
             stream_id=stream_id,
             message_id=message_id,
             sio_event=tasknode_task.meta.get("sio_event"),
-            question_id=tasknode_task.meta.get("question_id")
+            question_id=tasknode_task.meta.get("question_id"),
+            execution_generation=execution_generation
         )
         #
         node_interface.emit(
@@ -524,9 +530,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         project_auth_token = kwargs.get("project_auth_token")
         deployment_url = kwargs.get("deployment_url")
         mcp_tokens = kwargs.get("mcp_tokens")
-        # Must round-trip so chat_message_stream_end's is_current_execution
-        # matches msg_group.meta and persists the tool response.
-        execution_generation = kwargs.get("execution_generation")
 
         # Clean toolkit_config to ensure JSON serializability
         clean_toolkit_config = clean_for_json_serialization(
