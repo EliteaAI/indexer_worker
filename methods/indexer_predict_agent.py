@@ -318,13 +318,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 }
             )
 
-            # Get error_handling_enabled from kwargs (runtime override) or config (default)
-            exception_handling_enabled = kwargs.get(
-                "exception_handling_enabled",
-                self.descriptor.config.get("exception_handling_enabled", False)
-            )
-            log.debug(f'exception_handling_enabled "{exception_handling_enabled}"')
-
             # Prepare context_settings with summarization callbacks
             context_settings = kwargs.get("context_settings", {})
             context_settings['callbacks'] = create_summarization_callbacks(node_interface)
@@ -346,7 +339,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 persona=kwargs.get("persona", "generic"),
                 lazy_tools_mode=lazy_tools_mode,
                 internal_tools=internal_tools,
-                exception_handling_enabled=exception_handling_enabled,
                 context_settings=context_settings,
                 step_limit=steps_limit,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),

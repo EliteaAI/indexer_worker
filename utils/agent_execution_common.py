@@ -1422,7 +1422,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'chat_history', 'tools', 'internal_tools', 'mcp_tokens',
         'ignored_mcp_servers', 'persona', 'supports_vision', 'debug',
         'debug_mode', 'steps_limit', 'meta', 'context_settings',
-        'exception_handling_enabled', 'auto_approve_sensitive_actions',
+        'auto_approve_sensitive_actions',
         'return_chat_history',
         'execution_generation',
         'attached_skills', 'invoked_skills',
