@@ -310,13 +310,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                         memory, thread_id, current_state_hash, memory_config
                     )
 
-            # Get error_handling_enabled from kwargs (runtime override) or config (default)
-            exception_handling_enabled = kwargs.get(
-                "exception_handling_enabled",
-                self.descriptor.config.get("exception_handling_enabled", False)
-            )
-            log.debug('exception_handling_enabled "%s"', exception_handling_enabled)
-
             # Prepare context_settings with summarization callbacks
             context_settings = kwargs.get("context_settings", {})
             context_settings['callbacks'] = create_summarization_callbacks(node_interface)
@@ -369,7 +362,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 conversation_id=conversation_id,
                 ignored_mcp_servers=kwargs.get("ignored_mcp_servers", None),
                 user_declined_mcp_servers=user_declined,
-                exception_handling_enabled=exception_handling_enabled,
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
                 openai_compatible=client_args.get('openai_compatible', False),
