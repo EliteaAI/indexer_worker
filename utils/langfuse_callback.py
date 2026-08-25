@@ -371,9 +371,6 @@ def flush_langfuse_callback(langfuse_client, handler):
         langfuse_client: The Langfuse client instance to flush
         handler: The CallbackHandler instance (for future use)
     """
-    if langfuse_client is None:
-        return
-
     # Resolve the tracing plugin module (`.module` deref, see _get_audit_callback).
     try:
         from tools import this
@@ -383,6 +380,16 @@ def flush_langfuse_callback(langfuse_client, handler):
         log.debug(f"Tracing module unavailable for Langfuse flush: {e}")
 
     try:
+        if langfuse_client is None:
+            flush_processors = getattr(tracing_module, "flush_span_processors", None)
+            if callable(flush_processors):
+                flush_processors(timeout_millis=5_000)
+            else:
+                tracer_provider = getattr(tracing_module, "tracer_provider", None)
+                if tracer_provider is not None:
+                    if not tracer_provider.force_flush(timeout_millis=5_000):
+                        log.warning("Timed out flushing audit spans")
+            return
         if _is_langfuse_on_shared_provider(tracing_module):
             tracing_module.flush_span_processors()
         else:

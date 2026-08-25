@@ -12,6 +12,7 @@ Run from this directory:
 """
 
 import ast
+import contextvars
 import json
 import pathlib
 import threading
@@ -66,14 +67,17 @@ class FakeMessage:
 
 
 class FakeLLM:
-    def __init__(self, response=None, exc=None, hang=False):
+    def __init__(self, response=None, exc=None, hang=False, hang_seconds=5):
         self._response = response
         self._exc = exc
         self._hang = hang
+        self._hang_seconds = hang_seconds
+        self.invoke_configs = []
 
-    def invoke(self, _prompt):
+    def invoke(self, _prompt, config=None):
+        self.invoke_configs.append(config)
         if self._hang:
-            threading.Event().wait(5)
+            threading.Event().wait(self._hang_seconds)
         if self._exc:
             raise self._exc
         return FakeMessage(self._response)
@@ -127,9 +131,14 @@ def test_no_low_tier_model_skips():
 
 def test_timeout_skips():
     node = FakeEventNode()
-    maybe_emit_next_input_suggestion(node, FakeClient(FakeLLM(hang=True)), {**BASE_CFG, "timeout_seconds": 0.05},
-                                      LONG_REPLY, "s1", "m1")
+    flushes = []
+    maybe_emit_next_input_suggestion(
+        node, FakeClient(FakeLLM(hang=True, hang_seconds=0.1)),
+        {**BASE_CFG, "timeout_seconds": 0.05}, LONG_REPLY, "s1", "m1",
+        on_telemetry_complete=lambda: flushes.append(True),
+    )
     assert node.emitted == []
+    assert flushes == [True]
 
 
 def test_model_exception_skips():
@@ -137,6 +146,19 @@ def test_model_exception_skips():
     maybe_emit_next_input_suggestion(node, FakeClient(FakeLLM(exc=RuntimeError("boom"))), BASE_CFG,
                                       LONG_REPLY, "s1", "m1")
     assert node.emitted == []
+
+
+def test_model_exception_completes_telemetry():
+    node = FakeEventNode()
+    completions = []
+
+    maybe_emit_next_input_suggestion(
+        node, FakeClient(FakeLLM(exc=RuntimeError("boom"))), BASE_CFG,
+        LONG_REPLY, "s1", "m1", on_telemetry_complete=lambda: completions.append(True),
+    )
+
+    assert node.emitted == []
+    assert completions == [True]
 
 
 def test_none_marker_skips():
@@ -166,6 +188,43 @@ def test_happy_path_emits():
         "message_id": "msg-1",
         "suggestions": ["Yes, please add a test.", "How long does it take?", "Can I see the fix?"],
     }
+
+
+def test_happy_path_passes_telemetry_callback():
+    node = FakeEventNode()
+    llm = FakeLLM('["Follow up", "Ask for details", "Try another approach"]')
+    telemetry_callback = object()
+
+    maybe_emit_next_input_suggestion(
+        node, FakeClient(llm), BASE_CFG, LONG_REPLY, "stream-1", "msg-1", telemetry_callback,
+    )
+
+    assert llm.invoke_configs == [{"callbacks": [telemetry_callback]}]
+
+
+def test_happy_path_runs_in_copied_context():
+    invocation_scope = contextvars.ContextVar("invocation_scope")
+    observed_scopes = []
+
+    class ContextAwareLLM(FakeLLM):
+        def invoke(self, prompt, config=None):
+            observed_scopes.append(invocation_scope.get())
+            return super().invoke(prompt, config)
+
+    token = invocation_scope.set("owning-application-trace")
+    try:
+        maybe_emit_next_input_suggestion(
+            FakeEventNode(),
+            FakeClient(ContextAwareLLM('["Follow up", "Ask for details", "Try another approach"]')),
+            BASE_CFG,
+            LONG_REPLY,
+            "stream-1",
+            "msg-1",
+        )
+    finally:
+        invocation_scope.reset(token)
+
+    assert observed_scopes == ["owning-application-trace"]
 
 
 def test_invalid_json_skips():
