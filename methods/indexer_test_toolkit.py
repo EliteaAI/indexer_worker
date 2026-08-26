@@ -129,13 +129,24 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
         if isinstance(data, dict):
             cleaned = {}
             for k, v in data.items():
-                # Skip keys that might contain client references or problematic objects
-                if isinstance(k, str) and any(keyword in k.lower() for keyword in [
-                    'client', 'instance', 'callback', 'llm_instance', 'events_dispatched'
-                ]):
-                    # For events_dispatched, try to extract just the event names/types if possible
-                    if k.lower() == 'events_dispatched' and isinstance(v, list):
-                        cleaned[k] = f"<{len(v)} events (cleaned for serialization)>"
+                # events_dispatched is always internal SDK bookkeeping: summarize it instead
+                # of dropping/serializing it verbatim, regardless of its value type.
+                if isinstance(k, str) and k.lower() == 'events_dispatched':
+                    cleaned[k] = f"<{len(v)} events (cleaned for serialization)>" if isinstance(v, list) \
+                        else "<events (cleaned for serialization)>"
+                    continue
+
+                key_is_suspect = isinstance(k, str) and any(keyword in k.lower() for keyword in [
+                    'client', 'instance', 'callback', 'llm_instance'
+                ])
+                # Only drop the entry based on its *key name* when the value itself is not
+                # already a plain, JSON-safe type (str/int/float/bool/None/dict/list). Real
+                # tool results frequently contain legitimately serializable fields whose
+                # names happen to contain these substrings (e.g. "client_id", "instances",
+                # "clientMutationId"); blanket-dropping those by key name alone was silently
+                # emptying otherwise-successful results, which then fell back to the
+                # misleading "Tool executed successfully" placeholder (EL-6421).
+                if key_is_suspect and not isinstance(v, (str, int, float, bool, type(None), dict, list)):
                     continue
 
                 # Recursively clean both key and value
