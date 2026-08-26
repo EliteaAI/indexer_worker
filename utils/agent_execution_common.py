@@ -53,7 +53,7 @@ from .image_helpers import (
     strip_stale_filepath_image_chunks,
 )
 from .node_interface import NodeEventInterface, NoOpNodeEventInterface, EventTypes, NodeEvent, InitiatorType
-from .langfuse_callback import create_langfuse_callback, flush_langfuse_callback, langfuse_trace_context
+from .langfuse_callback import _get_audit_callback, create_langfuse_callback, flush_langfuse_callback, langfuse_trace_context
 from .parallel_dispatch_contract import (
     durable_dispatch_allowed,
     is_fanout_child,
@@ -577,6 +577,16 @@ def create_langfuse_callback_with_metadata(
     )
 
 
+def create_suggestion_audit_callback(task_meta: Dict[str, Any]):
+    """Create metadata-only LLM telemetry for next-input suggestions."""
+    user_context = task_meta.get("user_context", {}) if isinstance(task_meta, dict) else {}
+    return _get_audit_callback(
+        user_id=user_context.get("user_id"),
+        user_email=user_context.get("user_email"),
+        project_id=task_meta.get("project_id") if isinstance(task_meta, dict) else None,
+    )
+
+
 # =============================================================================
 # Checkpoint Resume
 # =============================================================================
@@ -1010,6 +1020,8 @@ def maybe_emit_next_input_suggestion(
     output_text: str,
     stream_id: Optional[str],
     message_id: Optional[str],
+    telemetry_callback=None,
+    on_telemetry_complete=None,
 ) -> None:
     """Best-effort: generate and emit a suggested next user input.
 
@@ -1034,18 +1046,30 @@ def maybe_emit_next_input_suggestion(
 
         prompt = _NEXT_INPUT_SUGGESTION_PROMPT.format(reply=output_text)
         result_container = []
+        from contextvars import copy_context
+        invocation_context = copy_context()
 
         def _run():
             try:
-                result_container.append(llm.invoke(prompt))
+                def _invoke():
+                    invoke_config = {"callbacks": [telemetry_callback]} if telemetry_callback else None
+                    return llm.invoke(prompt, config=invoke_config) if invoke_config else llm.invoke(prompt)
+
+                result_container.append(invocation_context.run(_invoke))
             except Exception as exc:  # pylint: disable=W0703
                 log.warning(f"next_input_suggestion generation failed: {exc}")
+            finally:
+                if on_telemetry_complete:
+                    on_telemetry_complete()
 
-        thread = threading.Thread(target=_run, daemon=True)
+        thread = threading.Thread(target=_run)
         thread.start()
         thread.join(timeout=cfg.get("timeout_seconds", 15))
         if thread.is_alive():
             log.debug("next_input_suggestion: skipped (generation timed out)")
+            # The suggestion is no longer eligible for UI delivery, but this
+            # forked task must outlive the dispatched call so its audit span closes.
+            thread.join()
             return
         if not result_container:
             log.debug("next_input_suggestion: skipped (generation failed, see warning above)")

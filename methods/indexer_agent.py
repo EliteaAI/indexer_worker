@@ -53,6 +53,7 @@ from ..utils.agent_execution_common import (
     ensure_thread_id,
     create_callbacks,
     create_langfuse_callback_with_metadata,
+    create_suggestion_audit_callback,
     configure_checkpoint_resume,
     emit_response_events,
     with_tracing_span,
@@ -612,6 +613,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # message. Runs strictly after emit_response_events above so its
             # bounded latency never delays the primary response.
             if not tasknode_task.meta.get("non_interactive"):
+                on_suggestion_telemetry_complete = (
+                    (lambda: flush_langfuse_callback(langfuse_client, None))
+                    if langfuse_client
+                    else None
+                )
                 maybe_emit_next_input_suggestion(
                     local_event_node,
                     client,
@@ -619,6 +625,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     output['content'],
                     stream_id,
                     message_id,
+                    telemetry_callback=create_suggestion_audit_callback(tasknode_task.meta),
+                    on_telemetry_complete=on_suggestion_telemetry_complete,
                 )
 
             # Capture a HITL pause so the final task result carries it: the
