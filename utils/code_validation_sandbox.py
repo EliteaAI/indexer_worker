@@ -30,13 +30,22 @@ The heavy SDK/Deno imports are done **lazily inside the default factory** so thi
 importable — and the mapping / degradation / limit logic is unit-testable — with a stub
 ``sandbox_factory`` and ``deno_probe``, without the SDK or a Deno binary present.
 """
+import logging
+import os
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 # Mirrors utils/code_validation.py on the pylon_main side; kept as bare strings here
 # because pylon_indexer must not import elitea_core.
 STATUS_SUCCESS = 'success'
 STATUS_ERROR = 'error'
 STATUS_UNAVAILABLE = 'unavailable'
+
+#: Safe fallback when a caller passes a ``limits`` dict that omits the key entirely
+#: (only ever happens in tests — ``_read_sandbox_limits_from_env`` always sets it) so a
+#: partial dict degrades safe instead of silently disabling the gate.
+_DEFAULT_MAX_CONCURRENT = 16
 
 
 def _default_deno_probe() -> bool:
@@ -52,6 +61,11 @@ def _default_limits() -> dict:
 def _default_deno_process_count() -> int:
     from elitea_sdk.runtime.tools.sandbox import _count_deno_processes  # pylint: disable=C0415,E0401
     return _count_deno_processes()
+
+
+def _default_memory_pressure_pct() -> Optional[float]:
+    from elitea_sdk.runtime.tools.sandbox import _cgroup_memory_pressure_pct  # pylint: disable=C0415,E0401
+    return _cgroup_memory_pressure_pct()
 
 
 def _default_sandbox_factory():
@@ -74,25 +88,22 @@ def _default_sandbox_factory():
     reach the network or the client — the release-blocking half of EVAL-E2E-14 (14a/14b) is
     preserved by ``allow_net=False`` + the absent client, independent of these boot grants.
     """
-    import os  # pylint: disable=C0415
     from elitea_sdk.runtime.langchain.pyodide_sandbox import SyncPyodideSandbox  # pylint: disable=C0415,E0401
 
-    sandbox_base = os.environ.get('SANDBOX_BASE')
-    sandbox_tmp = os.path.join(sandbox_base, 'tmp') if sandbox_base else None
-    # DENO_DIR if set, else this deployment's warm cache under SANDBOX_BASE, else the
-    # SDK's own default. Whichever resolves is the dir the offline module cache lives in.
-    deno_cache = os.environ.get('DENO_DIR')
-    if not deno_cache and sandbox_base:
-        deno_cache = os.path.join(sandbox_base, '.deno_dir')
-
-    read_paths = [p for p in (sandbox_base, sandbox_tmp, deno_cache) if p]
-    write_paths = [p for p in (sandbox_tmp, deno_cache) if p]
+    # Mirror the SDK's own defaults (sandbox.py) rather than collapsing to no-access when
+    # unset: an unset SANDBOX_BASE/DENO_DIR does not mean "no cache dir exists", it means
+    # "use the same default the SDK's air-gapped tool path boots from". Collapsing to
+    # allow_read=False here made every validation fail with an opaque Deno permission
+    # error in any deployment that never set these vars (this repo's centry/ included).
+    sandbox_base = os.environ.get('SANDBOX_BASE') or os.path.expanduser('~/.cache/pyodide')
+    sandbox_tmp = os.path.join(sandbox_base, 'tmp')
+    deno_cache = os.environ.get('DENO_DIR') or os.path.expanduser('~/.cache/deno')
 
     return SyncPyodideSandbox(
         stateful=False,
         allow_env=['SANDBOX_BASE'],     # scoped: only the cache-locator var main.js reads
-        allow_read=read_paths or False,
-        allow_write=write_paths or False,  # scoped: only the Pyodide scratch/cache dirs
+        allow_read=[sandbox_base, sandbox_tmp, deno_cache],
+        allow_write=[sandbox_tmp, deno_cache],  # scoped: only the Pyodide scratch/cache dirs
         allow_net=False,   # EVAL-E2E-14 (14a): network-denied
         allow_run=False,
         allow_ffi=False,
@@ -106,6 +117,7 @@ def run_code_in_sandbox(
     deno_probe: Optional[Callable[[], bool]] = None,
     limits: Optional[dict] = None,
     deno_process_count: Optional[Callable[[], int]] = None,
+    memory_pressure_pct: Optional[Callable[[], Optional[float]]] = None,
 ) -> dict:
     """Execute ``code`` (prelude + untrusted script) in the locked-down sandbox.
 
@@ -115,16 +127,68 @@ def run_code_in_sandbox(
     a sandbox timeout/OOM/exception is reported as ``status='error'`` so the caller can turn
     it into a per-case error verdict and keep running sibling cases.
 
-    ``sandbox_factory`` / ``deno_probe`` / ``limits`` / ``deno_process_count`` are injectable
-    for unit testing; the defaults pull the real SDK sandbox + env-derived limits (never
-    "unlimited").
+    ``sandbox_factory`` / ``deno_probe`` / ``limits`` / ``deno_process_count`` /
+    ``memory_pressure_pct`` are injectable for unit testing; the defaults pull the real SDK
+    sandbox + env-derived limits (never "unlimited").
 
-    Admission gate: mirrors the check the SDK's own ``PyodideSandboxTool`` path makes right
-    before spawning (sandbox.py ``max_concurrent`` / ``_count_deno_processes``) — this task
-    runs on the shared ``task_node_light`` pool alongside ``invoke_model``/ASR, which is
-    unbounded by default (``task_limit_light: null``), so nothing else stops an eval run from
-    spawning unbounded ``deno`` subprocesses without this check.
+    Admission gate: mirrors the *two* checks the SDK's own ``PyodideSandboxTool`` path makes
+    right before spawning (sandbox.py ``max_concurrent``/``_count_deno_processes`` and
+    ``memory_pressure_pct``/``_cgroup_memory_pressure_pct``) — this task runs on the shared
+    ``task_node_light`` pool alongside ``invoke_model``/ASR, which is unbounded by default
+    (``task_limit_light: null``), so nothing else stops an eval run from spawning unbounded
+    ``deno`` subprocesses without these checks. Runs *before* the Deno-availability probe:
+    a rejected call should not also pay a ``deno --version`` subprocess spawn on the pool the
+    gate exists to protect. Both checks are OS/cgroup-global (shared with any other Deno
+    consumer on the container, e.g. pipeline Code nodes) and fail OPEN on probe error, same
+    posture as the SDK — this is a burst-protection soft reject, not a hard resource lock, so
+    a rejected validation is dropped from the run's aggregate rather than retried (no retry
+    path exists yet in the caller).
     """
+    resolved_limits = limits if limits is not None else _default_limits()
+
+    max_concurrent = resolved_limits.get('max_concurrent', _DEFAULT_MAX_CONCURRENT)
+    if max_concurrent and max_concurrent > 0:
+        count_deno = deno_process_count or _default_deno_process_count
+        try:
+            n_deno = count_deno()
+        except Exception:  # pylint: disable=W0718
+            logger.debug('Sandbox concurrency probe failed; failing open', exc_info=True)
+            n_deno = 0  # fail-open on the probe itself, matching the SDK's own posture
+        if n_deno >= max_concurrent:
+            # Rejections are logged at warning (not just probe failures) so the coverage
+            # loss this causes in an eval run's aggregate score is observable rather than
+            # silent — this pool is shared with invoke_model/ASR traffic (see module docstring).
+            logger.warning(
+                'Sandbox validation rejected: %d concurrent Deno processes at limit %d',
+                n_deno, max_concurrent,
+            )
+            return {
+                'result': None, 'stdout': None,
+                'stderr': f'Sandbox busy: {n_deno} concurrent executions at limit '
+                          f'{max_concurrent}. Retry shortly.',
+                'status': STATUS_ERROR, 'execution_time': None,
+            }
+
+    pressure_pct = resolved_limits.get('memory_pressure_pct')
+    if pressure_pct and pressure_pct > 0:
+        probe_pressure = memory_pressure_pct or _default_memory_pressure_pct
+        try:
+            current_pressure = probe_pressure()
+        except Exception:  # pylint: disable=W0718
+            logger.debug('Sandbox memory-pressure probe failed; failing open', exc_info=True)
+            current_pressure = None
+        if current_pressure is not None and current_pressure >= pressure_pct:
+            logger.warning(
+                'Sandbox validation rejected: host memory pressure %.1f%% exceeds threshold %s%%',
+                current_pressure, pressure_pct,
+            )
+            return {
+                'result': None, 'stdout': None,
+                'stderr': f'Host memory pressure {current_pressure:.1f}% exceeds threshold '
+                          f'{pressure_pct}%. Retry shortly.',
+                'status': STATUS_ERROR, 'execution_time': None,
+            }
+
     probe = deno_probe or _default_deno_probe
     if not probe():
         return {
@@ -133,22 +197,7 @@ def run_code_in_sandbox(
             'status': STATUS_UNAVAILABLE, 'execution_time': None,
         }
 
-    resolved_limits = limits if limits is not None else _default_limits()
     factory = sandbox_factory or _default_sandbox_factory
-
-    max_concurrent = resolved_limits.get('max_concurrent')
-    if max_concurrent:
-        count_deno = deno_process_count or _default_deno_process_count
-        try:
-            n_deno = count_deno()
-        except Exception:  # pylint: disable=W0718
-            n_deno = 0  # fail-open on the probe itself, matching the SDK's own posture
-        if n_deno >= max_concurrent:
-            return {
-                'result': None, 'stdout': None,
-                'stderr': f'Sandbox busy: at concurrency limit {max_concurrent}. Retry shortly.',
-                'status': STATUS_ERROR, 'execution_time': None,
-            }
 
     try:
         sandbox = factory()

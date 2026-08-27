@@ -181,7 +181,7 @@ def test_at_concurrency_limit_is_rejected_without_running():
         limits=limits,
     )
     assert out['status'] == sandbox.STATUS_ERROR
-    assert 'concurrency limit' in out['stderr']
+    assert 'at limit' in out['stderr']
     assert out['result'] is None
 
 
@@ -236,6 +236,90 @@ def test_process_count_probe_failure_fails_open():
 
 
 # ---------------------------------------------------------------------------
+# Admission gate — memory-pressure half of the SDK's own check (concurrency count
+# alone doesn't see e.g. a handful of unusually memory-hungry validations).
+# ---------------------------------------------------------------------------
+
+def test_at_memory_pressure_threshold_is_rejected_without_running():
+    limits = dict(_LIMITS, memory_pressure_pct=85)
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=_must_not_be_called,
+        memory_pressure_pct=lambda: 90.0,
+        limits=limits,
+    )
+    assert out['status'] == sandbox.STATUS_ERROR
+    assert 'memory pressure' in out['stderr']
+    assert out['result'] is None
+
+
+def test_below_memory_pressure_threshold_runs_normally():
+    limits = dict(_LIMITS, memory_pressure_pct=85)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        memory_pressure_pct=lambda: 50.0,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
+    assert len(fake.execute_calls) == 1
+
+
+def test_memory_pressure_gate_disabled_when_threshold_is_zero():
+    limits = dict(_LIMITS, memory_pressure_pct=0)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        memory_pressure_pct=_must_not_be_called,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
+
+
+def test_memory_pressure_probe_failure_fails_open():
+    limits = dict(_LIMITS, memory_pressure_pct=85)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+
+    def boom():
+        raise OSError('cannot read cgroup memory pressure')
+
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        memory_pressure_pct=boom,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
+
+
+def test_memory_pressure_probe_returning_none_fails_open():
+    limits = dict(_LIMITS, memory_pressure_pct=85)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        memory_pressure_pct=lambda: None,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
+
+
+# ---------------------------------------------------------------------------
 # Security posture the default factory must construct (EVAL-E2E-14)
 # ---------------------------------------------------------------------------
 
@@ -282,7 +366,11 @@ def test_default_factory_is_deny_by_default_no_client(monkeypatch):
     assert not any('client' in k for k in captured)
 
 
-def test_default_factory_read_paths_false_when_env_unset(monkeypatch):
+def test_default_factory_uses_sdk_default_dirs_when_env_unset(monkeypatch):
+    """When SANDBOX_BASE/DENO_DIR are unset, mirror the SDK's own air-gapped tool-path
+    defaults (~/.cache/pyodide, ~/.cache/deno) rather than collapsing to allow_read=False —
+    the latter made every validation fail with an opaque Deno permission error in any
+    deployment that never set these vars (this repo's centry/ included)."""
     captured = {}
 
     class _StubSyncPyodideSandbox:
@@ -291,6 +379,7 @@ def test_default_factory_read_paths_false_when_env_unset(monkeypatch):
 
     import sys
     import types
+    import os
 
     for name in ('elitea_sdk', 'elitea_sdk.runtime',
                  'elitea_sdk.runtime.langchain',
@@ -302,8 +391,11 @@ def test_default_factory_read_paths_false_when_env_unset(monkeypatch):
     monkeypatch.delenv('DENO_DIR', raising=False)
 
     sandbox._default_sandbox_factory()
-    # No env dirs -> read/write collapse to False (not an empty list granting nothing weird)
-    assert captured['allow_read'] is False
-    assert captured['allow_write'] is False
+
+    default_base = os.path.expanduser('~/.cache/pyodide')
+    default_tmp = os.path.join(default_base, 'tmp')
+    default_deno = os.path.expanduser('~/.cache/deno')
+    assert captured['allow_read'] == [default_base, default_tmp, default_deno]
+    assert captured['allow_write'] == [default_tmp, default_deno]
     # allow_env stays scoped to the single var regardless (harmless if the var is unset)
     assert captured['allow_env'] == ['SANDBOX_BASE']
