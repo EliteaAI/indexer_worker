@@ -75,7 +75,7 @@ def test_deno_absent_is_unavailable():
     out = sandbox.run_code_in_sandbox(
         'result = True',
         deno_probe=lambda: False,
-        sandbox_factory=lambda: pytest_should_not_be_called(),
+        sandbox_factory=_must_not_be_called,
         limits=_LIMITS,
     )
     assert out['status'] == sandbox.STATUS_UNAVAILABLE
@@ -83,7 +83,7 @@ def test_deno_absent_is_unavailable():
     assert 'not available' in out['stderr']
 
 
-def pytest_should_not_be_called():  # pragma: no cover - guard
+def _must_not_be_called():  # pragma: no cover - guard
     raise AssertionError('sandbox_factory must not run when Deno is unavailable')
 
 
@@ -163,6 +163,76 @@ def test_missing_result_attr_defaults_to_none():
     assert out['result'] is None
     assert out['stdout'] is None
     assert out['execution_time'] is None
+
+
+# ---------------------------------------------------------------------------
+# Admission gate — task_node_light has no task_limit by default, so this is the
+# only thing stopping an eval run from spawning unbounded deno subprocesses on
+# the pool that also serves invoke_model/ASR (see sandbox.py's own tool-path check).
+# ---------------------------------------------------------------------------
+
+def test_at_concurrency_limit_is_rejected_without_running():
+    limits = dict(_LIMITS, max_concurrent=4)
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=_must_not_be_called,
+        deno_process_count=lambda: 4,
+        limits=limits,
+    )
+    assert out['status'] == sandbox.STATUS_ERROR
+    assert 'concurrency limit' in out['stderr']
+    assert out['result'] is None
+
+
+def test_below_concurrency_limit_runs_normally():
+    limits = dict(_LIMITS, max_concurrent=4)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        deno_process_count=lambda: 3,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
+    assert len(fake.execute_calls) == 1
+
+
+def test_concurrency_gate_disabled_when_max_concurrent_is_zero():
+    limits = dict(_LIMITS, max_concurrent=0)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        deno_process_count=_must_not_be_called,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
+
+
+def test_process_count_probe_failure_fails_open():
+    limits = dict(_LIMITS, max_concurrent=4)
+    fake = _FakeSandbox(_FakeExecResult(
+        result=True, stdout=None, stderr=None, status='success', execution_time=0.1,
+    ))
+
+    def boom():
+        raise OSError('cannot list processes')
+
+    out = sandbox.run_code_in_sandbox(
+        'result = True',
+        deno_probe=lambda: True,
+        sandbox_factory=lambda: fake,
+        deno_process_count=boom,
+        limits=limits,
+    )
+    assert out['status'] == 'success'
 
 
 # ---------------------------------------------------------------------------

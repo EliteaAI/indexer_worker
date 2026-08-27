@@ -20,6 +20,11 @@ Security contract (the release-blocking half of EVAL-E2E-14):
     so the run survives and sibling cases still complete.
   * If Deno is absent we return ``status='unavailable'`` — we NEVER fall back to an
     unsandboxed ``exec`` (§19.7).
+  * Admission gate: this task runs on the shared ``task_node_light`` pool alongside
+    ``invoke_model``/ASR, which has no ``task_limit`` by default — so before spawning we
+    check ``max_concurrent`` against the live Deno process count (mirroring the check the
+    SDK's own ``PyodideSandboxTool`` path makes) and degrade to ``status='error'`` rather
+    than let an eval run spawn unbounded ``deno`` subprocesses on that pool.
 
 The heavy SDK/Deno imports are done **lazily inside the default factory** so this module is
 importable — and the mapping / degradation / limit logic is unit-testable — with a stub
@@ -42,6 +47,11 @@ def _default_deno_probe() -> bool:
 def _default_limits() -> dict:
     from elitea_sdk.runtime.tools.sandbox import _read_sandbox_limits_from_env  # pylint: disable=C0415,E0401
     return _read_sandbox_limits_from_env()
+
+
+def _default_deno_process_count() -> int:
+    from elitea_sdk.runtime.tools.sandbox import _count_deno_processes  # pylint: disable=C0415,E0401
+    return _count_deno_processes()
 
 
 def _default_sandbox_factory():
@@ -95,6 +105,7 @@ def run_code_in_sandbox(
     sandbox_factory: Optional[Callable[[], Any]] = None,
     deno_probe: Optional[Callable[[], bool]] = None,
     limits: Optional[dict] = None,
+    deno_process_count: Optional[Callable[[], int]] = None,
 ) -> dict:
     """Execute ``code`` (prelude + untrusted script) in the locked-down sandbox.
 
@@ -104,8 +115,15 @@ def run_code_in_sandbox(
     a sandbox timeout/OOM/exception is reported as ``status='error'`` so the caller can turn
     it into a per-case error verdict and keep running sibling cases.
 
-    ``sandbox_factory`` / ``deno_probe`` / ``limits`` are injectable for unit testing; the
-    defaults pull the real SDK sandbox + env-derived limits (never "unlimited").
+    ``sandbox_factory`` / ``deno_probe`` / ``limits`` / ``deno_process_count`` are injectable
+    for unit testing; the defaults pull the real SDK sandbox + env-derived limits (never
+    "unlimited").
+
+    Admission gate: mirrors the check the SDK's own ``PyodideSandboxTool`` path makes right
+    before spawning (sandbox.py ``max_concurrent`` / ``_count_deno_processes``) — this task
+    runs on the shared ``task_node_light`` pool alongside ``invoke_model``/ASR, which is
+    unbounded by default (``task_limit_light: null``), so nothing else stops an eval run from
+    spawning unbounded ``deno`` subprocesses without this check.
     """
     probe = deno_probe or _default_deno_probe
     if not probe():
@@ -117,6 +135,20 @@ def run_code_in_sandbox(
 
     resolved_limits = limits if limits is not None else _default_limits()
     factory = sandbox_factory or _default_sandbox_factory
+
+    max_concurrent = resolved_limits.get('max_concurrent')
+    if max_concurrent:
+        count_deno = deno_process_count or _default_deno_process_count
+        try:
+            n_deno = count_deno()
+        except Exception:  # pylint: disable=W0718
+            n_deno = 0  # fail-open on the probe itself, matching the SDK's own posture
+        if n_deno >= max_concurrent:
+            return {
+                'result': None, 'stdout': None,
+                'stderr': f'Sandbox busy: at concurrency limit {max_concurrent}. Retry shortly.',
+                'status': STATUS_ERROR, 'execution_time': None,
+            }
 
     try:
         sandbox = factory()
