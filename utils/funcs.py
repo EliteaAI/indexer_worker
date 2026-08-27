@@ -234,12 +234,13 @@ def should_emit_output_limit_confirmation(
     finish_reason: Optional[str],
     hierarchy_metadata: Optional[Dict[str, Any]],
 ) -> bool:
-    """Only a top-level truncated response may request root-level Continue."""
+    """Only a standalone top-level response may request root-level Continue."""
     if finish_reason != 'length':
         return False
     metadata = hierarchy_metadata or {}
     return not bool(
-        metadata.get('parent_agent_path')
+        metadata.get('langgraph_node')
+        or metadata.get('parent_agent_path')
         or metadata.get('parent_agent_name')
         or metadata.get('child_thread_id')
     )

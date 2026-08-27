@@ -74,6 +74,7 @@ EVENTNODE_FULL_RESPONSE_NAME = "application_full_response"
 EVENTNODE_PARTIAL_RESPONSE_NAME = "application_partial_response"
 
 HIERARCHY_METADATA_KEYS = (
+    "langgraph_node",
     "parent_agent_name",
     "parent_agent_call_id",
     "parent_agent_path",
