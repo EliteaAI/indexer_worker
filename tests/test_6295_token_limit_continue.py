@@ -125,3 +125,10 @@ def test_nested_length_completion_does_not_emit_root_continue():
         {'parent_agent_path': [{'name': 'General Purpose', 'call_id': 'call-1'}]},
     )
     assert should_emit_output_limit_confirmation('length', {})
+
+
+def test_direct_pipeline_llm_node_does_not_emit_root_continue():
+    assert not should_emit_output_limit_confirmation(
+        'length',
+        {'langgraph_node': 'LLM1'},
+    )
