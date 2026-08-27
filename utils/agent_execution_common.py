@@ -882,6 +882,9 @@ def emit_response_events(
                 # Mirrors the mcp_authorization_required pause payload.
                 'chat_project_id': task_meta.get('chat_project_id'),
                 'message': hitl_interrupt.get('message', 'Awaiting human review...'),
+                'interaction_type': hitl_interrupt.get('interaction_type'),
+                'history_contract_version': hitl_interrupt.get('history_contract_version'),
+                'interrupt_id': hitl_interrupt.get('interrupt_id'),
                 'hitl_interrupt': hitl_interrupt,
                 'hitl_interrupts': hitl_interrupts,
                 # A nested SDK Application may carry its own child_thread_id,

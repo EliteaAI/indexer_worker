@@ -503,6 +503,7 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     },
     EventTypes.agent_hitl_interrupt.value: {
         'node_name', 'message', 'available_actions', 'routes', 'edit_state_key',
+        'interaction_type', 'history_contract_version',
         'interrupt_id', 'guardrail_type', 'tool_name', 'toolkit_name',
         'toolkit_type', 'tool_call_id', 'thread_id', 'root_thread_id',
         'child_thread_id', 'checkpoint_ns', 'parent_agent_name',
