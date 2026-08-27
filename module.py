@@ -368,6 +368,9 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             worker_core.task_node_light.register_task(
                 self.indexer_asr_realtime, "indexer_asr_realtime"
             )
+            worker_core.task_node_light.register_task(
+                self.indexer_code_validation, "indexer_code_validation"
+            )
             self.agent_task_node.register_task(
                 self.indexer_test_toolkit_tool, "indexer_test_toolkit_tool"
             )
@@ -513,6 +516,9 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             )
             worker_core.task_node_light.unregister_task(
                 self.indexer_asr_realtime, "indexer_asr_realtime"
+            )
+            worker_core.task_node_light.unregister_task(
+                self.indexer_code_validation, "indexer_code_validation"
             )
             self.agent_task_node.unregister_task(
                 self.indexer_test_toolkit_tool, "indexer_test_toolkit_tool"
