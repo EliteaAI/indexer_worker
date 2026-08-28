@@ -120,12 +120,37 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         _scopes = settings.get("scopes")
         if _scopes:
             _provided["scopes"] = _scopes
+
+        # Detect static Authorization header (PAT / API key) in toolkit headers.
+        # This lets _mcp_auth_control reuse the PAT for discover_mcp_tools instead of
+        # falling through to the OAuth modal when no mcp_tokens entry exists.
+        _headers = settings.get("headers") or {}
+        _pat_headers: Optional[Dict[str, str]] = None
+        if isinstance(_headers, dict):
+            _auth_key = next((k for k in _headers if k.lower() == "authorization"), None)
+            if _auth_key:
+                _provided["has_pat"] = True
+                _pat_headers = {_auth_key: _headers[_auth_key]}
+
         _provided_settings = _provided if _provided else None
+
+        def _register_with_pat(
+            alias: Optional[str],
+            url: Optional[str],
+            tk_type: Optional[str],
+            tk_name: Optional[str],
+            ps: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            _register(alias, url, tk_type, tk_name, ps)
+            if _pat_headers and alias and url and _is_http_url(url):
+                key = alias.strip().lower()
+                if key in alias_meta_map:
+                    alias_meta_map[key]["_auth_headers"] = _pat_headers
 
         direct_url = _extract_mcp_server_url(settings)
         if _is_http_url(direct_url):
             for alias in aliases:
-                _register(alias, direct_url, toolkit_type, toolkit_name, _provided_settings)
+                _register_with_pat(alias, direct_url, toolkit_type, toolkit_name, _provided_settings)
             continue
 
         for alias in list(aliases):
@@ -133,7 +158,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
                 continue
             server_cfg = get_mcp_server_settings(alias) or {}
             cfg_url = _extract_mcp_server_url(server_cfg)
-            _register(alias, cfg_url, toolkit_type, toolkit_name, _provided_settings)
+            _register_with_pat(alias, cfg_url, toolkit_type, toolkit_name, _provided_settings)
 
     return alias_map, alias_meta_map
 
@@ -326,6 +351,14 @@ def _make_mcp_auth_tools(
                         if _access_token:
                             _auth_headers['Authorization'] = f'Bearer {_access_token}'
                         break
+
+            # Fall back to pre-configured static headers (PAT / API key) when no OAuth
+            # token is present. This ensures discover_mcp_tools uses the PAT instead of
+            # running unauthenticated and triggering the OAuth modal unnecessarily.
+            if not _auth_headers:
+                _pat = meta.get("_auth_headers")
+                if _pat:
+                    _auth_headers = dict(_pat)
 
             try:
                 discover_mcp_tools(
