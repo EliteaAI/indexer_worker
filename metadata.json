@@ -1,6 +1,6 @@
 {
   "name": "Datasources indexer: worker",
-  "version": "0.875",
+  "version": "0.876",
   "depends_on": [
     "worker_core"
   ],
