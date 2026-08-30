@@ -5,6 +5,7 @@ import threading
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 from elitea_sdk.runtime import _parallel_hitl_registry as _registry
+from .funcs import expand_mcp_token_aliases
 from .node_interface import EventTypes
 
 
@@ -80,6 +81,15 @@ def _route(event, payload, *args):
     decision = payload.get("decision")
     if not thread_id or not isinstance(decision, dict):
         return
+    decision = dict(decision)
+    if decision.get('_mcp_tokens') is not None:
+        # Ordinary checkpoint resumes rebuild the root agent after
+        # ``indexer_agent`` expands token aliases. A live supervised child skips
+        # that reconstruction, so normalize the transport-only token snapshot
+        # here before handing it to the SDK's in-process mailbox.
+        decision['_mcp_tokens'] = expand_mcp_token_aliases(
+            decision['_mcp_tokens'],
+        )
     if event_type == OFFER:
         accepted = _registry.offer(thread_id, decision)
         _emit_ack(thread_id, decision, "offered", accepted)
