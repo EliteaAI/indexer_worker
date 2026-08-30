@@ -33,6 +33,16 @@ def test_router_uses_two_phase_exact_decision_transport():
     assert 'interrupt_id' in source
 
 
+def test_router_expands_live_oauth_tokens_before_sdk_mailbox_delivery():
+    source = (ROOT / 'utils/parallel_hitl_router.py').read_text()
+    normalize_index = source.index("decision['_mcp_tokens'] = expand_mcp_token_aliases(")
+    offer_index = source.index('_registry.offer(thread_id, decision)')
+    commit_index = source.index('_registry.commit(thread_id, decision)')
+
+    assert normalize_index < offer_index
+    assert normalize_index < commit_index
+
+
 def test_durable_auth_interrupt_consumes_legacy_callback_cache():
     source = (ROOT / 'methods' / 'agent_common.py').read_text()
     pause_builder = source[
