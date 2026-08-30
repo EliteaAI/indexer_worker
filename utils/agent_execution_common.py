@@ -1452,7 +1452,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'auto_approve_sensitive_actions',
         'return_chat_history',
         'execution_generation',
-        'attached_skills', 'invoked_skills',
+        'attached_skills', 'invoked_skills', 'project_context',
         # A parked parent emits no full_message, so the reconcile re-invoke is what
         # persists the turn. Never fed to the model.
         'applied_skills',
