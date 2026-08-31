@@ -478,7 +478,7 @@ ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
     },
     EventTypes.agent_index_data_status.value: {
         'id', 'index_name', 'state', 'error', 'reindex', 'indexed', 'total', 'report',
-        'updated', 'created_at', 'updated_on', 'toolkit_id'
+        'updated', 'created_at', 'updated_on', 'toolkit_id', 'indexed_chunks'
     },
     EventTypes.mcp_authorization_required.value: {
         'server_url', 'resource_metadata_url', 'www_authenticate', 'resource_metadata',
