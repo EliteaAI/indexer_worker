@@ -46,6 +46,21 @@ def _load_confirmation_classifier():
 should_emit_output_limit_confirmation = _load_confirmation_classifier()
 
 
+def _load_continuation_failure_formatter():
+    source = (pathlib.Path(__file__).resolve().parents[1] / 'utils' / 'funcs.py').read_text()
+    namespace = {'Optional': typing.Optional}
+    function = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == 'format_output_continuation_failure'
+    )
+    exec(compile(ast.Module([function], []), '<continuation-failure>', 'exec'), namespace)
+    return namespace['format_output_continuation_failure']
+
+
+format_output_continuation_failure = _load_continuation_failure_formatter()
+
+
 def _response(*, generations=None, llm_output=None):
     return SimpleNamespace(generations=generations or [], llm_output=llm_output or {})
 
@@ -132,3 +147,26 @@ def test_direct_pipeline_llm_node_does_not_emit_root_continue():
         'length',
         {'langgraph_node': 'LLM1'},
     )
+
+
+def test_single_node_chat_graph_does_not_emit_root_continue():
+    assert not should_emit_output_limit_confirmation(
+        'length',
+        {'langgraph_node': 'agent'},
+    )
+
+
+def test_continuation_exhaustion_preserves_partial_output_in_terminal_message():
+    error_type = type('OutputContinuationExhausted', (Exception,), {})
+    error = error_type('internal detail')
+    error.user_message = 'All 4 automatic continuation attempts were exhausted.'
+    error.partial_output = 'partial model output'
+
+    assert format_output_continuation_failure(error) == (
+        'partial model output\n\n---\n\n'
+        'All 4 automatic continuation attempts were exhausted.'
+    )
+
+
+def test_unrelated_exception_is_not_classified_as_continuation_exhaustion():
+    assert format_output_continuation_failure(RuntimeError('boom')) is None

@@ -246,6 +246,23 @@ def should_emit_output_limit_confirmation(
     )
 
 
+def format_output_continuation_failure(exc: Exception) -> Optional[str]:
+    """Return safe terminal content for an SDK continuation exhaustion.
+
+    Class-name detection is intentional: development hot reload can leave the
+    worker holding a different class object than the freshly reloaded SDK.
+    """
+    if type(exc).__name__ != 'OutputContinuationExhausted':
+        return None
+    message = getattr(exc, 'user_message', None) or (
+        "Automatic continuation failed. The model response is incomplete."
+    )
+    partial_output = str(getattr(exc, 'partial_output', '') or '').rstrip()
+    if not partial_output:
+        return message
+    return f"{partial_output}\n\n---\n\n{message}"
+
+
 def num_tokens_from_messages(messages: List[BaseMessage] | List[str], model="gpt-3.5-turbo-0613", is_chunk=False):
     """Return the number of tokens used by a list of messages.
     
