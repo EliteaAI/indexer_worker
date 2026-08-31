@@ -354,6 +354,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 parallel_hitl_max_concurrency=self.descriptor.config.get(
                     "parallel_hitl_max_concurrency", 8,
                 ),
+                project_context=kwargs.get("project_context"),
             )
 
             # Create callbacks
