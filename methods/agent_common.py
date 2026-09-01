@@ -53,6 +53,7 @@ from ..utils.funcs import (
     _is_mcp_authorization_required_error,
     _is_unresolved_mcp_type,
     _mcp_auth_error_to_metadata,
+    build_parallel_terminal_error,
     budget_exceeded_error_code,
     is_mcp_authorization_required_error,
     extract_finish_reason,
@@ -570,7 +571,15 @@ def execution_error(
         ).model_dump_json()
         msg_event_node = json.loads(msg_event_node)
         node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
-    return {"chat_history": chat_history, "error": error}
+    result = {"chat_history": chat_history, "error": error}
+    if is_fanout_child(tasknode_task_meta):
+        result["parallel_terminal_error"] = build_parallel_terminal_error(
+            error_message=error_message,
+            human_readable=human_readable,
+            budget_error_code=budget_error_code,
+            continuation_error=continuation_error,
+        )
+    return result
 
 
 class ToolCallPayload(BaseModel):

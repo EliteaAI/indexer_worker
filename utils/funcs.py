@@ -268,6 +268,28 @@ def build_output_continuation_error(exc: Exception) -> Optional[Dict[str, Any]]:
     }
 
 
+def build_parallel_terminal_error(
+    error_message: str,
+    human_readable: Optional[str] = None,
+    budget_error_code: Optional[str] = None,
+    continuation_error: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the bounded error result supplied to a parallel parent."""
+    if continuation_error:
+        return {
+            'code': continuation_error.get('code') or 'output_continuation_exhausted',
+            'user_message': continuation_error.get('user_message') or 'Parallel child execution failed.',
+            'attempts': continuation_error.get('attempts'),
+            'failure_reason': continuation_error.get('failure_reason'),
+            'stop_reason': continuation_error.get('stop_reason'),
+            'partial_output_available': bool(continuation_error.get('partial_output')),
+        }
+    return {
+        'code': budget_error_code or 'parallel_child_failed',
+        'user_message': str(human_readable or error_message or 'Parallel child execution failed.')[:1000],
+    }
+
+
 def num_tokens_from_messages(messages: List[BaseMessage] | List[str], model="gpt-3.5-turbo-0613", is_chunk=False):
     """Return the number of tokens used by a list of messages.
     

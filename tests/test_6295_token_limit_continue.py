@@ -65,6 +65,25 @@ def _load_continuation_error_builder():
 build_output_continuation_error = _load_continuation_error_builder()
 
 
+def _load_parallel_terminal_error_builder():
+    source = (pathlib.Path(__file__).resolve().parents[1] / 'utils' / 'funcs.py').read_text()
+    namespace = {
+        'Any': typing.Any,
+        'Dict': typing.Dict,
+        'Optional': typing.Optional,
+    }
+    function = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == 'build_parallel_terminal_error'
+    )
+    exec(compile(ast.Module([function], []), '<parallel-terminal-error>', 'exec'), namespace)
+    return namespace['build_parallel_terminal_error']
+
+
+build_parallel_terminal_error = _load_parallel_terminal_error_builder()
+
+
 def _response(*, generations=None, llm_output=None):
     return SimpleNamespace(generations=generations or [], llm_output=llm_output or {})
 
@@ -176,6 +195,29 @@ def test_continuation_exhaustion_builds_structured_error_contract():
         'attempts': 4,
         'failure_reason': 'attempt_limit',
         'stop_reason': 'length',
+    }
+
+
+def test_parallel_parent_receives_bounded_structured_continuation_error():
+    continuation_error = {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'All 4 automatic continuation attempts were exhausted.',
+        'partial_output': 'large partial output',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+    }
+
+    assert build_parallel_terminal_error(
+        error_message='internal stack',
+        continuation_error=continuation_error,
+    ) == {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'All 4 automatic continuation attempts were exhausted.',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+        'partial_output_available': True,
     }
 
 
