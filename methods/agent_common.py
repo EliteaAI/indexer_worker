@@ -463,6 +463,7 @@ def execution_error(
     human_readable: str = None,
     execution_start_time: Optional[datetime] = None,
     budget_error_code: Optional[str] = None,
+    continuation_error: Optional[dict] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -478,6 +479,7 @@ def execution_error(
         human_readable: Human-readable error message (optional)
         execution_start_time: Execution start timestamp for duration calculation (optional)
         budget_error_code: Budget scope that blocked the call, for the UI to link to usage (optional)
+        continuation_error: Structured output-continuation failure details (optional)
 
     Returns:
         Dict containing chat_history and error information
@@ -523,6 +525,9 @@ def execution_error(
     if budget_error_code:
         exception_meta["budget_error_code"] = budget_error_code
     #
+    if continuation_error:
+        exception_meta["continuation_error"] = continuation_error
+    #
     node_interface.emit(
         type=EventTypes.agent_exception,
         content=error_message,
@@ -546,8 +551,13 @@ def execution_error(
     # additional_response_meta is the supported way onto the persisted message meta;
     # a bare response_metadata key is dropped by elitea_core's whitelist, and the UI
     # needs this after a reload, not just on the live socket update
+    additional_response_meta = {}
     if budget_error_code:
-        response_metadata["additional_response_meta"] = {"budget_error_code": budget_error_code}
+        additional_response_meta["budget_error_code"] = budget_error_code
+    if continuation_error:
+        additional_response_meta["continuation_error"] = continuation_error
+    if additional_response_meta:
+        response_metadata["additional_response_meta"] = additional_response_meta
 
     if not is_fanout_child(tasknode_task_meta):
         msg_event_node = NodeEvent(

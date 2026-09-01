@@ -46,19 +46,23 @@ def _load_confirmation_classifier():
 should_emit_output_limit_confirmation = _load_confirmation_classifier()
 
 
-def _load_continuation_failure_formatter():
+def _load_continuation_error_builder():
     source = (pathlib.Path(__file__).resolve().parents[1] / 'utils' / 'funcs.py').read_text()
-    namespace = {'Optional': typing.Optional}
+    namespace = {
+        'Any': typing.Any,
+        'Dict': typing.Dict,
+        'Optional': typing.Optional,
+    }
     function = next(
         node for node in ast.parse(source).body
         if isinstance(node, ast.FunctionDef)
-        and node.name == 'format_output_continuation_failure'
+        and node.name == 'build_output_continuation_error'
     )
     exec(compile(ast.Module([function], []), '<continuation-failure>', 'exec'), namespace)
-    return namespace['format_output_continuation_failure']
+    return namespace['build_output_continuation_error']
 
 
-format_output_continuation_failure = _load_continuation_failure_formatter()
+build_output_continuation_error = _load_continuation_error_builder()
 
 
 def _response(*, generations=None, llm_output=None):
@@ -156,17 +160,36 @@ def test_single_node_chat_graph_does_not_emit_root_continue():
     )
 
 
-def test_continuation_exhaustion_preserves_partial_output_in_terminal_message():
+def test_continuation_exhaustion_builds_structured_error_contract():
     error_type = type('OutputContinuationExhausted', (Exception,), {})
     error = error_type('internal detail')
     error.user_message = 'All 4 automatic continuation attempts were exhausted.'
     error.partial_output = 'partial model output'
+    error.attempts = 4
+    error.failure_reason = 'attempt_limit'
+    error.stop_reason = 'length'
 
-    assert format_output_continuation_failure(error) == (
-        'partial model output\n\n---\n\n'
-        'All 4 automatic continuation attempts were exhausted.'
-    )
+    assert build_output_continuation_error(error) == {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'All 4 automatic continuation attempts were exhausted.',
+        'partial_output': 'partial model output',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+    }
 
 
 def test_unrelated_exception_is_not_classified_as_continuation_exhaustion():
-    assert format_output_continuation_failure(RuntimeError('boom')) is None
+    assert build_output_continuation_error(RuntimeError('boom')) is None
+
+
+def test_continuation_error_reaches_live_and_persisted_metadata():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'agent_common.py'
+    ).read_text()
+    execution_error = source[
+        source.index('def execution_error('):source.index('class ToolCallPayload')
+    ]
+
+    assert 'exception_meta["continuation_error"] = continuation_error' in execution_error
+    assert 'additional_response_meta["continuation_error"] = continuation_error' in execution_error

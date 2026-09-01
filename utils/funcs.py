@@ -246,8 +246,8 @@ def should_emit_output_limit_confirmation(
     )
 
 
-def format_output_continuation_failure(exc: Exception) -> Optional[str]:
-    """Return safe terminal content for an SDK continuation exhaustion.
+def build_output_continuation_error(exc: Exception) -> Optional[Dict[str, Any]]:
+    """Return the structured UI contract for an SDK continuation exhaustion.
 
     Class-name detection is intentional: development hot reload can leave the
     worker holding a different class object than the freshly reloaded SDK.
@@ -257,10 +257,15 @@ def format_output_continuation_failure(exc: Exception) -> Optional[str]:
     message = getattr(exc, 'user_message', None) or (
         "Automatic continuation failed. The model response is incomplete."
     )
-    partial_output = str(getattr(exc, 'partial_output', '') or '').rstrip()
-    if not partial_output:
-        return message
-    return f"{partial_output}\n\n---\n\n{message}"
+    stop_reason = getattr(exc, 'stop_reason', None)
+    return {
+        'code': 'output_continuation_exhausted',
+        'user_message': str(message),
+        'partial_output': str(getattr(exc, 'partial_output', '') or '').rstrip(),
+        'attempts': getattr(exc, 'attempts', None),
+        'failure_reason': str(getattr(exc, 'failure_reason', 'continuation_failed')),
+        'stop_reason': str(stop_reason) if stop_reason is not None else None,
+    }
 
 
 def num_tokens_from_messages(messages: List[BaseMessage] | List[str], model="gpt-3.5-turbo-0613", is_chunk=False):
