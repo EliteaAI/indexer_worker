@@ -668,9 +668,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             content_type, formatted_content = detect_content_type(final_result)
 
             # For JSON content, serialize it to a JSON string so it can be transmitted via Socket.IO
-            # The frontend will parse it back when content_type === 'json'
+            # The frontend will parse it back when content_type === 'json'.
+            # A falsy-but-valid result (e.g. [] or {}) must still be serialized and shown to the
+            # user, not replaced by the placeholder message - only a genuinely absent result (None)
+            # falls back to it (EL-6421).
             if content_type == 'json':
-                formatted_content = safe_json_dumps(formatted_content) if formatted_content else "Tool executed successfully"
+                formatted_content = safe_json_dumps(formatted_content) if formatted_content is not None else "Tool executed successfully"
             elif not formatted_content:
                 formatted_content = "Tool executed successfully"
 
