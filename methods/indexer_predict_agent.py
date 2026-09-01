@@ -31,6 +31,7 @@ from .agent_common import (
     execution_error,
     budget_exceeded_error_code,
     BUDGET_EXCEEDED_MESSAGES,
+    REASONING_PARAM_UNSUPPORTED_MESSAGE,
     EVENTNODE_EVENT_NAME,
     resolve_pgvector_connstr,
     fetch_langfuse_config,
@@ -557,6 +558,18 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except InternalSDKError as e:
             # A budget block is an expected policy outcome, not an SDK failure
             budget_code = getattr(e, 'budget_error_code', None)
+            # The model's registry config claims reasoning support, but the LLM
+            # gateway (e.g. LiteLLM's provider-specific param translation) rejected
+            # the reasoning/thinking param it forwarded. Flagged by error shape, not
+            # by model name, so this stays useful for whichever model hits the same
+            # gateway gap next - not just the one that surfaced it.
+            reasoning_param_unsupported = getattr(e, 'reasoning_param_unsupported', False)
+            if reasoning_param_unsupported:
+                log.warning(
+                    "REASONING_PARAM_UNSUPPORTED: LLM gateway rejected a reasoning/thinking "
+                    "parameter for model=%s; error=%s",
+                    client_args.get("model"), e,
+                )
             #
             return execution_error(
                 node_interface, user_input, chat_history,
@@ -564,6 +577,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 thread_id, message_id, tasknode_task.meta,
                 human_readable=(
                     BUDGET_EXCEEDED_MESSAGES[budget_code] if budget_code
+                    else REASONING_PARAM_UNSUPPORTED_MESSAGE if reasoning_param_unsupported
                     else f"Internal SDK error occurred while processing your request, {e}"
                 ),
                 execution_start_time=execution_start_time,

@@ -55,6 +55,7 @@ from ..utils.funcs import (
     _mcp_auth_error_to_metadata,
     budget_exceeded_error_code,
     is_mcp_authorization_required_error,
+    is_reasoning_param_unsupported_error,
     extract_finish_reason,
     extract_token_usage,
     num_tokens_from_messages,
@@ -94,6 +95,12 @@ BUDGET_EXCEEDED_MESSAGES = {
         "until the budget resets or a project admin increases your limit."
     ),
 }
+
+REASONING_PARAM_UNSUPPORTED_MESSAGE = (
+    "This model's reasoning/thinking configuration isn't currently supported by "
+    "the LLM gateway. Please disable 'reasoning effort' for this model or contact "
+    "an administrator."
+)
 
 # Secret name for project PostgreSQL connection string
 PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
@@ -1692,6 +1699,7 @@ class EliteACallback(BaseCallbackHandler):
             # Wrapping loses the structured body, so carry the budget scope across it —
             # a budget block needs a friendly message, not a raw provider error
             budget_code = budget_exceeded_error_code(args[0])
+            reasoning_param_unsupported = is_reasoning_param_unsupported_error(args[0])
             #
             try:
                 status_code: int = args[0].status_code
@@ -1703,6 +1711,7 @@ class EliteACallback(BaseCallbackHandler):
                 self.llm_error = InternalSDKError(str(args[0]))
             #
             self.llm_error.budget_error_code = budget_code
+            self.llm_error.reasoning_param_unsupported = reasoning_param_unsupported
         else:
             self.llm_error = InternalSDKError("Unknown LLM error occurred")
         # exception = args[0]

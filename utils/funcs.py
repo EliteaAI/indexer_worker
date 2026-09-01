@@ -665,6 +665,37 @@ def budget_exceeded_error_code(exc: Exception) -> Optional[str]:
     return code if code in BUDGET_ERROR_CODES else BUDGET_ERROR_CODES[0]
 
 
+# Reasoning/thinking param names across provider dialects. A model flagged as
+# reasoning-capable in our own config can still be rejected by the LLM gateway
+# (e.g. LiteLLM's Bedrock Converse translation lagging a given model's real
+# capabilities) — matched by signature, not by model name, so this keeps
+# catching the same failure shape regardless of which model trips it next.
+REASONING_PARAM_NAMES = ("thinking", "reasoning_effort", "reasoningconfig")
+
+
+def is_reasoning_param_unsupported_error(exc: Exception) -> bool:
+    """True if a raw provider error is the gateway rejecting a reasoning/thinking
+    param it was told to send, rather than an unrelated 400.
+
+    Mirrors budget_exceeded_error_code's dual-shape handling (OpenAI strips the
+    "error" wrapper, Anthropic does not) but keys off the rejected "param" name
+    or an "unknown_parameter"-style message instead of a budget code.
+    """
+    body = getattr(exc, "body", None)
+    detail = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else body
+    if not isinstance(detail, dict):
+        detail = {"message": str(exc)}
+    #
+    message = str(detail.get("message") or "").lower()
+    param = str(detail.get("param") or "").lower()
+    code = str(detail.get("code") or "").lower()
+    #
+    if code != "unknown_parameter" and "unknown parameter" not in message:
+        return False
+    #
+    return param in REASONING_PARAM_NAMES or any(name in message for name in REASONING_PARAM_NAMES)
+
+
 def _normalize_authorization_servers(value: Any) -> Optional[list]:
     """Normalize a single URL string or list of URLs for MCP authorization_servers fields."""
     if isinstance(value, str):
