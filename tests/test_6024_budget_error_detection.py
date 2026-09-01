@@ -96,7 +96,10 @@ def test_messages_exist_for_every_code_and_are_period_neutral():
     source = (
         pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'agent_common.py'
     ).read_text()
-    block = source[source.index('BUDGET_EXCEEDED_MESSAGES = {'):source.index('# Secret name for project')]
+    # Bounded to the dict's own closing brace: sibling constants have since been added
+    # below it, and their copy must not be able to fail this budget-specific assertion
+    start = source.index('BUDGET_EXCEEDED_MESSAGES = {')
+    block = source[start:source.index('\n}', start)]
     #
     for code in BUDGET_ERROR_CODES:
         assert code in block
