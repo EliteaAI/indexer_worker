@@ -333,6 +333,8 @@ def create_elitea_client(client_args: Dict[str, Any], api_token: str, api_extra_
         project_id=client_args.get("project_id"),
         auth_token=api_token,
         api_extra_headers=api_extra_headers,
+        auth_session=client_args.get("auth_session"),
+        session_cookie_name=client_args.get("session_cookie_name"),
     )
 
 
