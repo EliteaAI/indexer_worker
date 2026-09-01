@@ -525,6 +525,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         llm_settings = kwargs.get("llm_settings", {})
         project_id = kwargs.get("project_id")
         project_auth_token = kwargs.get("project_auth_token")
+        auth_session = kwargs.get("auth_session")
+        session_cookie_name = kwargs.get("session_cookie_name")
         deployment_url = kwargs.get("deployment_url")
         mcp_tokens = kwargs.get("mcp_tokens")
 
@@ -579,7 +581,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             client = EliteAClient(
                 project_id=project_id,
                 auth_token=project_auth_token,
-                base_url=deployment_url
+                base_url=deployment_url,
+                auth_session=auth_session,
+                session_cookie_name=session_cookie_name
             )
             # Seems like not used
             # Generate persistent tool_run_id for this execution
@@ -895,6 +899,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         toolkit_config = kwargs.get("toolkit_config", {})
         project_id = kwargs.get("project_id")
         project_auth_token = kwargs.get("project_auth_token")
+        auth_session = kwargs.get("auth_session")
+        session_cookie_name = kwargs.get("session_cookie_name")
         deployment_url = kwargs.get("deployment_url")
         mcp_tokens = kwargs.get("mcp_tokens")
 
@@ -941,7 +947,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             client = EliteAClient(
                 project_id=project_id,
                 auth_token=project_auth_token,
-                base_url=deployment_url
+                base_url=deployment_url,
+                auth_session=auth_session,
+                session_cookie_name=session_cookie_name
             )
 
             # Call the test_mcp_connection method (uses protocol-level list_tools)

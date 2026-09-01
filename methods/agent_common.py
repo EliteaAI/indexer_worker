@@ -203,6 +203,8 @@ def temp_elitea_client(
         project_id=client_args.get("project_id"),
         auth_token=api_token,
         api_extra_headers=api_extra_headers or {},
+        auth_session=client_args.get("auth_session"),
+        session_cookie_name=client_args.get("session_cookie_name"),
     )
 
     try:
