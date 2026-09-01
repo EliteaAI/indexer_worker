@@ -37,6 +37,17 @@ def test_execution_error_uses_shared_fanout_predicate():
     assert 'tasknode_task_meta.get("child_thread_id")' not in execution_error
 
 
+def test_fanout_execution_error_returns_bounded_parent_contract():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'agent_common.py'
+    ).read_text()
+    execution_error = source[
+        source.index('def execution_error('):source.index('class ToolCallPayload')
+    ]
+
+    assert 'result["parallel_terminal_error"] = build_parallel_terminal_error(' in execution_error
+
+
 def test_durable_dispatch_only_for_top_level_agent():
     assert durable_dispatch_allowed(True, False, 'react') is True
     assert durable_dispatch_allowed(True, True, 'react') is False

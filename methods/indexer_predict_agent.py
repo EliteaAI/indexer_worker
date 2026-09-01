@@ -67,7 +67,7 @@ from ..utils.agent_execution_common import (
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
-from ..utils.funcs import expand_mcp_token_aliases
+from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils import parallel_hitl_router, predict_router
 
@@ -303,6 +303,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 model_config={
                     "model_project_id": client_args.get("model_project_id"),
                     "max_tokens": client_args.get("max_tokens"),
+                    "max_output_tokens": client_args.get("max_output_tokens"),
                     "reasoning_effort": client_args.get("reasoning_effort"),
                     "temperature": client_args.get("temperature"),
                     "streaming": client_args.get("stream", True),
@@ -621,6 +622,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except Exception as e:
+            continuation_error = build_output_continuation_error(e)
+            if continuation_error:
+                return execution_error(
+                    node_interface, user_input, chat_history,
+                    "OutputContinuationExhausted on user input",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=continuation_error['user_message'],
+                    execution_start_time=execution_start_time,
+                    continuation_error=continuation_error,
+                )
             if is_mcp_authorization_required_error(e):
                 return build_mcp_auth_required_result(
                     node_interface,
