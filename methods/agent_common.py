@@ -560,7 +560,13 @@ def execution_error(
         ).model_dump_json()
         msg_event_node = json.loads(msg_event_node)
         node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
-    return {"chat_history": chat_history, "error": error}
+    # Blocking callers (join_task) never see the events above, so without this key the only
+    # failure detail that survives the process boundary is the raw traceback in "error"
+    return {
+        "chat_history": chat_history,
+        "error": error,
+        "human_readable": human_readable or error_message,
+    }
 
 
 class ToolCallPayload(BaseModel):
