@@ -237,17 +237,42 @@ def is_anthropic_model(model_name: str) -> bool:
     return 'claude' in lower or 'anthropic' in lower
 
 
+_NOTE_MARKER = 'NOTE:'
+
+_NO_ROUTE_NOTE = 'NOTE: This image was not carried into this turn — it is not visible here.'
+_FILEPATH_ROUTE_NOTE = (
+    'NOTE: This image was not carried into this turn — it is not visible here.\n'
+    'Use the filepath above with an appropriate file reading tool if you need it.'
+)
+
+
+def _rewrite_stripped_image_text(text: str) -> str:
+    """Replace a producer-written image note with one that matches post-strip reality.
+
+    The producer (``elitea_core``'s ``ImageToModelProcessor``) writes a note claiming
+    the image is embedded inline and telling the model not to re-read it — true on the
+    turn it was generated, false once that turn becomes history and its ``image_url``
+    chunk is stripped. Drop everything from the first ``NOTE:`` line onward and replace
+    it with wording that matches whichever content the head (``Image file: …`` /
+    ``filepath: …``) still carries.
+    """
+    head, _, _ = text.partition(_NOTE_MARKER)
+    head = head.rstrip('\n')
+    note = _FILEPATH_ROUTE_NOTE if 'filepath:' in head else _NO_ROUTE_NOTE
+    return f"{head}\n\n{note}" if head else note
+
+
 def strip_image_chunks_from_assistant_messages(messages: list) -> list:
     """Remove ``image_url`` chunks from assistant-role messages.
 
-    Some providers (e.g. Anthropic) do not permit ``image`` content blocks
-    inside assistant turns.  Tool-generated images are stored as assistant
-    attachments, so this filter must run before the history reaches those
-    providers.
+    No Chat-Completions-shaped provider contract documents support for image content
+    blocks inside assistant-role messages, and AWS Bedrock Converse rejects them
+    outright — so tool-generated images stored as assistant attachments must have this
+    filter applied before the history reaches any provider.
 
-    Only ``image_url`` chunks are removed — sibling ``text`` chunks
-    (``Image file: …``) are preserved so the LLM still knows about the
-    attachment.
+    Only ``image_url`` chunks are removed. Sibling ``text`` chunks (``Image file: …``)
+    are preserved but rewritten — see ``_rewrite_stripped_image_text`` — so they no
+    longer claim the (now-removed) image is embedded inline.
 
     Operates **in-place** and returns the same list.
     """
@@ -275,6 +300,10 @@ def strip_image_chunks_from_assistant_messages(messages: list) -> list:
         ]
 
         if len(filtered) != len(content):
+            for chunk in filtered:
+                if isinstance(chunk, dict) and chunk.get('type') == 'text' and _NOTE_MARKER in (chunk.get('text') or ''):
+                    chunk['text'] = _rewrite_stripped_image_text(chunk['text'])
+
             if isinstance(message, dict):
                 message['content'] = filtered
             else:

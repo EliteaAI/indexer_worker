@@ -48,7 +48,6 @@ from tools import worker_core
 from .constants import DEFAULT_MEMORY_CONFIG
 from .funcs import prepend_vision_system_message, prepend_attachment_system_message
 from .image_helpers import (
-    is_anthropic_model,
     strip_image_chunks_from_assistant_messages,
     strip_stale_filepath_image_chunks,
 )
@@ -1550,17 +1549,17 @@ def prepare_invoke_input(
     """Prepare unified invoke input using messages format.
 
     Strips stale ``filepath:`` image chunks from *chat_history* before
-    building the messages list.  For Anthropic models, also removes all
-    ``image_url`` chunks from assistant-role messages because Anthropic
-    does not permit image content blocks inside assistant turns.
+    building the messages list, then removes all ``image_url`` chunks from
+    assistant-role messages unconditionally — see
+    ``image_helpers.strip_image_chunks_from_assistant_messages`` for why no
+    provider's replay contract is relied on here.
     """
     # Remove unresolved filepath: image refs from older turns
     strip_stale_filepath_image_chunks(chat_history)
 
-    # Anthropic rejects image blocks in assistant messages — strip them
-    # while preserving sibling text chunks (image file description).
-    if model_name and is_anthropic_model(model_name):
-        strip_image_chunks_from_assistant_messages(chat_history)
+    # No provider documents support for image blocks in assistant-role replay
+    # history; strip them while preserving (rewritten) sibling text chunks.
+    strip_image_chunks_from_assistant_messages(chat_history)
 
     # Strip all image_url chunks when model does not support vision — must run
     # before has_images_in_messages() to avoid prepending a vision system prompt.
