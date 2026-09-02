@@ -14,6 +14,11 @@ llm_chunk_batching:
   max_chars: 64
   max_interval_ms: 80
 
+# Model-name substrings whose reasoning effort must be sent as a nested
+# `reasoning: {effort}` body object instead of top-level `reasoning_effort`.
+# Needed for Bedrock-hosted OpenAI models, which reject both forms LiteLLM emits.
+# reasoning_in_body_for: ["gpt-5.6"]
+
 # Default issue #6264 mode. Keeps one agent process per root fan-out and resumes
 # exact child HITLs over the live decision router. The existing process-per-child
 # parallel_subagent_dispatch mode remains a separate explicit override.

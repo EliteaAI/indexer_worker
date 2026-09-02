@@ -46,6 +46,44 @@ def _load_confirmation_classifier():
 should_emit_output_limit_confirmation = _load_confirmation_classifier()
 
 
+def _load_continuation_error_builder():
+    source = (pathlib.Path(__file__).resolve().parents[1] / 'utils' / 'funcs.py').read_text()
+    namespace = {
+        'Any': typing.Any,
+        'Dict': typing.Dict,
+        'Optional': typing.Optional,
+    }
+    function = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == 'build_output_continuation_error'
+    )
+    exec(compile(ast.Module([function], []), '<continuation-failure>', 'exec'), namespace)
+    return namespace['build_output_continuation_error']
+
+
+build_output_continuation_error = _load_continuation_error_builder()
+
+
+def _load_parallel_terminal_error_builder():
+    source = (pathlib.Path(__file__).resolve().parents[1] / 'utils' / 'funcs.py').read_text()
+    namespace = {
+        'Any': typing.Any,
+        'Dict': typing.Dict,
+        'Optional': typing.Optional,
+    }
+    function = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == 'build_parallel_terminal_error'
+    )
+    exec(compile(ast.Module([function], []), '<parallel-terminal-error>', 'exec'), namespace)
+    return namespace['build_parallel_terminal_error']
+
+
+build_parallel_terminal_error = _load_parallel_terminal_error_builder()
+
+
 def _response(*, generations=None, llm_output=None):
     return SimpleNamespace(generations=generations or [], llm_output=llm_output or {})
 
@@ -132,3 +170,68 @@ def test_direct_pipeline_llm_node_does_not_emit_root_continue():
         'length',
         {'langgraph_node': 'LLM1'},
     )
+
+
+def test_single_node_chat_graph_does_not_emit_root_continue():
+    assert not should_emit_output_limit_confirmation(
+        'length',
+        {'langgraph_node': 'agent'},
+    )
+
+
+def test_continuation_exhaustion_builds_structured_error_contract():
+    error_type = type('OutputContinuationExhausted', (Exception,), {})
+    error = error_type('internal detail')
+    error.user_message = 'All 4 automatic continuation attempts were exhausted.'
+    error.partial_output = 'partial model output'
+    error.attempts = 4
+    error.failure_reason = 'attempt_limit'
+    error.stop_reason = 'length'
+
+    assert build_output_continuation_error(error) == {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'All 4 automatic continuation attempts were exhausted.',
+        'partial_output': 'partial model output',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+    }
+
+
+def test_parallel_parent_receives_bounded_structured_continuation_error():
+    continuation_error = {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'All 4 automatic continuation attempts were exhausted.',
+        'partial_output': 'large partial output',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+    }
+
+    assert build_parallel_terminal_error(
+        error_message='internal stack',
+        continuation_error=continuation_error,
+    ) == {
+        'code': 'output_continuation_exhausted',
+        'user_message': 'All 4 automatic continuation attempts were exhausted.',
+        'attempts': 4,
+        'failure_reason': 'attempt_limit',
+        'stop_reason': 'length',
+        'partial_output_available': True,
+    }
+
+
+def test_unrelated_exception_is_not_classified_as_continuation_exhaustion():
+    assert build_output_continuation_error(RuntimeError('boom')) is None
+
+
+def test_continuation_error_reaches_live_and_persisted_metadata():
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'agent_common.py'
+    ).read_text()
+    execution_error = source[
+        source.index('def execution_error('):source.index('class ToolCallPayload')
+    ]
+
+    assert 'exception_meta["continuation_error"] = continuation_error' in execution_error
+    assert 'additional_response_meta["continuation_error"] = continuation_error' in execution_error

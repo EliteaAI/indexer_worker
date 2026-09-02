@@ -45,6 +45,7 @@ def _load_execution_error():
         ),
         'EVENTNODE_FULL_RESPONSE_NAME': 'full_response',
         'is_fanout_child': lambda meta: False,
+        'build_parallel_terminal_error': lambda **kwargs: kwargs,
         '_sanitize_input_for_event': lambda value: value,
     }
     exec(compile(body, '<execution_error>', 'exec'), namespace)  # pylint: disable=W0122

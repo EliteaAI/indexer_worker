@@ -53,6 +53,7 @@ from ..utils.funcs import (
     _is_mcp_authorization_required_error,
     _is_unresolved_mcp_type,
     _mcp_auth_error_to_metadata,
+    build_parallel_terminal_error,
     budget_exceeded_error_code,
     is_mcp_authorization_required_error,
     extract_finish_reason,
@@ -203,6 +204,8 @@ def temp_elitea_client(
         project_id=client_args.get("project_id"),
         auth_token=api_token,
         api_extra_headers=api_extra_headers or {},
+        auth_session=client_args.get("auth_session"),
+        session_cookie_name=client_args.get("session_cookie_name"),
     )
 
     try:
@@ -463,6 +466,7 @@ def execution_error(
     human_readable: str = None,
     execution_start_time: Optional[datetime] = None,
     budget_error_code: Optional[str] = None,
+    continuation_error: Optional[dict] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -478,6 +482,7 @@ def execution_error(
         human_readable: Human-readable error message (optional)
         execution_start_time: Execution start timestamp for duration calculation (optional)
         budget_error_code: Budget scope that blocked the call, for the UI to link to usage (optional)
+        continuation_error: Structured output-continuation failure details (optional)
 
     Returns:
         Dict containing chat_history and error information
@@ -523,6 +528,9 @@ def execution_error(
     if budget_error_code:
         exception_meta["budget_error_code"] = budget_error_code
     #
+    if continuation_error:
+        exception_meta["continuation_error"] = continuation_error
+    #
     node_interface.emit(
         type=EventTypes.agent_exception,
         content=error_message,
@@ -546,8 +554,13 @@ def execution_error(
     # additional_response_meta is the supported way onto the persisted message meta;
     # a bare response_metadata key is dropped by elitea_core's whitelist, and the UI
     # needs this after a reload, not just on the live socket update
+    additional_response_meta = {}
     if budget_error_code:
-        response_metadata["additional_response_meta"] = {"budget_error_code": budget_error_code}
+        additional_response_meta["budget_error_code"] = budget_error_code
+    if continuation_error:
+        additional_response_meta["continuation_error"] = continuation_error
+    if additional_response_meta:
+        response_metadata["additional_response_meta"] = additional_response_meta
 
     if not is_fanout_child(tasknode_task_meta):
         msg_event_node = NodeEvent(
@@ -562,11 +575,19 @@ def execution_error(
         node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
     # Blocking callers (join_task) never see the events above, so without this key the only
     # failure detail that survives the process boundary is the raw traceback in "error"
-    return {
+    result = {
         "chat_history": chat_history,
         "error": error,
         "human_readable": human_readable or error_message,
     }
+    if is_fanout_child(tasknode_task_meta):
+        result["parallel_terminal_error"] = build_parallel_terminal_error(
+            error_message=error_message,
+            human_readable=human_readable,
+            budget_error_code=budget_error_code,
+            continuation_error=continuation_error,
+        )
+    return result
 
 
 class ToolCallPayload(BaseModel):
