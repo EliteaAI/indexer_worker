@@ -111,6 +111,27 @@ def test_assistant_message_with_only_image_chunk_leaves_empty_content():
     assert messages[0]['content'] == []
 
 
+def test_unrelated_note_substring_in_context_prompt_not_truncated():
+    # context.prompt (echoed as "Context: {context.prompt}") could itself contain the
+    # literal string "NOTE:" — must not be mistaken for the producer's own NOTE line.
+    text = (
+        "Image file: sq.png\n"
+        "filepath: /attachments/sq.png\n"
+        "Context: please NOTE: focus on the top-left corner\n"
+        "\n"
+        "NOTE: This image is ALREADY EMBEDDED as base64 in this message.\n"
+        "Analyze the image directly from the provided image_url data.\n"
+        "Do NOT call any file reading tool to re-read this image."
+    )
+    messages = [_asst_msg(text)]
+    strip_image_chunks_from_assistant_messages(messages)
+
+    result = messages[0]['content'][0]['text']
+    assert 'please NOTE: focus on the top-left corner' in result
+    assert 'ALREADY EMBEDDED' not in result
+    assert 'filepath: /attachments/sq.png' in result
+
+
 def test_langchain_object_message_handled():
     class FakeAIMessage:
         def __init__(self, content):
