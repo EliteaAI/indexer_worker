@@ -237,17 +237,68 @@ def is_anthropic_model(model_name: str) -> bool:
     return 'claude' in lower or 'anthropic' in lower
 
 
+# Exact NOTE lines written by elitea_core's ImageToModelProcessor (attachments.py).
+# Matched as whole lines, not a bare "NOTE:" substring — context.prompt is echoed
+# into the same text chunk as "Context: {context.prompt}" a few lines above, and a
+# bare-substring match would mistruncate the chunk if user/context text ever
+# happened to contain the literal string "NOTE:".
+_PRODUCER_NOTE_LINES = (
+    'NOTE: This image is ALREADY EMBEDDED as base64 in this message.',
+    'NOTE: This image will be embedded as base64 inline if successfully loaded.',
+)
+
+_NO_ROUTE_NOTE = 'NOTE: This image was not carried into this turn — it is not visible here.'
+_FILEPATH_ROUTE_NOTE = (
+    'NOTE: This image was not carried into this turn — it is not visible here.\n'
+    'Use the filepath above with an appropriate file reading tool if you need it.'
+)
+
+
+def _find_producer_note_start(text: str) -> int:
+    """Return the start index of a known producer NOTE line, or -1 if absent.
+
+    Requires the line to appear at the start of *text* or right after a newline, so
+    it can't match "NOTE:" appearing mid-sentence inside unrelated text.
+    """
+    for line in _PRODUCER_NOTE_LINES:
+        if text.startswith(line):
+            return 0
+        idx = text.find('\n' + line)
+        if idx != -1:
+            return idx + 1
+    return -1
+
+
+def _rewrite_stripped_image_text(text: str) -> str:
+    """Replace a producer-written image note with one that matches post-strip reality.
+
+    The producer (``elitea_core``'s ``ImageToModelProcessor``) writes a note claiming
+    the image is embedded inline and telling the model not to re-read it — true on the
+    turn it was generated, false once that turn becomes history and its ``image_url``
+    chunk is stripped. Drop from the matched producer NOTE line onward and replace it
+    with wording that matches whichever content the head (``Image file: …`` /
+    ``filepath: …``) still carries. Returns *text* unchanged if no known producer note
+    line is found.
+    """
+    idx = _find_producer_note_start(text)
+    if idx == -1:
+        return text
+    head = text[:idx].rstrip('\n')
+    note = _FILEPATH_ROUTE_NOTE if 'filepath:' in head else _NO_ROUTE_NOTE
+    return f"{head}\n\n{note}" if head else note
+
+
 def strip_image_chunks_from_assistant_messages(messages: list) -> list:
     """Remove ``image_url`` chunks from assistant-role messages.
 
-    Some providers (e.g. Anthropic) do not permit ``image`` content blocks
-    inside assistant turns.  Tool-generated images are stored as assistant
-    attachments, so this filter must run before the history reaches those
-    providers.
+    No Chat-Completions-shaped provider contract documents support for image content
+    blocks inside assistant-role messages, and AWS Bedrock Converse rejects them
+    outright — so tool-generated images stored as assistant attachments must have this
+    filter applied before the history reaches any provider.
 
-    Only ``image_url`` chunks are removed — sibling ``text`` chunks
-    (``Image file: …``) are preserved so the LLM still knows about the
-    attachment.
+    Only ``image_url`` chunks are removed. Sibling ``text`` chunks (``Image file: …``)
+    are preserved but rewritten — see ``_rewrite_stripped_image_text`` — so they no
+    longer claim the (now-removed) image is embedded inline.
 
     Operates **in-place** and returns the same list.
     """
@@ -275,6 +326,10 @@ def strip_image_chunks_from_assistant_messages(messages: list) -> list:
         ]
 
         if len(filtered) != len(content):
+            for chunk in filtered:
+                if isinstance(chunk, dict) and chunk.get('type') == 'text':
+                    chunk['text'] = _rewrite_stripped_image_text(chunk.get('text') or '')
+
             if isinstance(message, dict):
                 message['content'] = filtered
             else:
