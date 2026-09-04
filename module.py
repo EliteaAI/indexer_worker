@@ -426,7 +426,14 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 enabled, limit, per_toolkit,
             )
         except Exception:  # pylint: disable=W0718
-            log.exception("Failed to configure tool result bounds")
+            # A config we could not read must not leave the previous bounds live:
+            # unreadable config means truncation OFF, never a stale limit.
+            log.exception("Failed to configure tool result bounds - disabling truncation")
+            try:
+                from elitea_sdk.runtime.utils.trace_limits import configure_tool_result_limits  # pylint: disable=C0415,E0401
+                configure_tool_result_limits(enabled=False)
+            except Exception:  # pylint: disable=W0718
+                log.exception("Failed to disable tool result bounds")
 
     def _apply_toolkit_security(self):
         """Apply the toolkit security guardrails from the current config.
