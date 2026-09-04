@@ -31,9 +31,52 @@ import requests
 from langchain_core.callbacks import BaseCallbackHandler  # pylint: disable=E0401
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, LLMResult
-from elitea_sdk.runtime.utils.trace_limits import cap_trace_json, cap_trace_text
+from elitea_sdk.runtime.utils.trace_limits import (
+    TRACE_STEP_FIELD_MAX_CHARS,
+    cap_trace_json,
+    cap_trace_text,
+)
+from elitea_sdk.tools.utils.serialization import to_json_primitive
 from pydantic import BaseModel
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
+
+
+def indent_for_trace(value):
+    """Indent a tool result for the trace UI only -- never for the model.
+
+    The whitespace costs no context tokens because this string never reaches a
+    model, but past the cap it would cost real content: cap_trace_text would
+    truncate output to make room for it, so an oversized payload stays compact.
+
+    A LangChain-wrapped result arrives here as its message CONTENT, i.e. already a
+    string -- the common case now that tool results are JSON -- so a JSON string is
+    parsed back before indenting. That round trip can normalise float spelling and
+    drop duplicate keys, which is acceptable for a display field; the model reads
+    the untouched original either way. to_json_primitive keeps this in step with
+    what the model saw (ISO datetimes, no memory addresses).
+    """
+    original = value
+    if isinstance(value, str):
+        if not value.lstrip().startswith(('{', '[')):
+            return value
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return value
+    indented = json.dumps(value, ensure_ascii=False, indent=2, default=to_json_primitive)
+    if len(indented) > TRACE_STEP_FIELD_MAX_CHARS:
+        indented = json.dumps(value, ensure_ascii=False, default=to_json_primitive)
+    try:
+        # Parsing turns an ESCAPED lone surrogate into a live one, which then raises
+        # at the first strict-UTF-8 boundary -- the socket frame or the DB write.
+        # The input was inert; hand it back rather than indenting into a crash.
+        indented.encode('utf-8')
+    except UnicodeEncodeError:
+        if isinstance(original, str):
+            return original
+        return json.dumps(value, ensure_ascii=True, default=to_json_primitive)
+    return indented
+
 
 try:
     from elitea_sdk.runtime.langchain.constants import (
@@ -1069,15 +1112,7 @@ class EliteACallback(BaseCallbackHandler):
         if hitl_deferred:
             tool_output = ""
         else:
-            tool_output = cap_trace_text(
-                raw_output
-                if isinstance(raw_output, str)
-                else json.dumps(
-                    raw_output,
-                    ensure_ascii=False,
-                    default=lambda o: str(o)
-                )
-            )
+            tool_output = cap_trace_text(indent_for_trace(raw_output))
         now = datetime.now(tz=timezone.utc).isoformat()
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "stop"
