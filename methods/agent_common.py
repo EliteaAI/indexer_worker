@@ -65,9 +65,14 @@ def indent_for_trace(value):
             # A deeply nested payload blows the parser's stack; the string was
             # displayable exactly as it arrived, so hand it back.
             return value
-    indented = json.dumps(value, ensure_ascii=False, indent=2, default=to_json_primitive)
-    if len(indented) > TRACE_STEP_FIELD_MAX_CHARS:
-        indented = json.dumps(value, ensure_ascii=False, default=to_json_primitive)
+    try:
+        indented = json.dumps(value, ensure_ascii=False, indent=2, default=to_json_primitive)
+        if len(indented) > TRACE_STEP_FIELD_MAX_CHARS:
+            indented = json.dumps(value, ensure_ascii=False, default=to_json_primitive)
+    except (ValueError, TypeError, RecursionError):
+        # Nesting deep enough to blow the encoder's stack, but shallow enough that
+        # the parser survived it: indentation is not worth failing on_tool_end for.
+        return original if isinstance(original, str) else str(original)
     try:
         # Parsing turns an ESCAPED lone surrogate into a live one, which then raises
         # at the first strict-UTF-8 boundary -- the socket frame or the DB write.
