@@ -11,6 +11,41 @@
       "default": false,
       "requires_restart": false
     },
+    "allow_tool_call_truncation": {
+      "type": "boolean",
+      "title": "Bound Oversized Tool Results",
+      "description": "When enabled, a tool result larger than the limit below is truncated with an explicit marker before it reaches agent state, the event stream, the database and the LLM context. Disable to pass every result through unchanged (previous behaviour).",
+      "path": "allow_tool_call_truncation",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
+    "tool_call_truncation_limit": {
+      "type": "integer",
+      "title": "Tool Result Limit (characters)",
+      "description": "Maximum approximate size of a single tool result, in characters. Aligned with the SDK bounded-read cap. Only applies when bounding is enabled.",
+      "path": "tool_call_truncation_limit",
+      "section": "runtime",
+      "default": 200000,
+      "minimum": 1000,
+      "requires_restart": false
+    },
+    "tool_call_truncation_limit_per_toolkit": {
+      "type": "object",
+      "title": "Tool Result Limit Per Toolkit Type",
+      "description": "Per-toolkit-type overrides of the limit above, for toolkits whose large output is legitimate (retrieval, exports). Keys are toolkit types, values are character limits. Toolkit types not listed use the global limit.",
+      "path": "tool_call_truncation_limit_per_toolkit",
+      "section": "runtime",
+      "default": {},
+      "requires_restart": false,
+      "value_schema": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 1000
+        }
+      }
+    },
     "mcp_servers": {
       "type": "object",
       "title": "MCP Server Definitions",
