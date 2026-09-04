@@ -34,6 +34,19 @@ tool_call_truncation_limit: 200000   # CHARACTERS, aligned with the SDK bounded-
 # Per-toolkit-type overrides of the limit above, for toolkits whose large output is
 # legitimate (retrieval, exports). Absent entry => the global limit applies.
 tool_call_truncation_limit_per_toolkit: {}
+
+# Wire-level cap on a single MCP HTTP response BODY, in bytes (#6141). Different job
+# from the character limit above: this one stops an oversized body from ever being
+# allocated, so a malformed/malicious MCP server cannot OOM the worker. Kept far above
+# the char cap because tool-discovery catalogues are legitimately large.
+# Two switches: allow_tool_call_truncation is the whole-feature kill switch, while
+# allow_mcp_response_cap disables ONLY this wire cap - so reverting a truncation
+# complaint does not also disarm the OOM guard, and vice versa.
+# Default 50 MiB: clears the largest tools/list catalogue observed in production
+# (21.9 MB) with margin, while rejecting pathological bodies. Sending
+# Accept-Encoding: identity keeps this count equal to decoded payload bytes.
+allow_mcp_response_cap: false   # opt-in; enable once proven against real traffic
+mcp_response_max_bytes: 52428800   # 50 MiB
   #  pgvector: 400000
   #  sharepoint: 400000
 

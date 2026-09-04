@@ -416,14 +416,19 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             enabled = self.descriptor.config.get("allow_tool_call_truncation", True)
             limit = self.descriptor.config.get("tool_call_truncation_limit", None)
             per_toolkit = self.descriptor.config.get("tool_call_truncation_limit_per_toolkit", {}) or {}
+            mcp_bytes = self.descriptor.config.get("mcp_response_max_bytes", None)
+            mcp_cap = self.descriptor.config.get("allow_mcp_response_cap", False)
             configure_tool_result_limits(
                 enabled=enabled,
                 limit=limit,
                 per_toolkit=per_toolkit,
+                mcp_response_bytes=mcp_bytes,
+                mcp_cap_enabled=mcp_cap,
             )
             log.info(
-                "Configured tool result bounds: enabled=%s, limit=%s, per_toolkit=%s",
-                enabled, limit, per_toolkit,
+                "Configured tool result bounds: enabled=%s, limit=%s, per_toolkit=%s, "
+                "mcp_cap=%s, mcp_bytes=%s",
+                enabled, limit, per_toolkit, mcp_cap, mcp_bytes,
             )
         except Exception:  # pylint: disable=W0718
             # A config we could not read must not leave the previous bounds live:
