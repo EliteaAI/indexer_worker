@@ -34,6 +34,8 @@ tool_call_truncation_limit: 200000   # CHARACTERS, aligned with the SDK bounded-
 # Per-toolkit-type overrides of the limit above, for toolkits whose large output is
 # legitimate (retrieval, exports). Absent entry => the global limit applies.
 tool_call_truncation_limit_per_toolkit: {}
+  #  pgvector: 400000
+  #  sharepoint: 400000
 
 # Wire-level cap on a single MCP HTTP response BODY, in bytes (#6141). Different job
 # from the character limit above: this one stops an oversized body from ever being
@@ -47,8 +49,6 @@ tool_call_truncation_limit_per_toolkit: {}
 # Accept-Encoding: identity keeps this count equal to decoded payload bytes.
 allow_mcp_response_cap: false   # opt-in; enable once proven against real traffic
 mcp_response_max_bytes: 52428800   # 50 MiB
-  #  pgvector: 400000
-  #  sharepoint: 400000
 
 # Pyodide code-node sandbox resource limits. Set into os.environ at plugin init
 # (see module.py env_vars loop) and read by PyodideSandboxTool in the SDK.
