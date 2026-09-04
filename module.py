@@ -229,6 +229,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         #
         # Configure toolkit security guardrails from config (live-reloadable via reconfig)
         self._apply_toolkit_security()
+        # Configure tool-result bounds from config (live-reloadable via reconfig)
+        self._apply_tool_result_limits()
         #
         if self.descriptor.config.get("worker_enabled", True):
             # Agent prereqs
@@ -403,6 +405,29 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         else:
             log.debug("Worker not enabled")
 
+    def _apply_tool_result_limits(self):
+        """Push the tool-result bounds from config into the SDK (live-reloadable).
+
+        Applied unconditionally, like the guardrails above, so that removing a
+        per-toolkit override reverts to the global limit rather than sticking.
+        """
+        try:
+            from elitea_sdk.runtime.utils.trace_limits import configure_tool_result_limits  # pylint: disable=C0415,E0401
+            enabled = self.descriptor.config.get("allow_tool_call_truncation", True)
+            limit = self.descriptor.config.get("tool_call_truncation_limit", None)
+            per_toolkit = self.descriptor.config.get("tool_call_truncation_limit_per_toolkit", {}) or {}
+            configure_tool_result_limits(
+                enabled=enabled,
+                limit=limit,
+                per_toolkit=per_toolkit,
+            )
+            log.info(
+                "Configured tool result bounds: enabled=%s, limit=%s, per_toolkit=%s",
+                enabled, limit, per_toolkit,
+            )
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure tool result bounds")
+
     def _apply_toolkit_security(self):
         """Apply the toolkit security guardrails from the current config.
 
@@ -448,6 +473,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         guardrails and MCP definitions from this process.
         """
         self._apply_toolkit_security()
+        self._apply_tool_result_limits()
         self._reload_mcp_servers()
 
     def _reload_mcp_servers(self):
