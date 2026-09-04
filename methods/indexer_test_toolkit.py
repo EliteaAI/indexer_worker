@@ -23,6 +23,7 @@ from typing import Optional, Any
 from uuid import uuid4
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
+from elitea_sdk.tools.utils.serialization import to_json_primitive
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import worker_core  # pylint: disable=E0401
@@ -107,7 +108,7 @@ def safe_json_dumps(data: Any, indent: int = 2, fallback_prefix: str = "Serializ
         JSON string or string representation if JSON fails
     """
     try:
-        return json.dumps(data, indent=indent)
+        return json.dumps(data, indent=indent, ensure_ascii=False)
     except (TypeError, ValueError) as e:
         log.warning(f"JSON serialization failed: {e}, falling back to str()")
         return f"{fallback_prefix}{str(data)}"
@@ -148,15 +149,14 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
                 if key_is_suspect and not isinstance(v, (str, int, float, bool, type(None), dict, list)):
                     continue
 
-                # Recursively clean both key and value
+                # Recursively clean both key and value. A None VALUE is real data --
+                # gitlab's `author` is null for an unassigned issue -- so it must
+                # survive; only a value cleaning rejected is dropped.
                 if isinstance(k, (str, int, float, bool, type(None))):
-                    cleaned_value = clean_for_json_serialization(v, fallback_message)
-                    if cleaned_value is not None:
-                        cleaned[k] = cleaned_value
+                    cleaned[k] = clean_for_json_serialization(v, fallback_message)
             return cleaned
         elif isinstance(data, list):
-            return [clean_for_json_serialization(item, fallback_message) for item in data if
-                    clean_for_json_serialization(item, fallback_message) is not None]
+            return [clean_for_json_serialization(item, fallback_message) for item in data]
         elif isinstance(data, (str, int, float, bool, type(None))):
             return data
         else:
@@ -164,8 +164,9 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
             obj_type_name = type(data).__name__
             if any(keyword in obj_type_name.lower() for keyword in ['client', 'callback', 'handler', 'instance']):
                 return f"<{obj_type_name} object (not serializable)>"
-            # For other non-serializable objects, try to convert to string
-            return str(data)
+            # The same conversion the model's copy of this result gets, so the
+            # panel and the trace agree: ISO datetimes, no memory addresses.
+            return to_json_primitive(data)
     except Exception:
         return fallback_message
 
