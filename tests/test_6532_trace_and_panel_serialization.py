@@ -142,3 +142,29 @@ def test_trace_hands_back_a_payload_it_cannot_encode():
 
     assert result == payload
     result.encode('utf-8')
+
+
+def test_trace_bound_is_the_trace_cap_not_the_configurable_tool_result_limit():
+    """#109 made the TOOL-RESULT bound configurable; the TRACE field cap is not.
+
+    They are different stages: a result is bounded before it reaches the trace,
+    and the trace then caps its own field. Raising the tool-result limit must not
+    make the trace indent a payload past the cap it is about to be truncated to.
+    """
+    from elitea_sdk.runtime.utils.trace_limits import (
+        TRACE_STEP_FIELD_MAX_CHARS,
+        configure_tool_result_limits,
+    )
+
+    records = [{"id": index, "text": "y" * 200} for index in range(2000)]
+    payload = json.dumps(records)
+    assert len(payload) > TRACE_STEP_FIELD_MAX_CHARS
+
+    try:
+        configure_tool_result_limits(enabled=True, limit=5_000_000)
+        rendered = indent_for_trace(payload)
+    finally:
+        configure_tool_result_limits(enabled=True, limit=None)
+
+    # Compact, because indenting would push it further past the trace cap.
+    assert "\n  " not in rendered
