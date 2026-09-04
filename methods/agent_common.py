@@ -61,7 +61,9 @@ def indent_for_trace(value):
             return value
         try:
             value = json.loads(value)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # A deeply nested payload blows the parser's stack; the string was
+            # displayable exactly as it arrived, so hand it back.
             return value
     indented = json.dumps(value, ensure_ascii=False, indent=2, default=to_json_primitive)
     if len(indented) > TRACE_STEP_FIELD_MAX_CHARS:

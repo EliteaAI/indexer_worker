@@ -108,7 +108,7 @@ def safe_json_dumps(data: Any, indent: int = 2, fallback_prefix: str = "Serializ
         JSON string or string representation if JSON fails
     """
     try:
-        return json.dumps(data, indent=indent, ensure_ascii=False)
+        return json.dumps(data, indent=indent, ensure_ascii=False, default=to_json_primitive)
     except (TypeError, ValueError) as e:
         log.warning(f"JSON serialization failed: {e}, falling back to str()")
         return f"{fallback_prefix}{str(data)}"
@@ -165,8 +165,12 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
             if any(keyword in obj_type_name.lower() for keyword in ['client', 'callback', 'handler', 'instance']):
                 return f"<{obj_type_name} object (not serializable)>"
             # The same conversion the model's copy of this result gets, so the
-            # panel and the trace agree: ISO datetimes, no memory addresses.
-            return to_json_primitive(data)
+            # panel and the trace agree: ISO datetimes, no memory addresses. Clean
+            # the result too: to_json_primitive expands a dataclass or model into a
+            # dict whose own values may still be unserializable, and json.dumps
+            # would then reject the WHOLE payload into a repr. This terminates
+            # because an unknown object converts to a str.
+            return clean_for_json_serialization(to_json_primitive(data), fallback_message)
     except Exception:
         return fallback_message
 
