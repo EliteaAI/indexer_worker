@@ -23,6 +23,7 @@ from typing import Optional, Any
 from uuid import uuid4
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
+from elitea_sdk.tools.utils.serialization import NON_FINITE, make_json_safe, to_json_primitive
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from tools import worker_core  # pylint: disable=E0401
@@ -107,13 +108,22 @@ def safe_json_dumps(data: Any, indent: int = 2, fallback_prefix: str = "Serializ
         JSON string or string representation if JSON fails
     """
     try:
-        return json.dumps(data, indent=indent)
-    except (TypeError, ValueError) as e:
+        rendered = json.dumps(data, indent=indent, ensure_ascii=False, default=to_json_primitive)
+        if NON_FINITE.search(rendered):
+            # json.dumps writes NaN and Infinity bare, which JSON.parse rejects --
+            # and the UI parses before it renders a result as JSON, so one missing
+            # value in a pandas-backed result would blank the whole panel.
+            rendered = json.dumps(
+                make_json_safe(data), indent=indent, ensure_ascii=False, default=to_json_primitive,
+            )
+        return rendered
+    except (TypeError, ValueError, RecursionError) as e:
         log.warning(f"JSON serialization failed: {e}, falling back to str()")
         return f"{fallback_prefix}{str(data)}"
 
 
-def clean_for_json_serialization(data: Any, fallback_message: str = "Could not serialize data") -> Any:
+def clean_for_json_serialization(data: Any, fallback_message: str = "Could not serialize data",
+                                 _seen: frozenset = frozenset()) -> Any:
     """
     Clean data to ensure JSON serializability by filtering out non-serializable objects recursively.
 
@@ -125,6 +135,12 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
         Data containing only JSON-serializable values
     """
     try:
+        if isinstance(data, (dict, list)):
+            # A self-referential result recursed ~1000 deep and then failed to
+            # serialize, degrading the whole payload to a repr.
+            if id(data) in _seen:
+                return "<circular reference>"
+            _seen = _seen | {id(data)}
         if isinstance(data, dict):
             cleaned = {}
             for k, v in data.items():
@@ -148,15 +164,14 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
                 if key_is_suspect and not isinstance(v, (str, int, float, bool, type(None), dict, list)):
                     continue
 
-                # Recursively clean both key and value
+                # Recursively clean both key and value. A None VALUE is real data --
+                # gitlab's `author` is null for an unassigned issue -- so it must
+                # survive; only a value cleaning rejected is dropped.
                 if isinstance(k, (str, int, float, bool, type(None))):
-                    cleaned_value = clean_for_json_serialization(v, fallback_message)
-                    if cleaned_value is not None:
-                        cleaned[k] = cleaned_value
+                    cleaned[k] = clean_for_json_serialization(v, fallback_message, _seen)
             return cleaned
         elif isinstance(data, list):
-            return [clean_for_json_serialization(item, fallback_message) for item in data if
-                    clean_for_json_serialization(item, fallback_message) is not None]
+            return [clean_for_json_serialization(item, fallback_message, _seen) for item in data]
         elif isinstance(data, (str, int, float, bool, type(None))):
             return data
         else:
@@ -164,9 +179,19 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
             obj_type_name = type(data).__name__
             if any(keyword in obj_type_name.lower() for keyword in ['client', 'callback', 'handler', 'instance']):
                 return f"<{obj_type_name} object (not serializable)>"
-            # For other non-serializable objects, try to convert to string
-            return str(data)
-    except Exception:
+            # The same conversion the model's copy of this result gets, so the
+            # panel and the trace agree: ISO datetimes, no memory addresses. Clean
+            # the result too: to_json_primitive expands a dataclass or model into a
+            # dict whose own values may still be unserializable, and json.dumps
+            # would then reject the WHOLE payload into a repr. This terminates
+            # because an unknown object converts to a str.
+            converted = to_json_primitive(data)
+            if converted is data or isinstance(converted, str):
+                return converted
+            return clean_for_json_serialization(converted, fallback_message, _seen)
+    except (Exception, RecursionError):
+        # A self-referential structure recurses until the stack gives out; the
+        # message is a better panel result than an escaped error.
         return fallback_message
 
 
