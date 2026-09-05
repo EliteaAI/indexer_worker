@@ -37,6 +37,14 @@ tool_call_truncation_limit_per_toolkit: {}
   #  pgvector: 400000
   #  sharepoint: 400000
 
+# Wire-level cap on a single MCP HTTP response BODY, in bytes (#6141). Independent of the
+# character-based tool result bounding above: this one protects worker memory from an
+# oversized or malicious MCP server, not the LLM context. Ships disabled; enable once
+# validated against your MCP servers - big responses in production are normally a job for
+# the reverse proxy in front of them, not this worker.
+allow_mcp_response_cap: false   # opt-in; enable once proven against real traffic
+mcp_response_max_bytes: 52428800   # 50 MiB
+
 # Pyodide code-node sandbox resource limits. Set into os.environ at plugin init
 # (see module.py env_vars loop) and read by PyodideSandboxTool in the SDK.
 # Values MUST be strings (os.environ requires str). Absent => SDK safe defaults.

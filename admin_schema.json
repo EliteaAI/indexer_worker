@@ -46,6 +46,25 @@
         }
       }
     },
+    "allow_mcp_response_cap": {
+      "type": "boolean",
+      "title": "Bound MCP Response Bodies (wire cap)",
+      "description": "When enabled, a single MCP HTTP response body larger than the byte limit below is aborted mid-read, so an oversized or malicious MCP server cannot exhaust worker memory. Independent of the character-based tool result bounding above: disabling one does not disable the other. Ships disabled; enable once validated against your MCP servers.",
+      "path": "allow_mcp_response_cap",
+      "section": "runtime",
+      "default": false,
+      "requires_restart": false
+    },
+    "mcp_response_max_bytes": {
+      "type": "integer",
+      "title": "MCP Response Body Limit (bytes)",
+      "description": "Maximum size of a single MCP HTTP response body, in bytes. Deliberately far above the character limit above because tool discovery catalogues are legitimately large (the biggest observed in production is roughly 21.9 MB). Only applies when the wire cap is enabled.",
+      "path": "mcp_response_max_bytes",
+      "section": "runtime",
+      "default": 52428800,
+      "minimum": 1048576,
+      "requires_restart": false
+    },
     "mcp_servers": {
       "type": "object",
       "title": "MCP Server Definitions",
