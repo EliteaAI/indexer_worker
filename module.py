@@ -45,6 +45,26 @@ def _has_required_nltk_data(nltk_data_target):
     )
 
 
+def _preload_unstructured_nlp_model():
+    """Warm the pinned NLP model without making startup depend on GitHub."""
+    try:
+        from elitea_sdk.runtime.langchain.tools.utils import (  # pylint: disable=C0415
+            preload_unstructured_nlp_model,
+        )
+
+        log.info("Preloading Unstructured NLP model")
+        preload_unstructured_nlp_model()
+        log.info("Unstructured NLP model is ready")
+    except Exception:  # pylint: disable=W0718
+        # The SDK indexing entry point retries this preload before document
+        # processing, so a transient download failure must not disable the
+        # worker.
+        log.exception(
+            "Failed to preload Unstructured NLP model; "
+            "indexing will retry on demand"
+        )
+
+
 class Module(module.ModuleModel):  # pylint: disable=R0902
     """ Pylon module """
 
@@ -217,6 +237,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         except:  # pylint: disable=W0702
             from elitea_sdk.runtime.langchain.tools.utils import download_nltk  # pylint: disable=C0415,E0401
             download_nltk(nltk_data_target)
+        #
+        _preload_unstructured_nlp_model()
         #
         for key, value in self.descriptor.config.get("env_vars", {}).items():
             os.environ[key] = value
