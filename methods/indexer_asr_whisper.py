@@ -23,6 +23,8 @@ import wave
 from pylon.core.tools import log, web
 from tools import worker_core
 
+from ..utils.audio_backend import audio_base_url, audio_headers, audio_model_name
+
 # Internal event-node channel names (indexer → pylon_main)
 _EN_ASR_TRANSCRIPT_DONE = "voice_asr_transcript_done"
 _EN_ASR_ERROR = "voice_asr_error"
@@ -95,7 +97,9 @@ def _pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     return buf
 
 
-_LITELLM_ASR_URL = "http://127.0.0.1:8081/v1/audio/transcriptions"
+def _asr_url() -> str:
+    """Return the transcription endpoint. See utils/audio_backend.py."""
+    return f"{audio_base_url()}/audio/transcriptions"
 
 
 def _call_whisper(
@@ -108,14 +112,17 @@ def _call_whisper(
     import requests
 
     wav_buf = _pcm16_to_wav(pcm_data)
-    litellm_model = f"{project_id}_{model_name}"
+    # The wire name differs per backend: LiteLLM addressed a project-prefixed
+    # model group, the gateway resolves the project's own configuration row.
+    model = audio_model_name(project_id, model_name)
 
     response = requests.post(
-        _LITELLM_ASR_URL,
-        headers={"Authorization": f"Bearer {project_llm_key}"},
+        _asr_url(),
+        headers=audio_headers(project_id, project_llm_key),
         files={"file": ("audio.wav", wav_buf, "audio/wav")},
-        data={"model": litellm_model, "language": language},
+        data={"model": model, "language": language},
         timeout=30,
     )
     response.raise_for_status()
+    # Both backends answer OpenAI's shape: {"text": "..."}.
     return response.json().get("text", "")

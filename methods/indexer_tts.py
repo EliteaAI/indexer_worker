@@ -23,6 +23,7 @@ import threading
 from pylon.core.tools import log, web
 from tools import worker_core
 
+from ..utils.audio_backend import audio_base_url, audio_headers, audio_model_name
 from ..utils.voice_router import register as voice_register, unregister as voice_unregister
 from ..utils.voice_router import TTS_CANCEL
 
@@ -122,7 +123,9 @@ class Method:
             voice_unregister(sid, TTS_CANCEL)
 
 
-_LITELLM_TTS_URL = "http://127.0.0.1:8081/v1/audio/speech"
+def _tts_url() -> str:
+    """Return the speech endpoint. See utils/audio_backend.py."""
+    return f"{audio_base_url()}/audio/speech"
 
 _DEFAULT_GPT4O_TTS_INSTRUCTIONS = (
     "Affect: calm and warm. "
@@ -133,12 +136,10 @@ _DEFAULT_GPT4O_TTS_INSTRUCTIONS = (
 
 
 def _build_request_params(project_id: int, project_llm_key: str) -> tuple[str, dict]:
-    """Return (url, headers) for the LiteLLM TTS endpoint."""
-    url = _LITELLM_TTS_URL
-    headers = {
-        "Authorization": f"Bearer {project_llm_key}",
-        "Content-Type": "application/json",
-    }
+    """Return (url, headers) for the TTS endpoint. See utils/audio_backend.py."""
+    url = _tts_url()
+    headers = audio_headers(project_id, project_llm_key)
+    headers["Content-Type"] = "application/json"
     return url, headers
 
 
@@ -252,8 +253,9 @@ def _run_tts_stream(
     voice_instructions: str = "",
 ) -> None:
     url, headers = _build_request_params(project_id, project_llm_key)
-    # LiteLLM expects models in "{project_id}_{model_name}" format for project-scoped routing
-    litellm_model = f"{project_id}_{model_name}"
+    # The wire name differs per backend: LiteLLM addressed a project-prefixed
+    # model group, the gateway resolves the project's own configuration row.
+    wire_model = audio_model_name(project_id, model_name)
     sentences = _split_sentences(text)
 
     for i, (sentence, char_end) in enumerate(sentences):
@@ -263,7 +265,7 @@ def _run_tts_stream(
         extra_params = _get_tone_params(model_name, sentences, i, voice_instructions)
         ok = _stream_sentence(
             local_event_node, sid, url, headers,
-            litellm_model, voice, speed, sentence, cancel_event,
+            wire_model, voice, speed, sentence, cancel_event,
             extra_params=extra_params,
         )
         if not ok:
