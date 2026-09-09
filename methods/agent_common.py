@@ -709,12 +709,13 @@ class EliteACallback(BaseCallbackHandler):
         # Track last sent content/thinking per run_id to send only deltas (some providers send cumulative)
         self._last_sent_content: Dict[str, str] = {}
         self._last_sent_thinking: Dict[str, str] = {}
-        # Once we see enough chunks to tell whether a run streams cumulative or delta
-        # text, lock that decision in for the rest of the run instead of re-guessing on
-        # every chunk - a delta chunk that happens to repeat the previous one otherwise
-        # looks identical to a cumulative resend and gets silently dropped.
-        self._content_stream_mode: Dict[str, str] = {}
-        self._thinking_stream_mode: Dict[str, str] = {}
+        # Whether a run streams cumulative (full string-so-far repeated) or true
+        # delta text can't be told from a single ambiguous chunk, so the decision
+        # is held open - buffering chunks unresolved - until later chunks make the
+        # format unambiguous (see `_compute_stream_delta`). `on_llm_end` flushes any
+        # still-unresolved buffer for a run via `_flush_stream_delta`.
+        self._content_stream_mode: Dict[str, dict] = {}
+        self._thinking_stream_mode: Dict[str, dict] = {}
         self.current_model_name = "gpt-4"
         self.tool_calls: Dict[str, ToolCallPayload] = {}  # tool_run_id -> payload
         self.llm_start_timestamp: str | None = None
@@ -1552,56 +1553,115 @@ class EliteACallback(BaseCallbackHandler):
         run_id_str: str,
         value: str,
         last_value_map: Dict[str, str],
-        mode_map: Dict[str, str],
+        mode_map: Dict[str, dict],
     ) -> str | None:
         """Compute the incremental delta for a per-run streamed text channel.
 
         Some providers stream cumulative text (the full string-so-far repeated
-        each chunk) while others stream true deltas (only the new token). Once
-        there is enough evidence to tell which one a run is doing, the decision
-        is locked into `mode_map` for the rest of the run - otherwise a delta
-        chunk that happens to repeat the previous chunk looks identical to a
-        cumulative resend and gets silently dropped.
+        each chunk) while others stream true deltas (only the new token). A
+        single chunk can't prove which one a run is doing - "ab" following "a"
+        is equally consistent with cumulative growth ("a" -> "ab") and with two
+        independent delta tokens ("a", "ab") that happen to share a prefix - so
+        the decision isn't locked from one ambiguous comparison. Ambiguous
+        chunks (an exact repeat, or the very first prefix-extending chunk) are
+        buffered - not emitted yet - until either:
+          - a later chunk diverges from the buffered chain (proves delta - a
+            genuine cumulative resend would not shrink or change direction), or
+          - a later chunk strictly extends the buffered chain on top of an
+            already-buffered chunk (proves cumulative - a lone prefix match
+            could be coincidence, but growth confirmed by a second chunk in a
+            row is not).
+        Once locked, `mode_map[run_id_str]["mode"]` short-circuits straight to
+        the matching branch for the rest of the run. Any run that ends while
+        still buffered (e.g. a two-chunk reply that never disambiguates) must
+        be flushed via `_flush_stream_delta` from `on_llm_end`, or its buffered
+        text is silently dropped from the live stream.
         """
-        delta = None
-        last_value = last_value_map.get(run_id_str, "")
-        mode = mode_map.get(run_id_str)
-        if not last_value:
-            # First chunk for this run - not enough evidence yet to tell
-            # cumulative from delta, so just pass it through as-is.
-            delta = value
-            last_value_map[run_id_str] = value
-        elif mode == "cumulative":
-            if value.startswith(last_value):
-                if len(value) > len(last_value):
-                    delta = value[len(last_value) :]
-                # else: same value resent, no new text - skip
+        state = mode_map.get(run_id_str)
+        if state is None:
+            state = {"mode": None, "pending": []}
+            mode_map[run_id_str] = state
+
+        anchor = last_value_map.get(run_id_str, "")
+        mode = state["mode"]
+
+        if mode == "cumulative":
+            if value.startswith(anchor):
+                delta = value[len(anchor) :] or None
                 last_value_map[run_id_str] = value
-            elif last_value.startswith(value):
+            elif anchor.startswith(value):
                 # Shorter than what we've seen - likely a reset, resync
                 last_value_map[run_id_str] = value
+                delta = None
             else:
                 # Diverged entirely - treat as a fresh cumulative sequence
                 delta = value
                 last_value_map[run_id_str] = value
-        elif mode == "delta":
+            return delta
+
+        if mode == "delta":
             # Once a run is known to stream deltas, every non-empty chunk is
             # new text - even if it happens to repeat the previous chunk.
-            delta = value
-            last_value_map[run_id_str] = last_value + value
-        else:
-            # Second chunk of this run - use it to lock in the mode for the
-            # rest of the run. Only a strictly-longer prefix match is proof of
-            # cumulative streaming; anything else means genuine deltas.
-            if value.startswith(last_value) and len(value) > len(last_value):
-                mode_map[run_id_str] = "cumulative"
-                delta = value[len(last_value) :]
+            last_value_map[run_id_str] = anchor + value
+            return value
+
+        if not anchor:
+            # First chunk for this run - nothing to compare against yet.
+            last_value_map[run_id_str] = value
+            return value
+
+        pending = state["pending"]
+        ref = pending[-1] if pending else anchor
+
+        if value == ref:
+            # Unchanged resend - equally consistent with a cumulative
+            # heartbeat (no growth yet) and a delta token repeating itself.
+            # Never confirms either way on its own - keep waiting.
+            pending.append(value)
+            return None
+        elif value.startswith(ref) and len(value) > len(ref):
+            if pending:
+                # A prior chunk was already buffered as ambiguous (equal or
+                # growth) before this one - growth building on top of that is
+                # confirmation, not a lone coincidence. Cumulative confirmed.
+                state["mode"] = "cumulative"
+                state["pending"] = []
+                delta = value[len(anchor) :] or None
                 last_value_map[run_id_str] = value
-            else:
-                mode_map[run_id_str] = "delta"
-                delta = value
-                last_value_map[run_id_str] = last_value + value
-        return delta
+                return delta
+            # This is the very first comparison for the run - a single
+            # prefix-extending chunk is equally consistent with two
+            # independent delta tokens that happen to share a prefix, so it
+            # isn't proof by itself. Buffer and wait for the next chunk.
+            pending.append(value)
+            return None
+        else:
+            # Doesn't extend the buffered chain - a real cumulative resend
+            # would not diverge, so this proves the run streams deltas.
+            state["mode"] = "delta"
+            backlog = "".join(pending) + value
+            state["pending"] = []
+            last_value_map[run_id_str] = anchor + backlog
+            return backlog
+
+    @staticmethod
+    def _flush_stream_delta(
+        run_id_str: str,
+        last_value_map: Dict[str, str],
+        mode_map: Dict[str, dict],
+    ) -> str | None:
+        """Return any text still buffered by `_compute_stream_delta` for a run.
+
+        Call once, when a run ends, so a reply that finishes before its
+        cumulative-vs-delta stream mode ever became unambiguous (e.g. only two
+        chunks total) doesn't leave its last chunk(s) stuck in the buffer and
+        missing from the live stream.
+        """
+        state = mode_map.pop(run_id_str, None)
+        last_value_map.pop(run_id_str, None)
+        if not state or state.get("mode") is not None:
+            return None
+        return "".join(state.get("pending") or []) or None
 
     def on_llm_new_token(
         self, *args, run_id: UUID, parent_run_id: UUID = None, **kwargs
@@ -1830,6 +1890,30 @@ class EliteACallback(BaseCallbackHandler):
             return
         if self.debug:
             log.debug("on_llm_end(%s, %s)", response, kwargs)
+
+        # The run may have ended before `_compute_stream_delta` ever saw enough
+        # chunks to tell cumulative from delta streaming (e.g. a two-chunk
+        # reply) - flush whatever text is still buffered so it isn't silently
+        # dropped from the live stream.
+        run_id_str = str(run_id)
+        flushed_content = self._flush_stream_delta(
+            run_id_str, self._last_sent_content, self._content_stream_mode
+        )
+        flushed_thinking = self._flush_stream_delta(
+            run_id_str, self._last_sent_thinking, self._thinking_stream_mode
+        )
+        if flushed_content or flushed_thinking:
+            self.node_interface.emit(
+                type=EventTypes.agent_llm_chunk,
+                response_metadata={
+                    "tool_run_id": str(run_id),
+                    "metadata": self.pending_llm_requests.get(run_id, {}).get(
+                        "hierarchy_metadata", {}
+                    ),
+                },
+                content=flushed_content or "",
+                thinking=flushed_thinking or "",
+            )
 
         # Track which steps belong to this callback. ``thinking_steps`` spans
         # the whole agent run and may already contain earlier LLM calls.
