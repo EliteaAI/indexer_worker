@@ -709,6 +709,12 @@ class EliteACallback(BaseCallbackHandler):
         # Track last sent content/thinking per run_id to send only deltas (some providers send cumulative)
         self._last_sent_content: Dict[str, str] = {}
         self._last_sent_thinking: Dict[str, str] = {}
+        # Once we see enough chunks to tell whether a run streams cumulative or delta
+        # text, lock that decision in for the rest of the run instead of re-guessing on
+        # every chunk - a delta chunk that happens to repeat the previous one otherwise
+        # looks identical to a cumulative resend and gets silently dropped.
+        self._content_stream_mode: Dict[str, str] = {}
+        self._thinking_stream_mode: Dict[str, str] = {}
         self.current_model_name = "gpt-4"
         self.tool_calls: Dict[str, ToolCallPayload] = {}  # tool_run_id -> payload
         self.llm_start_timestamp: str | None = None
@@ -1541,6 +1547,62 @@ class EliteACallback(BaseCallbackHandler):
         """Callback"""
         self._handle_llm_start(*args, **kwargs)
 
+    @staticmethod
+    def _compute_stream_delta(
+        run_id_str: str,
+        value: str,
+        last_value_map: Dict[str, str],
+        mode_map: Dict[str, str],
+    ) -> str | None:
+        """Compute the incremental delta for a per-run streamed text channel.
+
+        Some providers stream cumulative text (the full string-so-far repeated
+        each chunk) while others stream true deltas (only the new token). Once
+        there is enough evidence to tell which one a run is doing, the decision
+        is locked into `mode_map` for the rest of the run - otherwise a delta
+        chunk that happens to repeat the previous chunk looks identical to a
+        cumulative resend and gets silently dropped.
+        """
+        delta = None
+        last_value = last_value_map.get(run_id_str, "")
+        mode = mode_map.get(run_id_str)
+        if not last_value:
+            # First chunk for this run - not enough evidence yet to tell
+            # cumulative from delta, so just pass it through as-is.
+            delta = value
+            last_value_map[run_id_str] = value
+        elif mode == "cumulative":
+            if value.startswith(last_value):
+                if len(value) > len(last_value):
+                    delta = value[len(last_value) :]
+                # else: same value resent, no new text - skip
+                last_value_map[run_id_str] = value
+            elif last_value.startswith(value):
+                # Shorter than what we've seen - likely a reset, resync
+                last_value_map[run_id_str] = value
+            else:
+                # Diverged entirely - treat as a fresh cumulative sequence
+                delta = value
+                last_value_map[run_id_str] = value
+        elif mode == "delta":
+            # Once a run is known to stream deltas, every non-empty chunk is
+            # new text - even if it happens to repeat the previous chunk.
+            delta = value
+            last_value_map[run_id_str] = last_value + value
+        else:
+            # Second chunk of this run - use it to lock in the mode for the
+            # rest of the run. Only a strictly-longer prefix match is proof of
+            # cumulative streaming; anything else means genuine deltas.
+            if value.startswith(last_value) and len(value) > len(last_value):
+                mode_map[run_id_str] = "cumulative"
+                delta = value[len(last_value) :]
+                last_value_map[run_id_str] = value
+            else:
+                mode_map[run_id_str] = "delta"
+                delta = value
+                last_value_map[run_id_str] = last_value + value
+        return delta
+
     def on_llm_new_token(
         self, *args, run_id: UUID, parent_run_id: UUID = None, **kwargs
     ):
@@ -1629,38 +1691,17 @@ class EliteACallback(BaseCallbackHandler):
         thinking_delta = None
 
         if content:
-            last_content = self._last_sent_content.get(run_id_str, "")
-            if last_content and content.startswith(last_content):
-                # Content is cumulative - extract only the new part
-                if len(content) > len(last_content):
-                    content_delta = content[len(last_content) :]
-                # else: same content, no delta - skip
-                # Store the full cumulative content for next comparison
-                self._last_sent_content[run_id_str] = content
-            elif last_content and last_content.startswith(content):
-                # Content received is shorter - likely a new stream or reset, skip
-                self._last_sent_content[run_id_str] = content
-            else:
-                # Content is a delta (doesn't start with previous) or first chunk
-                content_delta = content
-                # Build up cumulative from deltas
-                self._last_sent_content[run_id_str] = last_content + content
+            content_delta = self._compute_stream_delta(
+                run_id_str, content, self._last_sent_content, self._content_stream_mode
+            )
 
         if thinking:
-            last_thinking = self._last_sent_thinking.get(run_id_str, "")
-            if last_thinking and thinking.startswith(last_thinking):
-                # Thinking is cumulative - extract only the new part
-                if len(thinking) > len(last_thinking):
-                    thinking_delta = thinking[len(last_thinking) :]
-                # Store the full cumulative thinking for next comparison
-                self._last_sent_thinking[run_id_str] = thinking
-            elif last_thinking and last_thinking.startswith(thinking):
-                # Thinking received is shorter - likely a new stream or reset, skip
-                self._last_sent_thinking[run_id_str] = thinking
-            else:
-                # Thinking is a delta or first chunk
-                thinking_delta = thinking
-                self._last_sent_thinking[run_id_str] = last_thinking + thinking
+            thinking_delta = self._compute_stream_delta(
+                run_id_str,
+                thinking,
+                self._last_sent_thinking,
+                self._thinking_stream_mode,
+            )
 
         # Only emit if there's actual non-empty content to send
         # Ensure content_delta and thinking_delta are valid strings (not None, not empty, not "null")
