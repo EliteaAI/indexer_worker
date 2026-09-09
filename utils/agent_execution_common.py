@@ -28,6 +28,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
+from elitea_sdk.runtime.utils.utils import PREDICT_RUN_ID_KWARGS_KEY
+
 from langchain_core.messages import HumanMessage, AIMessage
 
 try:
@@ -1415,6 +1417,8 @@ def build_child_launch_payloads(
                 'version_details': version_details,
             },
         }
+        if parent_kwargs.get(PREDICT_RUN_ID_KWARGS_KEY):
+            child_payload[PREDICT_RUN_ID_KWARGS_KEY] = parent_kwargs[PREDICT_RUN_ID_KWARGS_KEY]
 
         # Keep the spec light for the task result: version_details now lives
         # inside child_payload, no need to carry it twice across the RPC.
@@ -1457,6 +1461,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         # A parked parent emits no full_message, so the reconcile re-invoke is what
         # persists the turn. Never fed to the model.
         'applied_skills',
+        PREDICT_RUN_ID_KWARGS_KEY,
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
     # context_settings is mutated in place at task entry to attach live

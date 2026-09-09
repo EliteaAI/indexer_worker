@@ -73,6 +73,7 @@ from ..utils import parallel_hitl_router, predict_router
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
+from elitea_sdk.runtime.utils.utils import PREDICT_RUN_ID_KWARGS_KEY, PREDICT_RUN_ID_HEADER
 
 # Collect LLM authentication/authorization error types
 _LLM_AUTH_ERRORS = []
@@ -131,6 +132,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             client_args = kwargs.get("llm", {}).get("kwargs", {})
             api_token = kwargs.get("api_token", client_args.get("api_key", None))
             api_extra_headers = kwargs.get("api_extra_headers", client_args.get("api_extra_headers", {}))
+            run_id = kwargs.get(PREDICT_RUN_ID_KWARGS_KEY)
+            if run_id:
+                api_extra_headers = {**api_extra_headers, PREDICT_RUN_ID_HEADER: run_id}
 
             # No-op unless memory is postgres; prefers the parent-resolved value (#6245)
             pgvector_connstr = resolve_pgvector_connstr(
