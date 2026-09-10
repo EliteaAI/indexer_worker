@@ -3,3 +3,7 @@
 azure-identity==1.16.0
 
 langfuse>=3.0.0
+
+# Pylon 1.2.25 preloads typing-extensions 4.15.0. AnyIO 4.15+ requires
+# typing-extensions 4.16 and fails before isolated plugin paths can override it.
+anyio==4.14.0
