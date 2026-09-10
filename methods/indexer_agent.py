@@ -51,6 +51,7 @@ from ..utils.agent_execution_common import (
     create_node_interface,
     ensure_thread_id,
     create_callbacks,
+    create_usage_tool_callback,
     create_langfuse_callback_with_metadata,
     create_suggestion_audit_callback,
     configure_checkpoint_resume,
@@ -418,6 +419,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             callbacks = [elitea_callback, elitea_custom_callback]
             if langfuse_callback:
                 callbacks.append(langfuse_callback)
+
+            # Tool usage rows (#6572): gated by usage.mode only, so they are written
+            # with tracing disabled.
+            usage_tool_callback = create_usage_tool_callback(
+                self.descriptor.config, kwargs, tasknode_task.meta, tasknode_task.id,
+            )
+            if usage_tool_callback:
+                callbacks.append(usage_tool_callback)
 
             # Resolve filepath: image URLs in current turn — single S3 read per image
             user_input, image_thumbnails = resolve_filepath_images(user_input, client)

@@ -61,6 +61,13 @@ from .parallel_dispatch_contract import (
     normalize_hitl_pause,
     split_mcp_auth_interrupts,
 )
+from .usage_tool_callback import UsageToolCallback
+from .usage_tool_events import (
+    build_attribution,
+    enabled as usage_enabled,
+    entity_from_application,
+    ROOT_ENTITY_KWARGS_KEY,
+)
 
 from ..methods.agent_common import (
     execution_error,
@@ -535,6 +542,22 @@ def create_callbacks(
     elitea_custom_callback.parallel_hitl_run_state = parallel_hitl_run_state
 
     return elitea_callback, elitea_custom_callback
+
+
+def create_usage_tool_callback(
+    plugin_config: Dict[str, Any],
+    kwargs: Dict[str, Any],
+    task_meta: Dict[str, Any],
+    task_id: str,
+):
+    """UsageToolCallback when usage metering is on, else None (#6572).
+
+    Separate from create_callbacks because attribution needs the run payload
+    (application identity, conversation_id, run id), not just task_meta.
+    """
+    if not usage_enabled(plugin_config):
+        return None
+    return UsageToolCallback(build_attribution(kwargs, task_meta, task_id))
 
 
 def create_langfuse_callback_with_metadata(
@@ -1420,6 +1443,17 @@ def build_child_launch_payloads(
         if parent_kwargs.get(PREDICT_RUN_ID_KWARGS_KEY):
             child_payload[PREDICT_RUN_ID_KWARGS_KEY] = parent_kwargs[PREDICT_RUN_ID_KWARGS_KEY]
 
+        # Usage attribution (#6572): the child's own 'application' above becomes its
+        # entity_*, so root_* would be lost without an explicit carry. Falling back to
+        # the parent's identity is what makes a first-level child's root the parent;
+        # deeper levels pass the already-resolved root through unchanged.
+        root_entity = (
+            parent_kwargs.get(ROOT_ENTITY_KWARGS_KEY)
+            or entity_from_application(parent_kwargs.get('application'))
+        )
+        if root_entity:
+            child_payload[ROOT_ENTITY_KWARGS_KEY] = root_entity
+
         # Keep the spec light for the task result: version_details now lives
         # inside child_payload, no need to carry it twice across the RPC.
         new_spec = {k: v for k, v in spec.items() if k != 'version_details'}
@@ -1462,6 +1496,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         # persists the turn. Never fed to the model.
         'applied_skills',
         PREDICT_RUN_ID_KWARGS_KEY,
+        ROOT_ENTITY_KWARGS_KEY,
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
     # context_settings is mutated in place at task entry to attach live
