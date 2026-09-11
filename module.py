@@ -235,8 +235,11 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             if not _has_required_nltk_data(nltk_data_target):
                 raise RuntimeError("Required NLTK resources missing after bundle extraction")
         except:  # pylint: disable=W0702
-            from elitea_sdk.runtime.langchain.tools.utils import download_nltk  # pylint: disable=C0415,E0401
-            download_nltk(nltk_data_target)
+            if not nltk_data_target or not _has_required_nltk_data(nltk_data_target):
+                from elitea_sdk.runtime.langchain.tools.utils import download_nltk  # pylint: disable=C0415,E0401
+                download_nltk(nltk_data_target)
+            else:
+                log.warning("Failed to refresh NLTK bundle; using existing data")
         #
         _preload_unstructured_nlp_model()
         #
