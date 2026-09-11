@@ -74,10 +74,6 @@ from ..utils.image_helpers import resolve_filepath_images, resolve_generated_ima
 from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils import parallel_hitl_router, predict_router
-from ..utils.mcp_auth_tools import (
-    _make_mcp_auth_tools,
-    _has_mcp_toolkits,
-)
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -306,22 +302,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             context_settings = kwargs.get("context_settings", {})
             context_settings['callbacks'] = create_summarization_callbacks(node_interface)
 
-            # Always provide mcp_auth_control in chat runs that include MCP toolkits.
-            # This guarantees a single, explicit auth flow for all MCP tool usage.
+            # Forward the browser's current token map on every turn. The SDK adds
+            # mcp_auth_control only when toolkit loading actually receives an OAuth
+            # challenge. Injecting it unconditionally exposes an authorization tool
+            # even when the real MCP tools loaded successfully, which can make the
+            # model request a redundant login for an authenticated toolkit.
             user_declined = kwargs.get('user_declined_mcp_servers') or []
-            app_tool_configs = (
-                (kwargs.get("application") or {}).get("version_details", {}).get("tools")
-                or kwargs.get("tools")
-                or []
-            )
-            has_mcp_toolkits = _has_mcp_toolkits(app_tool_configs)
             raw_mcp_tokens = kwargs.get("mcp_tokens", None)
             mcp_tokens = expand_mcp_token_aliases(raw_mcp_tokens)
-            additional_tools = (
-                _make_mcp_auth_tools(user_declined, app_tool_configs, mcp_tokens=mcp_tokens)
-                if has_mcp_toolkits
-                else []
-            )
 
             # Resolve {{secret.xxx}} placeholders in MCP tool settings before passing to SDK
             if version_details and isinstance(version_details.get("tools"), list):
@@ -371,7 +359,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     "parallel_hitl_max_concurrency", 8,
                 ),
                 project_context=kwargs.get("project_context"),
-                tools=additional_tools if additional_tools else None,
             )
 
             # Create callbacks
