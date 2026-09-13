@@ -305,7 +305,7 @@ def check_missing_index_data_status_event(
         tool_name: str,
         tool_params: dict,
         toolkit_config: dict,
-        elitea_callback,
+        index_status_callback,
         tasknode_task_meta: dict,
         tasknode_task_id: str,
         error_message: str
@@ -321,7 +321,7 @@ def check_missing_index_data_status_event(
         tool_name: Name of the tool that was executed
         tool_params: Parameters passed to the tool
         toolkit_config: Toolkit configuration
-        elitea_callback: Callback that tracks index statuses
+        index_status_callback: Callback that tracks index statuses
         tasknode_task_meta: Task metadata
         tasknode_task_id: Current task ID
         error_message: Error message from the failure
@@ -331,7 +331,7 @@ def check_missing_index_data_status_event(
         return
 
     # Check if SDK already recorded a failed status via EliteACustomCallback
-    index_statuses = getattr(elitea_callback, 'index_statuses', [])
+    index_statuses = getattr(index_status_callback, 'index_statuses', [])
     if any(s.get('state') == 'failed' for s in index_statuses):
         # SDK already emitted the failure status event, nothing to do
         return
@@ -691,7 +691,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             debug_error = clean_test_result.get("debug_error", error_message)
             execution_time = clean_test_result.get("execution_time_seconds", 0.0)
             log.debug(f"Tool clean result: {clean_test_result}")
-            final_result = tool_result if success else error_message
+            tool_produced_a_payload = tool_result is not None
+            final_result = tool_result if tool_produced_a_payload else error_message
             log.debug(f"Tool result (success - '{success}'): {final_result}")
             # Detect content type and prepare formatted content for UI
             content_type, formatted_content = detect_content_type(final_result)
@@ -742,18 +743,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     content=debug_error
                 )
 
-                # Check if index_data status event is missing and emit it if needed
-                # Pass elitea_custom_callback (has index_statuses), not elitea_callback
-                check_missing_index_data_status_event(
-                    node_interface=node_interface,
-                    tool_name=tool_name,
-                    tool_params=tool_params,
-                    toolkit_config=toolkit_config,
-                    elitea_callback=elitea_custom_callback,
-                    tasknode_task_meta=tasknode_task.meta,
-                    tasknode_task_id=tasknode_task.id,
-                    error_message=error_message
-                )
+                if not tool_produced_a_payload:
+                    check_missing_index_data_status_event(
+                        node_interface=node_interface,
+                        tool_name=tool_name,
+                        tool_params=tool_params,
+                        toolkit_config=toolkit_config,
+                        index_status_callback=elitea_custom_callback,
+                        tasknode_task_meta=tasknode_task.meta,
+                        tasknode_task_id=tasknode_task.id,
+                        error_message=error_message
+                    )
 
             # Create full message event using data from SDK (avoid duplication)
             # Clean the additional kwargs to avoid serialization issues
@@ -771,6 +771,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 'test_result': clean_test_result,
                 'execution_time_seconds': execution_time,
                 'is_error': not success,
+                'error': '' if success else error_message,
                 'content_type': content_type  # For toolkit testing page formatting
             }
             if execution_generation:
