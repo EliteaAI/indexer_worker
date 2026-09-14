@@ -838,6 +838,129 @@ class TestSharedUrlDisambiguation(unittest.TestCase):
         self.assertIsNotNone(exc.provided_settings)
         self.assertEqual(exc.provided_settings["mcp_client_id"], "unique-cid")
 
+    # --- Tests using maps produced by the real builder (catches generic "mcp" alias) ---
+
+    def test_real_builder_single_toolkit_url_backfill_resolves(self):
+        """A single configured toolkit registers 'mcp' + its name as aliases.
+
+        URL-based backfill must still resolve because the real builder now stores
+        toolkit_id on all alias entries, so deduplication collapses them to one
+        unique identity even though matched_keys has length > 1.
+        """
+        configs = [
+            {
+                "type": "mcp",
+                "toolkit_name": "github_copilot",
+                "toolkit_id": 101,
+                "settings": {
+                    "url": "https://api.githubcopilot.com/mcp/",
+                    "client_id": "gh-cid",
+                    "client_secret": "gh-secret-1234",
+                },
+            }
+        ]
+        alias_url_map, alias_meta_map = _MAT._build_mcp_server_alias_map(configs)
+        exc = _McpAuthReq("auth", server_url="https://api.githubcopilot.com/mcp")
+        # no toolkit_name / toolkit_id set on exception — falls to URL strategy
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNotNone(
+            exc.provided_settings,
+            "Single toolkit with generic 'mcp' alias must still resolve via URL — "
+            "identity deduplication should collapse multiple alias keys to one toolkit",
+        )
+        self.assertEqual(exc.provided_settings["mcp_client_id"], "gh-cid")
+
+    def test_real_builder_single_toolkit_toolkit_id_on_exc_resolves(self):
+        """toolkit_id on exc picks the right entry even when the alias key is generic 'mcp'."""
+        configs = [
+            {
+                "type": "mcp",
+                "toolkit_name": "github_copilot",
+                "toolkit_id": 101,
+                "settings": {
+                    "url": "https://api.githubcopilot.com/mcp/",
+                    "client_id": "gh-cid",
+                    "client_secret": "gh-secret-1234",
+                },
+            }
+        ]
+        alias_url_map, alias_meta_map = _MAT._build_mcp_server_alias_map(configs)
+        exc = _McpAuthReq("auth", server_url="https://api.githubcopilot.com/mcp")
+        exc.toolkit_id = 101  # type: ignore[attr-defined]
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNotNone(exc.provided_settings)
+        self.assertEqual(exc.provided_settings["mcp_client_id"], "gh-cid")
+
+    def test_real_builder_two_toolkits_same_url_toolkit_id_selects_correct(self):
+        """Two toolkits on same URL: toolkit_id on exc selects correct credentials."""
+        configs = [
+            {
+                "type": "mcp",
+                "toolkit_name": "alpha",
+                "toolkit_id": 10,
+                "settings": {
+                    "url": "https://api.shared.example.com/mcp/",
+                    "client_id": "alpha-cid",
+                    "client_secret": "alpha-secret-1234",
+                },
+            },
+            {
+                "type": "mcp",
+                "toolkit_name": "beta",
+                "toolkit_id": 20,
+                "settings": {
+                    "url": "https://api.shared.example.com/mcp/",
+                    "client_id": "beta-cid",
+                    "client_secret": "beta-secret-5678",
+                },
+            },
+        ]
+        alias_url_map, alias_meta_map = _MAT._build_mcp_server_alias_map(configs)
+        # Reproduce the exact scenario Roman-Mitusov described: exc with toolkit_id=101,
+        # toolkit_name='mcp', alpha URL
+        exc = _McpAuthReq("auth", server_url="https://api.shared.example.com/mcp")
+        exc.toolkit_id = 20  # type: ignore[attr-defined]  — beta's id
+        exc.toolkit_name = "mcp"  # type: ignore[attr-defined]  — generic, as SDK may set
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNotNone(exc.provided_settings)
+        self.assertEqual(
+            exc.provided_settings["mcp_client_id"],
+            "beta-cid",
+            "toolkit_id=20 must select beta-cid, not alpha-cid and not None",
+        )
+
+    def test_real_builder_two_toolkits_same_url_no_id_url_ambiguous(self):
+        """Two toolkits on same URL, no toolkit_id on exc: URL backfill must stay silent."""
+        configs = [
+            {
+                "type": "mcp",
+                "toolkit_name": "alpha",
+                "settings": {
+                    "url": "https://api.shared.example.com/mcp/",
+                    "client_id": "alpha-cid",
+                    "client_secret": "alpha-secret-1234",
+                },
+            },
+            {
+                "type": "mcp",
+                "toolkit_name": "beta",
+                "settings": {
+                    "url": "https://api.shared.example.com/mcp/",
+                    "client_id": "beta-cid",
+                    "client_secret": "beta-secret-5678",
+                },
+            },
+        ]
+        alias_url_map, alias_meta_map = _MAT._build_mcp_server_alias_map(configs)
+        exc = _McpAuthReq("auth", server_url="https://api.shared.example.com/mcp")
+        # toolkit_name is the generic 'mcp' alias — must not select either
+        exc.toolkit_name = "mcp"  # type: ignore[attr-defined]
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNone(
+            exc.provided_settings,
+            "Two toolkits with no toolkit_id and generic toolkit_name — must not attach credentials",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Loader: agent_common.py with minimal stubs
@@ -851,9 +974,13 @@ class TestSharedUrlDisambiguation(unittest.TestCase):
 def _load_agent_common():
     """Load methods/agent_common.py with minimal stubs injected into sys.modules.
 
-    Returns the loaded module, or None if loading fails (so individual tests
-    can skip rather than error if the stub set turns out to be incomplete on
-    a future SDK version).
+    Stubs that would overwrite real SDK modules (elitea_sdk.runtime.utils.trace_limits,
+    elitea_sdk.tools.utils.serialization, elitea_sdk.runtime.langchain.constants) are
+    installed only when the real module is absent, so running the full worker suite with
+    a real SDK checkout does not pollute test_6532_trace_and_panel_serialization.py.
+
+    Returns the loaded module, or None if loading fails (so individual tests can skip
+    rather than error if the stub set is incomplete on a future SDK version).
     """
     import importlib.util as _ilu
 
@@ -864,7 +991,6 @@ def _load_agent_common():
                     "langchain_core.messages", "langchain_core.outputs"):
             sys.modules.setdefault(mod, _t.ModuleType(mod))
 
-        lc = sys.modules["langchain_core"]
         cb = sys.modules["langchain_core.callbacks"]
         msg = sys.modules["langchain_core.messages"]
         out = sys.modules["langchain_core.outputs"]
@@ -886,29 +1012,40 @@ def _load_agent_common():
 
     _ensure_lc()
 
-    # ---- elitea_sdk stubs ---------------------------------------------
+    # ---- elitea_sdk stubs — only install when the real module is absent ----
     import types as _t
+    import re as _re
+
     for pkg in (
         "elitea_sdk", "elitea_sdk.runtime", "elitea_sdk.runtime.utils",
         "elitea_sdk.runtime.langchain", "elitea_sdk.tools", "elitea_sdk.tools.utils",
     ):
         sys.modules.setdefault(pkg, _t.ModuleType(pkg))
 
-    _tl = _t.ModuleType("elitea_sdk.runtime.utils.trace_limits")
-    _tl.TRACE_STEP_FIELD_MAX_CHARS = 10_000
-    _tl.cap_trace_json = lambda v, **_: v
-    _tl.cap_trace_text = lambda v, **_: v
-    sys.modules["elitea_sdk.runtime.utils.trace_limits"] = _tl
+    # trace_limits: only stub when not already provided by the real SDK
+    if "elitea_sdk.runtime.utils.trace_limits" not in sys.modules:
+        _tl = _t.ModuleType("elitea_sdk.runtime.utils.trace_limits")
+        _tl.TRACE_STEP_FIELD_MAX_CHARS = 10_000
+        _tl.cap_trace_json = lambda v, **_: v
+        _tl.cap_trace_text = lambda v, **_: v
+        sys.modules["elitea_sdk.runtime.utils.trace_limits"] = _tl
 
-    _ser = _t.ModuleType("elitea_sdk.tools.utils.serialization")
-    _ser.to_json_primitive = lambda v: str(v)
-    sys.modules["elitea_sdk.tools.utils.serialization"] = _ser
+    # Ensure trace_limits stub has configure_tool_result_limits so it won't break
+    # test_6532 if the stub was already placed by a prior test run in the same session
+    _tl_existing = sys.modules.get("elitea_sdk.runtime.utils.trace_limits")
+    if _tl_existing is not None and not hasattr(_tl_existing, "configure_tool_result_limits"):
+        _tl_existing.configure_tool_result_limits = MagicMock(return_value=None)
 
-    _lc_const = _t.ModuleType("elitea_sdk.runtime.langchain.constants")
-    import re as _re
-    _lc_const.LOAD_SKILL_ALREADY_ACTIVE_RE = _re.compile(r'^Skill "([^"]+)" is already active')
-    _lc_const.LOADED_SKILL_PREFIX_RE = _re.compile(r'^Skill "([^"]+)" is now active')
-    sys.modules["elitea_sdk.runtime.langchain.constants"] = _lc_const
+    if "elitea_sdk.tools.utils.serialization" not in sys.modules:
+        _ser = _t.ModuleType("elitea_sdk.tools.utils.serialization")
+        _ser.to_json_primitive = lambda v: str(v)
+        sys.modules["elitea_sdk.tools.utils.serialization"] = _ser
+
+    if "elitea_sdk.runtime.langchain.constants" not in sys.modules:
+        _lc_const = _t.ModuleType("elitea_sdk.runtime.langchain.constants")
+        _lc_const.LOAD_SKILL_ALREADY_ACTIVE_RE = _re.compile(r'^Skill "([^"]+)" is already active')
+        _lc_const.LOADED_SKILL_PREFIX_RE = _re.compile(r'^Skill "([^"]+)" is now active')
+        sys.modules["elitea_sdk.runtime.langchain.constants"] = _lc_const
 
     # ---- requests stub ------------------------------------------------
     sys.modules.setdefault("requests", _t.ModuleType("requests"))
@@ -917,7 +1054,6 @@ def _load_agent_common():
     import pydantic as _pyd  # noqa: F401  — already imported by mcp_auth_tools loader
 
     # ---- relative deps inside indexer_worker --------------------------
-    # Register the package itself
     for pkg in ("indexer_worker", "indexer_worker.utils", "indexer_worker.methods"):
         if pkg not in sys.modules:
             m = _t.ModuleType(pkg)
@@ -1008,7 +1144,7 @@ def _load_agent_common():
     try:
         _spec.loader.exec_module(_mod)
         return _mod
-    except Exception as e:
+    except Exception:
         # Loading failed — tests that need this will skip with a clear message
         sys.modules.pop(_mod_name, None)
         return None
