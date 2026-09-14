@@ -29,6 +29,7 @@ available. Unlike that module this one writes, hence the fork guard on the
 engine and the ON CONFLICT clause.
 """
 
+import base64
 import json
 import os
 import threading
@@ -50,6 +51,11 @@ ENTITY_TYPE_APPLICATION = "application"
 #: the indexer builds the child payload and pylon_main replays it verbatim, so
 #: unlike PREDICT_RUN_ID_KWARGS_KEY this needs no shared SDK constant.
 ROOT_ENTITY_KWARGS_KEY = "_elitea_root_entity"
+
+#: Carries run_attribution() to the LLM interfaces in pylon_main, which write the
+#: llm rows of the same run. A literal on both sides, like PREDICT_RUN_ID_HEADER
+#: before the SDK held it: the interfaces are separate repos.
+ATTRIBUTION_HEADER = "X-Elitea-Attribution"
 
 #: usage_counter's convention: a NULL cannot take part in a primary key, so
 #: "no individual user" is a sentinel. usage_event.user_id is NOT NULL too.
@@ -152,11 +158,13 @@ def entity_from_application(application):
     }
 
 
-def build_attribution(kwargs, task_meta, task_id):
-    """Everything that is constant for one run, resolved once at task entry."""
+def run_attribution(kwargs):
+    """Which conversation and which entity, from the task payload alone.
+
+    Shared with the llm rows: these same columns ride to the interfaces in
+    ATTRIBUTION_HEADER, so both row kinds of one run are attributed identically.
+    """
     kwargs = kwargs or {}
-    task_meta = task_meta or {}
-    user_context = task_meta.get("user_context") or {}
 
     entity = entity_from_application(kwargs.get("application")) or {}
     root = kwargs.get(ROOT_ENTITY_KWARGS_KEY)
@@ -164,12 +172,6 @@ def build_attribution(kwargs, task_meta, task_id):
         root = entity
 
     return {
-        "task_id": task_id,
-        "project_id": task_meta.get("project_id"),
-        "user_id": user_context.get("user_id") or SYSTEM_USER_ID,
-        "user_email": user_context.get("user_email"),
-        # stamp_predict_run_id sets both the payload key and meta; either serves
-        "run_id": kwargs.get(PREDICT_RUN_ID_KWARGS_KEY) or task_meta.get("platform_run_id"),
         "conversation_id": kwargs.get("conversation_id"),
         "entity_type": entity.get("type"),
         "entity_id": entity.get("id"),
@@ -178,6 +180,41 @@ def build_attribution(kwargs, task_meta, task_id):
         "root_entity_type": root.get("type"),
         "root_entity_id": root.get("id"),
         "root_entity_version_id": root.get("version_id"),
+    }
+
+
+def attribution_header(kwargs):
+    """ATTRIBUTION_HEADER value, or None when the payload names nothing to attribute.
+
+    base64url'd compact JSON: an agent name is free text, and a header carrying it raw
+    could break framing. The reader keeps only the columns it knows, so a pylon_main
+    that predates this ignores the header instead of failing.
+    """
+    columns = {key: value for key, value in run_attribution(kwargs).items() if value is not None}
+    if not columns:
+        return None
+    try:
+        packed = json.dumps(columns, separators=(",", ":"), ensure_ascii=False)
+        return base64.urlsafe_b64encode(packed.encode("utf-8")).decode("ascii").rstrip("=")
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning("usage: cannot encode run attribution: %s", exc)
+        return None
+
+
+def build_attribution(kwargs, task_meta, task_id):
+    """Everything that is constant for one run, resolved once at task entry."""
+    task_meta = task_meta or {}
+    user_context = task_meta.get("user_context") or {}
+
+    return {
+        "task_id": task_id,
+        "project_id": task_meta.get("project_id"),
+        "user_id": user_context.get("user_id") or SYSTEM_USER_ID,
+        "user_email": user_context.get("user_email"),
+        # stamp_predict_run_id sets both the payload key and meta; either serves
+        "run_id": (kwargs or {}).get(PREDICT_RUN_ID_KWARGS_KEY)
+                  or task_meta.get("platform_run_id"),
+        **run_attribution(kwargs),
     }
 
 

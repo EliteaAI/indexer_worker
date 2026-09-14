@@ -74,6 +74,7 @@ from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_co
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
+from ..utils.usage_tool_events import ATTRIBUTION_HEADER, attribution_header
 from ..utils import parallel_hitl_router, predict_router
 
 from pydantic import ValidationError
@@ -127,6 +128,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             run_id = kwargs.get(PREDICT_RUN_ID_KWARGS_KEY)
             if run_id:
                 api_extra_headers = {**api_extra_headers, PREDICT_RUN_ID_HEADER: run_id}
+
+            # Conversation and entity for the llm rows the interface writes; stripped there
+            attribution = attribution_header(kwargs)
+            if attribution:
+                api_extra_headers = {**api_extra_headers, ATTRIBUTION_HEADER: attribution}
 
             # No-op unless memory is postgres; prefers the parent-resolved value (#6245)
             pgvector_connstr = resolve_pgvector_connstr(
