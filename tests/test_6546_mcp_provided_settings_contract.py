@@ -840,51 +840,435 @@ class TestSharedUrlDisambiguation(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: EliteACustomCallback has alias map attributes and on_custom_event
-#        durable path can use them (real attribute wiring, not simulation)
+# Loader: agent_common.py with minimal stubs
+#
+# agent_common.py imports langchain_core, elitea_sdk, requests, pylon and
+# several relative modules. We stub everything needed so EliteACustomCallback
+# (and EliteACallback) can be imported and instantiated in unit tests without
+# a live pylon/indexer environment.
 # ---------------------------------------------------------------------------
 
+def _load_agent_common():
+    """Load methods/agent_common.py with minimal stubs injected into sys.modules.
+
+    Returns the loaded module, or None if loading fails (so individual tests
+    can skip rather than error if the stub set turns out to be incomplete on
+    a future SDK version).
+    """
+    import importlib.util as _ilu
+
+    # ---- langchain_core stubs -----------------------------------------
+    def _ensure_lc():
+        import types as _t
+        for mod in ("langchain_core", "langchain_core.callbacks",
+                    "langchain_core.messages", "langchain_core.outputs"):
+            sys.modules.setdefault(mod, _t.ModuleType(mod))
+
+        lc = sys.modules["langchain_core"]
+        cb = sys.modules["langchain_core.callbacks"]
+        msg = sys.modules["langchain_core.messages"]
+        out = sys.modules["langchain_core.outputs"]
+
+        # BaseCallbackHandler — minimal, enough for __init_subclass__ / super().__init__()
+        if not hasattr(cb, "BaseCallbackHandler"):
+            class _BCH:
+                def __init__(self):
+                    pass
+            cb.BaseCallbackHandler = _BCH
+
+        for cls in ("BaseMessage", "HumanMessage", "AIMessage"):
+            if not hasattr(msg, cls):
+                setattr(msg, cls, MagicMock)
+
+        for cls in ("ChatGenerationChunk", "LLMResult"):
+            if not hasattr(out, cls):
+                setattr(out, cls, MagicMock)
+
+    _ensure_lc()
+
+    # ---- elitea_sdk stubs ---------------------------------------------
+    import types as _t
+    for pkg in (
+        "elitea_sdk", "elitea_sdk.runtime", "elitea_sdk.runtime.utils",
+        "elitea_sdk.runtime.langchain", "elitea_sdk.tools", "elitea_sdk.tools.utils",
+    ):
+        sys.modules.setdefault(pkg, _t.ModuleType(pkg))
+
+    _tl = _t.ModuleType("elitea_sdk.runtime.utils.trace_limits")
+    _tl.TRACE_STEP_FIELD_MAX_CHARS = 10_000
+    _tl.cap_trace_json = lambda v, **_: v
+    _tl.cap_trace_text = lambda v, **_: v
+    sys.modules["elitea_sdk.runtime.utils.trace_limits"] = _tl
+
+    _ser = _t.ModuleType("elitea_sdk.tools.utils.serialization")
+    _ser.to_json_primitive = lambda v: str(v)
+    sys.modules["elitea_sdk.tools.utils.serialization"] = _ser
+
+    _lc_const = _t.ModuleType("elitea_sdk.runtime.langchain.constants")
+    import re as _re
+    _lc_const.LOAD_SKILL_ALREADY_ACTIVE_RE = _re.compile(r'^Skill "([^"]+)" is already active')
+    _lc_const.LOADED_SKILL_PREFIX_RE = _re.compile(r'^Skill "([^"]+)" is now active')
+    sys.modules["elitea_sdk.runtime.langchain.constants"] = _lc_const
+
+    # ---- requests stub ------------------------------------------------
+    sys.modules.setdefault("requests", _t.ModuleType("requests"))
+
+    # ---- pydantic — real pydantic should be available, but ensure BaseModel ----
+    import pydantic as _pyd  # noqa: F401  — already imported by mcp_auth_tools loader
+
+    # ---- relative deps inside indexer_worker --------------------------
+    # Register the package itself
+    for pkg in ("indexer_worker", "indexer_worker.utils", "indexer_worker.methods"):
+        if pkg not in sys.modules:
+            m = _t.ModuleType(pkg)
+            m.__path__ = [str(ROOT / pkg.replace("indexer_worker.", "").replace("indexer_worker", ""))]
+            m.__package__ = pkg
+            sys.modules[pkg] = m
+
+    # constants
+    _const = _t.ModuleType("indexer_worker.utils.constants")
+    _const.DEFAULT_MEMORY_CONFIG = {}
+    sys.modules["indexer_worker.utils.constants"] = _const
+
+    # exceptions
+    _exc_mod = _t.ModuleType("indexer_worker.utils.exceptions")
+
+    class _InternalSDKError(Exception):
+        pass
+
+    _exc_mod.InternalSDKError = _InternalSDKError
+    sys.modules["indexer_worker.utils.exceptions"] = _exc_mod
+
+    # funcs — reuse the existing stub (already registered by _make_stubs)
+    # but extend it with what agent_common needs
+    _funcs = sys.modules.get("indexer_worker.utils.funcs")
+    if _funcs is None:
+        _funcs = _t.ModuleType("indexer_worker.utils.funcs")
+        sys.modules["indexer_worker.utils.funcs"] = _funcs
+    for attr in (
+        "_is_mcp_authorization_required_error",
+        "is_mcp_authorization_required_error",
+        "_is_unresolved_mcp_type",
+        "_mcp_auth_error_to_metadata",
+        "build_parallel_terminal_error",
+        "budget_exceeded_error_code",
+        "extract_finish_reason",
+        "extract_token_usage",
+        "num_tokens_from_messages",
+        "should_emit_output_limit_confirmation",
+    ):
+        if not hasattr(_funcs, attr):
+            setattr(_funcs, attr, MagicMock(return_value={}))
+    if not hasattr(_funcs, "dev_reload_sdk"):
+        _funcs.dev_reload_sdk = lambda *_a, **_k: None
+
+    # node_interface — load the real one; it only needs pydantic + pylon log
+    _ni_mod_name = "indexer_worker.utils.node_interface"
+    if _ni_mod_name not in sys.modules:
+        _ni_spec = _ilu.spec_from_file_location(
+            _ni_mod_name,
+            ROOT / "utils" / "node_interface.py",
+            submodule_search_locations=[],
+        )
+        _ni_mod = _ilu.module_from_spec(_ni_spec)
+        _ni_mod.__package__ = "indexer_worker.utils"
+        sys.modules[_ni_mod_name] = _ni_mod
+        try:
+            _ni_spec.loader.exec_module(_ni_mod)
+        except Exception:
+            # If node_interface.py fails to load, use a minimal stub
+            _ni_mod.NodeEventInterface = MagicMock
+            _ni_mod.NodeEvent = MagicMock
+            _ni_mod.EventTypes = MagicMock()
+            _ni_mod.ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {}
+
+    # parallel_dispatch_contract
+    _pdc = _t.ModuleType("indexer_worker.utils.parallel_dispatch_contract")
+    _pdc.is_fanout_child = lambda _meta: False
+    sys.modules["indexer_worker.utils.parallel_dispatch_contract"] = _pdc
+
+    # mcp_auth_tools — already loaded as _MAT; re-register under the package path
+    _mat_mod_name = "indexer_worker.utils.mcp_auth_tools"
+    if _mat_mod_name not in sys.modules:
+        sys.modules[_mat_mod_name] = _MAT
+
+    # ---- load agent_common itself ------------------------------------
+    _mod_name = "indexer_worker.methods.agent_common"
+    if _mod_name in sys.modules:
+        return sys.modules[_mod_name]
+
+    _spec = _ilu.spec_from_file_location(
+        _mod_name,
+        ROOT / "methods" / "agent_common.py",
+        submodule_search_locations=[],
+    )
+    _mod = _ilu.module_from_spec(_spec)
+    _mod.__package__ = "indexer_worker.methods"
+    sys.modules[_mod_name] = _mod
+    try:
+        _spec.loader.exec_module(_mod)
+        return _mod
+    except Exception as e:
+        # Loading failed — tests that need this will skip with a clear message
+        sys.modules.pop(_mod_name, None)
+        return None
+
+
+_AGENT_COMMON = _load_agent_common()
+
+
+# ---------------------------------------------------------------------------
+# Tests: EliteACustomCallback production-path wiring
+#
+# These tests instantiate the real EliteACustomCallback (and EliteACallback)
+# and invoke the real on_custom_event handler so that attribute defects
+# (AttributeError on missing mcp_alias_* maps) are caught at test time, not
+# in production.
+# ---------------------------------------------------------------------------
+
+def _make_node_interface():
+    """Return a minimal mock NodeEventInterface that records emitted events."""
+    ni = MagicMock()
+    ni.event_node = MagicMock()
+    ni.stream_id = "test-stream-id"
+    ni.payload_additional_kwargs = {}
+    emitted = []
+
+    def _emit(**kwargs):
+        emitted.append(dict(kwargs))
+
+    ni.emit.side_effect = _emit
+    ni._emitted = emitted
+    return ni
+
+
+_SKIP_REAL_CB = _AGENT_COMMON is None
+_SKIP_REASON = "agent_common.py could not be loaded with available stubs"
+
+
 class TestEliteACustomCallbackAliasMapWiring(unittest.TestCase):
-    """EliteACustomCallback must have mcp_alias_url_map and mcp_alias_meta_map initialized."""
+    """Real EliteACustomCallback must have mcp_alias_* attrs and handle on_custom_event correctly."""
 
-    def _make_custom_callback(self):
-        from unittest.mock import MagicMock as _MagicMock
-        ni = _MagicMock()
-        ni.event_node = _MagicMock()
-        # Import agent_common in a way that avoids full pylon bootstrap.
-        # We just need to verify attribute initialization — no need for a live callback.
-        # Use _FakeEliteaCallback as a stand-in for EliteACustomCallback.
-        cb = _FakeEliteaCallback()
-        return cb
+    @unittest.skipIf(_SKIP_REAL_CB, _SKIP_REASON)
+    def test_real_class_has_mcp_alias_maps(self):
+        """EliteACustomCallback.__init__ must initialize mcp_alias_url_map and mcp_alias_meta_map."""
+        EliteACustomCallback = _AGENT_COMMON.EliteACustomCallback
+        ni = _make_node_interface()
+        cb = EliteACustomCallback(
+            node_interface=ni,
+            message_id="msg-1",
+            project_id=1,
+            chat_project_id=1,
+        )
+        self.assertIsInstance(
+            cb.mcp_alias_url_map, dict,
+            "mcp_alias_url_map not initialized — on_custom_event will AttributeError",
+        )
+        self.assertIsInstance(
+            cb.mcp_alias_meta_map, dict,
+            "mcp_alias_meta_map not initialized — on_custom_event will AttributeError",
+        )
 
-    def test_custom_callback_has_mcp_alias_maps(self):
-        """EliteACustomCallback must expose mcp_alias_url_map and mcp_alias_meta_map as empty dicts."""
-        cb = self._make_custom_callback()
+    @unittest.skipIf(_SKIP_REAL_CB, _SKIP_REASON)
+    def test_real_class_also_has_maps_on_elitea_callback(self):
+        """EliteACallback.__init__ must also initialize both alias map attributes."""
+        EliteACallback = _AGENT_COMMON.EliteACallback
+        ni = _make_node_interface()
+        cb = EliteACallback(
+            node_interface=ni,
+            message_id="msg-1",
+            project_id=1,
+            chat_project_id=1,
+        )
         self.assertIsInstance(cb.mcp_alias_url_map, dict)
         self.assertIsInstance(cb.mcp_alias_meta_map, dict)
 
-    def test_backfill_dict_works_with_custom_callback_maps(self):
-        """on_custom_event parallel_hitl path must not raise AttributeError."""
-        alias_url_map = {"my_mcp": "https://api.mcp.example.com/mcp/"}
-        alias_meta_map = {"my_mcp": {"provided_settings": {"mcp_client_id": "cid", "mcp_client_secret": "****xyz1"}}}
-        cb = _FakeEliteaCallback(alias_url_map=alias_url_map, alias_meta_map=alias_meta_map)
+    @unittest.skipIf(_SKIP_REAL_CB, _SKIP_REASON)
+    def test_on_custom_event_parallel_hitl_interrupt_emits_mcp_authorization_required(self):
+        """Real on_custom_event must emit mcp_authorization_required with provided_settings.
 
-        item = {"server_url": "https://api.mcp.example.com/mcp", "toolkit_name": "my_mcp"}
-        # Simulate what on_custom_event does:
-        result = _MAT.backfill_mcp_provided_settings_dict(
-            item, cb.mcp_alias_url_map, cb.mcp_alias_meta_map
+        This test exercises the PRODUCTION code path that previously raised
+        AttributeError when mcp_alias_url_map / mcp_alias_meta_map were absent
+        from EliteACustomCallback.
+        """
+        EliteACustomCallback = _AGENT_COMMON.EliteACustomCallback
+        ni = _make_node_interface()
+        cb = EliteACustomCallback(
+            node_interface=ni,
+            message_id="msg-1",
+            project_id=1,
+            chat_project_id=1,
         )
-        self.assertIn("provided_settings", result)
-        self.assertEqual(result["provided_settings"]["mcp_client_id"], "cid")
+        # Populate alias maps (normally done by indexer_agent after create_callbacks)
+        cb.mcp_alias_url_map = {"my_mcp": "https://api.mcp.example.com/mcp/"}
+        cb.mcp_alias_meta_map = {
+            "my_mcp": {
+                "provided_settings": {
+                    "mcp_client_id": "real-cid",
+                    "mcp_client_secret": "****1234",
+                }
+            }
+        }
 
-    def test_shared_url_no_attribute_error_when_maps_empty(self):
-        """With empty alias maps, backfill returns item unchanged without raising."""
-        cb = _FakeEliteaCallback()
-        item = {"server_url": "https://api.mcp.example.com/mcp"}
-        result = _MAT.backfill_mcp_provided_settings_dict(
-            item, cb.mcp_alias_url_map, cb.mcp_alias_meta_map
+        # Simulate the durable parallel_hitl_interrupt event that the SDK fires
+        interrupt_item = {
+            "guardrail_type": "mcp_auth",
+            "message": "MCP auth required",
+            "toolkit_name": "my_mcp",
+            "server_url": "https://api.mcp.example.com/mcp",  # no trailing slash
+        }
+        event_data = {
+            "hitl_interrupts": [interrupt_item],
+            "root_thread_id": "root-thread-1",
+        }
+
+        # Must not raise AttributeError on mcp_alias_url_map / mcp_alias_meta_map
+        try:
+            cb.on_custom_event(
+                name="parallel_hitl_interrupt",
+                data=event_data,
+                run_id=MagicMock(),
+                tags=[],
+                metadata={},
+                kwargs={},
+            )
+        except AttributeError as e:
+            self.fail(
+                f"on_custom_event raised AttributeError — alias map not initialized: {e}"
+            )
+
+        # The emitted event must include provided_settings
+        emitted = ni._emitted
+        mcp_events = [e for e in emitted if e.get("type") == "mcp_authorization_required"]
+        self.assertGreater(
+            len(mcp_events), 0,
+            "Expected at least one mcp_authorization_required event to be emitted",
         )
-        self.assertNotIn("provided_settings", result)
+        meta = mcp_events[0].get("response_metadata", {})
+        self.assertIn(
+            "provided_settings", meta,
+            "provided_settings must be present in mcp_authorization_required response_metadata",
+        )
+        self.assertEqual(meta["provided_settings"]["mcp_client_id"], "real-cid")
+
+    @unittest.skipIf(_SKIP_REAL_CB, _SKIP_REASON)
+    def test_on_custom_event_does_not_overwrite_sdk_provided_settings(self):
+        """SDK-supplied provided_settings on the interrupt item must be preserved unchanged.
+
+        When the SDK already forwards exact provided_settings on the interrupt dict,
+        the worker must serialize it as-is without substituting credentials from the
+        alias map (which could belong to a different toolkit).
+        """
+        EliteACustomCallback = _AGENT_COMMON.EliteACustomCallback
+        ni = _make_node_interface()
+        cb = EliteACustomCallback(
+            node_interface=ni,
+            message_id="msg-2",
+            project_id=1,
+            chat_project_id=1,
+        )
+        # Populate alias maps with DIFFERENT credentials to verify they are not substituted
+        cb.mcp_alias_url_map = {"my_mcp": "https://api.mcp.example.com/mcp/"}
+        cb.mcp_alias_meta_map = {
+            "my_mcp": {
+                "provided_settings": {
+                    "mcp_client_id": "alias-map-cid",
+                    "mcp_client_secret": "****alias",
+                }
+            }
+        }
+
+        # SDK already provides exact settings on the interrupt item
+        interrupt_item = {
+            "guardrail_type": "mcp_auth",
+            "message": "MCP auth required",
+            "toolkit_name": "my_mcp",
+            "server_url": "https://api.mcp.example.com/mcp",
+            "provided_settings": {
+                "mcp_client_id": "sdk-exact-cid",
+                "mcp_client_secret": "****sdkx",
+            },
+        }
+        event_data = {
+            "hitl_interrupts": [interrupt_item],
+            "root_thread_id": "root-thread-2",
+        }
+
+        cb.on_custom_event(
+            name="parallel_hitl_interrupt",
+            data=event_data,
+            run_id=MagicMock(),
+            tags=[],
+            metadata={},
+            kwargs={},
+        )
+
+        emitted = ni._emitted
+        mcp_events = [e for e in emitted if e.get("type") == "mcp_authorization_required"]
+        self.assertGreater(len(mcp_events), 0)
+        meta = mcp_events[0].get("response_metadata", {})
+        self.assertEqual(
+            meta.get("provided_settings", {}).get("mcp_client_id"),
+            "sdk-exact-cid",
+            "SDK-supplied provided_settings must not be replaced by alias-map credentials",
+        )
+
+    @unittest.skipIf(_SKIP_REAL_CB, _SKIP_REASON)
+    def test_on_custom_event_shared_url_ambiguity_does_not_attach_wrong_credentials(self):
+        """Two toolkits on one URL: only exact toolkit_name match may attach credentials.
+
+        When the SDK does not forward provided_settings and two toolkits share the same
+        server URL, the worker must not attach credentials from the wrong toolkit.
+        If toolkit_name is present it resolves unambiguously; URL alone must never select.
+        """
+        EliteACustomCallback = _AGENT_COMMON.EliteACustomCallback
+        ni = _make_node_interface()
+        cb = EliteACustomCallback(
+            node_interface=ni,
+            message_id="msg-3",
+            project_id=1,
+            chat_project_id=1,
+        )
+        # alpha and beta share one URL — different OAuth clients
+        cb.mcp_alias_url_map = {
+            "alpha": "https://api.shared.example.com/mcp/",
+            "beta": "https://api.shared.example.com/mcp/",
+        }
+        cb.mcp_alias_meta_map = {
+            "alpha": {"provided_settings": {"mcp_client_id": "alpha-client", "mcp_client_secret": "****aaaa"}},
+            "beta": {"provided_settings": {"mcp_client_id": "beta-client", "mcp_client_secret": "****bbbb"}},
+        }
+
+        # beta requests auth — must receive beta-client, not alpha-client, not None
+        interrupt_item = {
+            "guardrail_type": "mcp_auth",
+            "message": "MCP auth required",
+            "toolkit_name": "beta",
+            "server_url": "https://api.shared.example.com/mcp",
+        }
+        event_data = {
+            "hitl_interrupts": [interrupt_item],
+            "root_thread_id": "root-thread-3",
+        }
+
+        cb.on_custom_event(
+            name="parallel_hitl_interrupt",
+            data=event_data,
+            run_id=MagicMock(),
+            tags=[],
+            metadata={},
+            kwargs={},
+        )
+
+        mcp_events = [e for e in ni._emitted if e.get("type") == "mcp_authorization_required"]
+        self.assertGreater(len(mcp_events), 0)
+        meta = mcp_events[0].get("response_metadata", {})
+        ps = meta.get("provided_settings", {})
+        self.assertEqual(
+            ps.get("mcp_client_id"),
+            "beta-client",
+            "beta toolkit must receive beta credentials, not alpha's or None",
+        )
 
 
 if __name__ == "__main__":
