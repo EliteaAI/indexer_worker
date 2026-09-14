@@ -20,11 +20,75 @@ import pathlib
 import sys
 import types
 import unittest
+from contextlib import contextmanager
 from typing import Dict, Optional, Any
 from urllib.parse import urlparse
 from unittest.mock import MagicMock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+# ---------------------------------------------------------------------------
+# sys.modules isolation helper
+#
+# The only stubs that MUST NOT persist in sys.modules are the elitea_sdk.*
+# ones: when the full worker suite runs with a real SDK checkout those stubs
+# would replace genuine modules and break tests that import from the real SDK
+# (e.g. test_6532_trace_and_panel_serialization.py).
+#
+# Infrastructure stubs (pylon.*, langchain_core.*, indexer_worker.*) have no
+# real counterpart on this path and must stay in sys.modules so that Python's
+# import machinery does not try to load the real indexer_worker/__init__.py
+# (which depends on pylon and would fail outside a container).
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _sdk_isolated_import():
+    """Snapshot elitea_sdk.* entries, yield, then restore only those entries.
+
+    All other sys.modules changes (pylon, langchain_core, indexer_worker stubs)
+    persist after the block — they are harmless and required so pytest's own
+    import setup does not try to exec the real package __init__.py files.
+
+    Usage::
+
+        with _sdk_isolated_import():
+            sys.modules["elitea_sdk.foo"] = stub
+            mod = _exec_module_from_file(...)
+        # elitea_sdk.* restored to pre-block state; everything else untouched.
+    """
+    sdk_before = {k: v for k, v in sys.modules.items() if k.startswith("elitea_sdk")}
+    try:
+        yield
+    finally:
+        # Remove any elitea_sdk.* keys added during the block.
+        for key in list(sys.modules):
+            if key.startswith("elitea_sdk") and key not in sdk_before:
+                del sys.modules[key]
+        # Restore elitea_sdk.* entries that existed before (e.g. real SDK modules).
+        sys.modules.update(sdk_before)
+
+
+def _exec_module_from_file(module_name: str, file_path: pathlib.Path, package: str):
+    """Load *file_path* as *module_name* without persisting it in sys.modules.
+
+    The module is registered in sys.modules only while its body is executing
+    (required so that intra-package relative imports resolve). After exec it is
+    removed again; the returned module object keeps everything alive by reference.
+    """
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        file_path,
+        submodule_search_locations=[],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = package
+    sys.modules[module_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop(module_name, None)
+    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -88,15 +152,14 @@ class _McpAuthReq(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Minimal _build_mcp_server_alias_map extracted from mcp_auth_tools.py.
-#
-# We load the real module rather than copying, since _build_mcp_server_alias_map
-# itself has no heavy imports — only funcs helpers and elitea_sdk.mcp_oauth.
-# We inject stubs for those so the module loads cleanly.
+# Stub builders — return a mapping of module-name → module object.
+# Callers install them into sys.modules inside an _isolated_import() block.
 # ---------------------------------------------------------------------------
 
-def _make_stubs():
-    """Register all stub modules needed for mcp_auth_tools.py to import."""
+def _build_mcp_auth_tools_stubs() -> Dict[str, types.ModuleType]:
+    """Return stubs required to exec mcp_auth_tools.py."""
+    stubs: Dict[str, types.ModuleType] = {}
+
     pylon = types.ModuleType("pylon")
     pylon_core = types.ModuleType("pylon.core")
     pylon_tools = types.ModuleType("pylon.core.tools")
@@ -106,32 +169,30 @@ def _make_stubs():
         info=lambda *_a, **_k: None,
         warning=lambda *_a, **_k: None,
     )
-    sys.modules.update({"pylon": pylon, "pylon.core": pylon_core, "pylon.core.tools": pylon_tools})
+    stubs.update({"pylon": pylon, "pylon.core": pylon_core, "pylon.core.tools": pylon_tools})
 
     lc_tools = types.ModuleType("langchain_core.tools")
     lc_tools.StructuredTool = MagicMock
-    sys.modules.setdefault("langchain_core", types.ModuleType("langchain_core"))
-    sys.modules["langchain_core.tools"] = lc_tools
+    stubs["langchain_core"] = stubs.get("langchain_core") or types.ModuleType("langchain_core")
+    stubs["langchain_core.tools"] = lc_tools
 
-    pydantic_mod = sys.modules.get("pydantic") or types.ModuleType("pydantic")
-    if not hasattr(pydantic_mod, "BaseModel"):
-        pydantic_mod.BaseModel = object
-    sys.modules["pydantic"] = pydantic_mod
+    stubs["pydantic"] = sys.modules.get("pydantic") or types.ModuleType("pydantic")
+    if not hasattr(stubs["pydantic"], "BaseModel"):
+        stubs["pydantic"].BaseModel = object  # type: ignore[attr-defined]
 
     for pkg in ("elitea_sdk", "elitea_sdk.runtime", "elitea_sdk.runtime.utils"):
-        sys.modules.setdefault(pkg, types.ModuleType(pkg))
+        stubs[pkg] = types.ModuleType(pkg)
 
     mcp_oauth_mod = types.ModuleType("elitea_sdk.runtime.utils.mcp_oauth")
-    mcp_oauth_mod.McpAuthorizationRequired = _McpAuthReq
-    mcp_oauth_mod.infer_authorization_servers_from_realm = lambda *_a, **_k: []
-    mcp_oauth_mod.build_mcp_auth_decision_result = lambda **kw: str(kw)
-    sys.modules["elitea_sdk.runtime.utils.mcp_oauth"] = mcp_oauth_mod
+    mcp_oauth_mod.McpAuthorizationRequired = _McpAuthReq  # type: ignore[attr-defined]
+    mcp_oauth_mod.infer_authorization_servers_from_realm = lambda *_a, **_k: []  # type: ignore[attr-defined]
+    mcp_oauth_mod.build_mcp_auth_decision_result = lambda **kw: str(kw)  # type: ignore[attr-defined]
+    stubs["elitea_sdk.runtime.utils.mcp_oauth"] = mcp_oauth_mod
 
-    # Build a minimal funcs stub exposing the helpers mcp_auth_tools needs
     funcs_stub = types.ModuleType("indexer_worker.utils.funcs")
-    funcs_stub.normalize_mcp_server_url = _normalize_mcp_server_url
-    funcs_stub.mask_secret = _mask_secret
-    funcs_stub._is_http_url = _is_http_url
+    funcs_stub.normalize_mcp_server_url = _normalize_mcp_server_url  # type: ignore[attr-defined]
+    funcs_stub.mask_secret = _mask_secret  # type: ignore[attr-defined]
+    funcs_stub._is_http_url = _is_http_url  # type: ignore[attr-defined]
 
     def _extract_mcp_server_url(settings):
         if not isinstance(settings, dict):
@@ -142,47 +203,43 @@ def _make_stubs():
                 return val
         return None
 
-    def normalize_mcp_toolkit_type(tool_type, server_name=""):
-        return tool_type
+    funcs_stub._extract_mcp_server_url = _extract_mcp_server_url  # type: ignore[attr-defined]
+    funcs_stub.normalize_mcp_toolkit_type = lambda tool_type, server_name="": tool_type  # type: ignore[attr-defined]
+    funcs_stub.get_mcp_server_settings = lambda alias: {}  # type: ignore[attr-defined]
+    funcs_stub.is_mcp_authorization_required_error = lambda e: isinstance(e, _McpAuthReq)  # type: ignore[attr-defined]
+    funcs_stub._is_unresolved_mcp_type = lambda t: t in (None, "", "mcp_config")  # type: ignore[attr-defined]
+    stubs["indexer_worker.utils.funcs"] = funcs_stub
+    stubs["indexer_worker.utils"] = types.ModuleType("indexer_worker.utils")
+    stubs["indexer_worker"] = types.ModuleType("indexer_worker")
 
-    def get_mcp_server_settings(alias):
-        return {}
-
-    funcs_stub._extract_mcp_server_url = _extract_mcp_server_url
-    funcs_stub.normalize_mcp_toolkit_type = normalize_mcp_toolkit_type
-    funcs_stub.get_mcp_server_settings = get_mcp_server_settings
-    funcs_stub.is_mcp_authorization_required_error = lambda e: isinstance(e, _McpAuthReq)
-    funcs_stub._is_unresolved_mcp_type = lambda t: t in (None, "", "mcp_config")
-    sys.modules["indexer_worker.utils.funcs"] = funcs_stub
-    sys.modules.setdefault("indexer_worker.utils", types.ModuleType("indexer_worker.utils"))
+    return stubs
 
 
 def _load_mcp_auth_tools():
-    """Load mcp_auth_tools.py with stubs injected into sys.modules.
+    """Load mcp_auth_tools.py with SDK stubs isolated.
 
-    mcp_auth_tools.py uses relative imports (from .funcs import ...), so we must
-    register it under its canonical package path so the import machinery resolves
-    relative references correctly.
+    elitea_sdk.* stubs are removed from sys.modules after the module body
+    executes so they do not shadow real SDK modules when the full worker suite
+    runs with a real SDK checkout.  Infrastructure stubs (pylon, indexer_worker,
+    langchain_core) remain because there is no real counterpart on this path.
     """
-    _make_stubs()
-    # Register parent packages so relative imports work
-    for pkg in ("indexer_worker", "indexer_worker.utils"):
-        if pkg not in sys.modules:
-            m = types.ModuleType(pkg)
-            m.__path__ = [str(ROOT / pkg.split(".")[-1])]
-            m.__package__ = pkg
-            sys.modules[pkg] = m
+    with _sdk_isolated_import():
+        stubs = _build_mcp_auth_tools_stubs()
+        sys.modules.update(stubs)
 
-    module_name = "indexer_worker.utils.mcp_auth_tools"
-    spec = importlib.util.spec_from_file_location(
-        module_name,
-        ROOT / "utils" / "mcp_auth_tools.py",
-        submodule_search_locations=[],
-    )
-    mod = importlib.util.module_from_spec(spec)
-    mod.__package__ = "indexer_worker.utils"
-    sys.modules[module_name] = mod
-    spec.loader.exec_module(mod)
+        # Register parent packages so relative imports resolve correctly.
+        for pkg in ("indexer_worker", "indexer_worker.utils"):
+            if pkg not in sys.modules:
+                m = types.ModuleType(pkg)
+                m.__path__ = [str(ROOT / pkg.split(".")[-1])]
+                m.__package__ = pkg
+                sys.modules[pkg] = m
+
+        mod = _exec_module_from_file(
+            "indexer_worker.utils.mcp_auth_tools",
+            ROOT / "utils" / "mcp_auth_tools.py",
+            "indexer_worker.utils",
+        )
     return mod
 
 
@@ -971,120 +1028,128 @@ class TestSharedUrlDisambiguation(unittest.TestCase):
 # a live pylon/indexer environment.
 # ---------------------------------------------------------------------------
 
-def _load_agent_common():
-    """Load methods/agent_common.py with minimal stubs injected into sys.modules.
+def _build_agent_common_stubs(mat_mod) -> Dict[str, types.ModuleType]:
+    """Return the stub mapping required to exec agent_common.py.
 
-    Stubs that would overwrite real SDK modules (elitea_sdk.runtime.utils.trace_limits,
-    elitea_sdk.tools.utils.serialization, elitea_sdk.runtime.langchain.constants) are
-    installed only when the real module is absent, so running the full worker suite with
-    a real SDK checkout does not pollute test_6532_trace_and_panel_serialization.py.
-
-    Returns the loaded module, or None if loading fails (so individual tests can skip
-    rather than error if the stub set is incomplete on a future SDK version).
+    All stubs are created fresh; none are read from the current sys.modules,
+    so the returned mapping is always self-contained and safe to install inside
+    an _isolated_import() block.
     """
-    import importlib.util as _ilu
-
-    # ---- langchain_core stubs -----------------------------------------
-    def _ensure_lc():
-        import types as _t
-        for mod in ("langchain_core", "langchain_core.callbacks",
-                    "langchain_core.messages", "langchain_core.outputs"):
-            sys.modules.setdefault(mod, _t.ModuleType(mod))
-
-        cb = sys.modules["langchain_core.callbacks"]
-        msg = sys.modules["langchain_core.messages"]
-        out = sys.modules["langchain_core.outputs"]
-
-        # BaseCallbackHandler — minimal, enough for __init_subclass__ / super().__init__()
-        if not hasattr(cb, "BaseCallbackHandler"):
-            class _BCH:
-                def __init__(self):
-                    pass
-            cb.BaseCallbackHandler = _BCH
-
-        for cls in ("BaseMessage", "HumanMessage", "AIMessage"):
-            if not hasattr(msg, cls):
-                setattr(msg, cls, MagicMock)
-
-        for cls in ("ChatGenerationChunk", "LLMResult"):
-            if not hasattr(out, cls):
-                setattr(out, cls, MagicMock)
-
-    _ensure_lc()
-
-    # ---- elitea_sdk stubs — only install when the real module is absent ----
-    import types as _t
     import re as _re
 
+    stubs: Dict[str, types.ModuleType] = {}
+
+    # pylon
+    pylon = types.ModuleType("pylon")
+    pylon_core = types.ModuleType("pylon.core")
+    pylon_tools = types.ModuleType("pylon.core.tools")
+    pylon_tools.log = types.SimpleNamespace(  # type: ignore[attr-defined]
+        error=lambda *_a, **_k: None,
+        debug=lambda *_a, **_k: None,
+        info=lambda *_a, **_k: None,
+        warning=lambda *_a, **_k: None,
+    )
+    stubs.update({"pylon": pylon, "pylon.core": pylon_core, "pylon.core.tools": pylon_tools})
+
+    # langchain_core
+    for mod_name in ("langchain_core", "langchain_core.callbacks",
+                     "langchain_core.messages", "langchain_core.outputs"):
+        stubs[mod_name] = types.ModuleType(mod_name)
+
+    cb = stubs["langchain_core.callbacks"]
+
+    class _BCH:
+        def __init__(self):
+            pass
+
+    cb.BaseCallbackHandler = _BCH  # type: ignore[attr-defined]
+
+    msg = stubs["langchain_core.messages"]
+    for cls in ("BaseMessage", "HumanMessage", "AIMessage"):
+        setattr(msg, cls, MagicMock)
+
+    out = stubs["langchain_core.outputs"]
+    for cls in ("ChatGenerationChunk", "LLMResult"):
+        setattr(out, cls, MagicMock)
+
+    # elitea_sdk — always build fresh stubs, never borrow from sys.modules
     for pkg in (
         "elitea_sdk", "elitea_sdk.runtime", "elitea_sdk.runtime.utils",
         "elitea_sdk.runtime.langchain", "elitea_sdk.tools", "elitea_sdk.tools.utils",
     ):
-        sys.modules.setdefault(pkg, _t.ModuleType(pkg))
+        stubs[pkg] = types.ModuleType(pkg)
 
-    # trace_limits: only stub when not already provided by the real SDK
-    if "elitea_sdk.runtime.utils.trace_limits" not in sys.modules:
-        _tl = _t.ModuleType("elitea_sdk.runtime.utils.trace_limits")
-        _tl.TRACE_STEP_FIELD_MAX_CHARS = 10_000
-        _tl.cap_trace_json = lambda v, **_: v
-        _tl.cap_trace_text = lambda v, **_: v
-        sys.modules["elitea_sdk.runtime.utils.trace_limits"] = _tl
+    tl = types.ModuleType("elitea_sdk.runtime.utils.trace_limits")
+    tl.TRACE_STEP_FIELD_MAX_CHARS = 10_000  # type: ignore[attr-defined]
+    tl.cap_trace_json = lambda v, **_: v  # type: ignore[attr-defined]
+    tl.cap_trace_text = lambda v, **_: v  # type: ignore[attr-defined]
+    tl.configure_tool_result_limits = MagicMock(return_value=None)  # type: ignore[attr-defined]
+    stubs["elitea_sdk.runtime.utils.trace_limits"] = tl
 
-    # Ensure trace_limits stub has configure_tool_result_limits so it won't break
-    # test_6532 if the stub was already placed by a prior test run in the same session
-    _tl_existing = sys.modules.get("elitea_sdk.runtime.utils.trace_limits")
-    if _tl_existing is not None and not hasattr(_tl_existing, "configure_tool_result_limits"):
-        _tl_existing.configure_tool_result_limits = MagicMock(return_value=None)
+    ser = types.ModuleType("elitea_sdk.tools.utils.serialization")
+    ser.to_json_primitive = lambda v: str(v)  # type: ignore[attr-defined]
+    stubs["elitea_sdk.tools.utils.serialization"] = ser
 
-    if "elitea_sdk.tools.utils.serialization" not in sys.modules:
-        _ser = _t.ModuleType("elitea_sdk.tools.utils.serialization")
-        _ser.to_json_primitive = lambda v: str(v)
-        sys.modules["elitea_sdk.tools.utils.serialization"] = _ser
+    lc_const = types.ModuleType("elitea_sdk.runtime.langchain.constants")
+    lc_const.LOAD_SKILL_ALREADY_ACTIVE_RE = _re.compile(r'^Skill "([^"]+)" is already active')  # type: ignore[attr-defined]
+    lc_const.LOADED_SKILL_PREFIX_RE = _re.compile(r'^Skill "([^"]+)" is now active')  # type: ignore[attr-defined]
+    stubs["elitea_sdk.runtime.langchain.constants"] = lc_const
 
-    if "elitea_sdk.runtime.langchain.constants" not in sys.modules:
-        _lc_const = _t.ModuleType("elitea_sdk.runtime.langchain.constants")
-        _lc_const.LOAD_SKILL_ALREADY_ACTIVE_RE = _re.compile(r'^Skill "([^"]+)" is already active')
-        _lc_const.LOADED_SKILL_PREFIX_RE = _re.compile(r'^Skill "([^"]+)" is now active')
-        sys.modules["elitea_sdk.runtime.langchain.constants"] = _lc_const
+    mcp_oauth_mod = types.ModuleType("elitea_sdk.runtime.utils.mcp_oauth")
+    mcp_oauth_mod.McpAuthorizationRequired = _McpAuthReq  # type: ignore[attr-defined]
+    mcp_oauth_mod.infer_authorization_servers_from_realm = lambda *_a, **_k: []  # type: ignore[attr-defined]
+    mcp_oauth_mod.build_mcp_auth_decision_result = lambda **kw: str(kw)  # type: ignore[attr-defined]
+    stubs["elitea_sdk.runtime.utils.mcp_oauth"] = mcp_oauth_mod
 
-    # ---- requests stub ------------------------------------------------
-    sys.modules.setdefault("requests", _t.ModuleType("requests"))
+    # requests
+    stubs["requests"] = types.ModuleType("requests")
 
-    # ---- pydantic — real pydantic should be available, but ensure BaseModel ----
-    import pydantic as _pyd  # noqa: F401  — already imported by mcp_auth_tools loader
+    # pydantic — use the real one if present, otherwise a bare stub
+    stubs["pydantic"] = sys.modules.get("pydantic") or types.ModuleType("pydantic")
 
-    # ---- relative deps inside indexer_worker --------------------------
+    # indexer_worker packages
     for pkg in ("indexer_worker", "indexer_worker.utils", "indexer_worker.methods"):
-        if pkg not in sys.modules:
-            m = _t.ModuleType(pkg)
-            m.__path__ = [str(ROOT / pkg.replace("indexer_worker.", "").replace("indexer_worker", ""))]
-            m.__package__ = pkg
-            sys.modules[pkg] = m
+        m = types.ModuleType(pkg)
+        m.__path__ = [str(ROOT / pkg.replace("indexer_worker.", "").replace("indexer_worker", ""))]  # type: ignore[attr-defined]
+        m.__package__ = pkg
+        stubs[pkg] = m
 
     # constants
-    _const = _t.ModuleType("indexer_worker.utils.constants")
-    _const.DEFAULT_MEMORY_CONFIG = {}
-    sys.modules["indexer_worker.utils.constants"] = _const
+    const_mod = types.ModuleType("indexer_worker.utils.constants")
+    const_mod.DEFAULT_MEMORY_CONFIG = {}  # type: ignore[attr-defined]
+    stubs["indexer_worker.utils.constants"] = const_mod
 
     # exceptions
-    _exc_mod = _t.ModuleType("indexer_worker.utils.exceptions")
+    exc_mod = types.ModuleType("indexer_worker.utils.exceptions")
 
     class _InternalSDKError(Exception):
         pass
 
-    _exc_mod.InternalSDKError = _InternalSDKError
-    sys.modules["indexer_worker.utils.exceptions"] = _exc_mod
+    exc_mod.InternalSDKError = _InternalSDKError  # type: ignore[attr-defined]
+    stubs["indexer_worker.utils.exceptions"] = exc_mod
 
-    # funcs — reuse the existing stub (already registered by _make_stubs)
-    # but extend it with what agent_common needs
-    _funcs = sys.modules.get("indexer_worker.utils.funcs")
-    if _funcs is None:
-        _funcs = _t.ModuleType("indexer_worker.utils.funcs")
-        sys.modules["indexer_worker.utils.funcs"] = _funcs
+    # funcs — superset of both mcp_auth_tools and agent_common needs
+    def _extract_mcp_server_url_ac(settings):
+        if not isinstance(settings, dict):
+            return None
+        for key in ("url", "server_url", "base_url", "endpoint"):
+            val = settings.get(key)
+            if isinstance(val, str) and _is_http_url(val):
+                return val
+        return None
+
+    funcs = types.ModuleType("indexer_worker.utils.funcs")
+    funcs.normalize_mcp_server_url = _normalize_mcp_server_url  # type: ignore[attr-defined]
+    funcs.mask_secret = _mask_secret  # type: ignore[attr-defined]
+    funcs._is_http_url = _is_http_url  # type: ignore[attr-defined]
+    funcs._extract_mcp_server_url = _extract_mcp_server_url_ac  # type: ignore[attr-defined]
+    funcs.normalize_mcp_toolkit_type = lambda tool_type, server_name="": tool_type  # type: ignore[attr-defined]
+    funcs.get_mcp_server_settings = lambda alias: {}  # type: ignore[attr-defined]
+    funcs._is_unresolved_mcp_type = lambda t: t in (None, "", "mcp_config")  # type: ignore[attr-defined]
+    funcs.dev_reload_sdk = lambda *_a, **_k: None  # type: ignore[attr-defined]
     for attr in (
         "_is_mcp_authorization_required_error",
         "is_mcp_authorization_required_error",
-        "_is_unresolved_mcp_type",
         "_mcp_auth_error_to_metadata",
         "build_parallel_terminal_error",
         "budget_exceeded_error_code",
@@ -1093,60 +1158,65 @@ def _load_agent_common():
         "num_tokens_from_messages",
         "should_emit_output_limit_confirmation",
     ):
-        if not hasattr(_funcs, attr):
-            setattr(_funcs, attr, MagicMock(return_value={}))
-    if not hasattr(_funcs, "dev_reload_sdk"):
-        _funcs.dev_reload_sdk = lambda *_a, **_k: None
+        setattr(funcs, attr, MagicMock(return_value={}))
+    stubs["indexer_worker.utils.funcs"] = funcs
 
-    # node_interface — load the real one; it only needs pydantic + pylon log
-    _ni_mod_name = "indexer_worker.utils.node_interface"
-    if _ni_mod_name not in sys.modules:
-        _ni_spec = _ilu.spec_from_file_location(
-            _ni_mod_name,
-            ROOT / "utils" / "node_interface.py",
-            submodule_search_locations=[],
-        )
-        _ni_mod = _ilu.module_from_spec(_ni_spec)
-        _ni_mod.__package__ = "indexer_worker.utils"
-        sys.modules[_ni_mod_name] = _ni_mod
-        try:
-            _ni_spec.loader.exec_module(_ni_mod)
-        except Exception:
-            # If node_interface.py fails to load, use a minimal stub
-            _ni_mod.NodeEventInterface = MagicMock
-            _ni_mod.NodeEvent = MagicMock
-            _ni_mod.EventTypes = MagicMock()
-            _ni_mod.ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {}
+    # node_interface — try to exec the real file; fall back to a minimal stub
+    ni_mod = types.ModuleType("indexer_worker.utils.node_interface")
+    ni_mod.NodeEventInterface = MagicMock  # type: ignore[attr-defined]
+    ni_mod.NodeEvent = MagicMock  # type: ignore[attr-defined]
+    ni_mod.EventTypes = MagicMock()  # type: ignore[attr-defined]
+    ni_mod.ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {}  # type: ignore[attr-defined]
+    stubs["indexer_worker.utils.node_interface"] = ni_mod
 
     # parallel_dispatch_contract
-    _pdc = _t.ModuleType("indexer_worker.utils.parallel_dispatch_contract")
-    _pdc.is_fanout_child = lambda _meta: False
-    sys.modules["indexer_worker.utils.parallel_dispatch_contract"] = _pdc
+    pdc = types.ModuleType("indexer_worker.utils.parallel_dispatch_contract")
+    pdc.is_fanout_child = lambda _meta: False  # type: ignore[attr-defined]
+    stubs["indexer_worker.utils.parallel_dispatch_contract"] = pdc
 
-    # mcp_auth_tools — already loaded as _MAT; re-register under the package path
-    _mat_mod_name = "indexer_worker.utils.mcp_auth_tools"
-    if _mat_mod_name not in sys.modules:
-        sys.modules[_mat_mod_name] = _MAT
+    # mcp_auth_tools — inject the pre-loaded module object
+    stubs["indexer_worker.utils.mcp_auth_tools"] = mat_mod
 
-    # ---- load agent_common itself ------------------------------------
-    _mod_name = "indexer_worker.methods.agent_common"
-    if _mod_name in sys.modules:
-        return sys.modules[_mod_name]
+    return stubs
 
-    _spec = _ilu.spec_from_file_location(
-        _mod_name,
-        ROOT / "methods" / "agent_common.py",
-        submodule_search_locations=[],
-    )
-    _mod = _ilu.module_from_spec(_spec)
-    _mod.__package__ = "indexer_worker.methods"
-    sys.modules[_mod_name] = _mod
+
+def _load_agent_common():
+    """Load methods/agent_common.py with SDK stubs isolated.
+
+    elitea_sdk.* stubs are scoped to the loading call and removed from
+    sys.modules afterwards, so the full worker suite with a real SDK checkout
+    never sees the partial stubs used here.  Infrastructure stubs persist.
+
+    Returns the loaded module, or None if loading fails (individual tests skip
+    with a clear message rather than erroring on a future SDK change).
+    """
     try:
-        _spec.loader.exec_module(_mod)
-        return _mod
+        with _sdk_isolated_import():
+            stubs = _build_agent_common_stubs(_MAT)
+            sys.modules.update(stubs)
+
+            # Try to load the real node_interface inside the isolated context.
+            ni_spec = importlib.util.spec_from_file_location(
+                "indexer_worker.utils.node_interface",
+                ROOT / "utils" / "node_interface.py",
+                submodule_search_locations=[],
+            )
+            if ni_spec is not None:
+                ni_mod = importlib.util.module_from_spec(ni_spec)
+                ni_mod.__package__ = "indexer_worker.utils"
+                sys.modules["indexer_worker.utils.node_interface"] = ni_mod
+                try:
+                    ni_spec.loader.exec_module(ni_mod)
+                except Exception:
+                    pass  # fall back to the minimal stub already in stubs
+
+            mod = _exec_module_from_file(
+                "indexer_worker.methods.agent_common",
+                ROOT / "methods" / "agent_common.py",
+                "indexer_worker.methods",
+            )
+        return mod
     except Exception:
-        # Loading failed — tests that need this will skip with a clear message
-        sys.modules.pop(_mod_name, None)
         return None
 
 
