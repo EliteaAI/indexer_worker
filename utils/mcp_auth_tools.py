@@ -101,6 +101,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         toolkit_type: Optional[str],
         toolkit_name: Optional[str],
         provided_settings: Optional[Dict[str, Any]] = None,
+        toolkit_id: Optional[Any] = None,
     ) -> None:
         if not alias or not url or not _is_http_url(url):
             return
@@ -114,6 +115,8 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         }
         if provided_settings:
             entry["provided_settings"] = provided_settings
+        if toolkit_id is not None:
+            entry["toolkit_id"] = toolkit_id
         alias_meta_map[key] = entry
 
     for tool in tool_configs or []:
@@ -152,6 +155,8 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
 
         _provided_settings = _provided if _provided else None
 
+        _toolkit_id = tool.get("toolkit_id") or tool.get("id")
+
         def _register_with_pat(
             alias: Optional[str],
             url: Optional[str],
@@ -159,7 +164,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
             tk_name: Optional[str],
             ps: Optional[Dict[str, Any]] = None,
         ) -> None:
-            _register(alias, url, tk_type, tk_name, ps)
+            _register(alias, url, tk_type, tk_name, ps, toolkit_id=_toolkit_id)
             if _pat_headers and alias and url and _is_http_url(url):
                 key = alias.strip().lower()
                 if key in alias_meta_map:
@@ -215,29 +220,44 @@ def backfill_mcp_provided_settings(
     """Attach provided_settings to exc in-place when it is not already set.
 
     Resolution order:
-    1. Exact toolkit-name match — toolkit_name normalized to strip().lower() matches an
-       alias key, and the match is unique (no ambiguity).  Safe even when multiple toolkits
-       share a server URL.
-    2. URL match only when unambiguous — exactly one alias maps to the normalized URL.
-       Silently skips when two or more toolkits share the same endpoint so we never attach
-       credentials from the wrong toolkit.
+    1. Exact toolkit_id — when the SDK forwards toolkit_id on the exception and
+       an alias entry carries the same id, use those credentials directly.  Generic
+       alias keys (e.g. "mcp") share the same toolkit_id as the real entry, so this
+       finds the right entry without counting aliases.
+    2. Exact toolkit-name match — toolkit_name normalized to strip().lower() matches
+       an alias key that is NOT a generic type alias (not "mcp" / "mcp_config" / a bare
+       tool_type value).  Safe even when multiple toolkits share a server URL.
+    3. URL match deduplicated by toolkit identity — collect all alias keys whose URL
+       matches, then deduplicate by toolkit_id (when stored) or toolkit_name.  Resolves
+       only when all matched keys belong to a single unique toolkit identity.
     """
     if getattr(exc, 'provided_settings', None):
         return
     if not alias_meta_map:
         return
 
-    # Strategy 1: exact toolkit-name lookup (normalized key)
+    # Strategy 1: exact toolkit_id forwarded by the release SDK
+    exc_toolkit_id = getattr(exc, 'toolkit_id', None)
+    if exc_toolkit_id is not None:
+        for _key, _meta in alias_meta_map.items():
+            if (_meta or {}).get('toolkit_id') == exc_toolkit_id:
+                ps = _meta.get('provided_settings')
+                if ps:
+                    exc.provided_settings = ps
+                return  # found the identity; stop regardless of ps
+
+    # Strategy 2: exact toolkit-name lookup (normalized key), skipping generic aliases
+    _GENERIC_ALIASES = {"mcp", "mcp_config"}
     exc_toolkit = getattr(exc, 'toolkit_name', None)
     if exc_toolkit:
         _toolkit_key = exc_toolkit.strip().lower()
-        if _toolkit_key in alias_meta_map:
+        if _toolkit_key in alias_meta_map and _toolkit_key not in _GENERIC_ALIASES:
             ps = (alias_meta_map.get(_toolkit_key) or {}).get('provided_settings')
             if ps:
                 exc.provided_settings = ps
             return
 
-    # Strategy 2: URL match, only when the URL identifies exactly one toolkit
+    # Strategy 3: URL match, deduplicated by toolkit identity
     exc_url = getattr(exc, 'server_url', None)
     if exc_url and alias_url_map:
         _normalized = normalize_mcp_server_url(exc_url).rstrip("/")
@@ -245,8 +265,17 @@ def backfill_mcp_provided_settings(
             alias_key for alias_key, registered_url in alias_url_map.items()
             if normalize_mcp_server_url(registered_url).rstrip("/") == _normalized
         ]
-        if len(matched_keys) == 1:
-            ps = (alias_meta_map.get(matched_keys[0]) or {}).get('provided_settings')
+        # Deduplicate by toolkit identity: prefer toolkit_id, fall back to toolkit_name
+        seen_identities: set = set()
+        unique_keys: List[str] = []
+        for k in matched_keys:
+            _m = alias_meta_map.get(k) or {}
+            identity = _m.get('toolkit_id') if _m.get('toolkit_id') is not None else _m.get('toolkit_name', k)
+            if identity not in seen_identities:
+                seen_identities.add(identity)
+                unique_keys.append(k)
+        if len(unique_keys) == 1:
+            ps = (alias_meta_map.get(unique_keys[0]) or {}).get('provided_settings')
             if ps:
                 exc.provided_settings = ps
 
@@ -260,19 +289,31 @@ def backfill_mcp_provided_settings_dict(
 
     Used for plain dicts (e.g. durable interrupt items) where in-place attribute
     mutation is not possible.  Returns the original dict if no backfill is needed.
+    Same three-strategy resolution as backfill_mcp_provided_settings.
     """
     if item.get('provided_settings') or not alias_meta_map:
         return item
 
-    # Strategy 1: exact toolkit-name lookup
+    _GENERIC_ALIASES = {"mcp", "mcp_config"}
+
+    # Strategy 1: exact toolkit_id
+    item_toolkit_id = item.get('toolkit_id')
+    if item_toolkit_id is not None:
+        for _key, _meta in alias_meta_map.items():
+            if (_meta or {}).get('toolkit_id') == item_toolkit_id:
+                ps = _meta.get('provided_settings')
+                return {**item, 'provided_settings': ps} if ps else item
+        return item  # found identity, no credentials → stop
+
+    # Strategy 2: exact toolkit-name lookup, skipping generic aliases
     toolkit_name = item.get('toolkit_name')
     if toolkit_name:
         _toolkit_key = toolkit_name.strip().lower()
-        if _toolkit_key in alias_meta_map:
+        if _toolkit_key in alias_meta_map and _toolkit_key not in _GENERIC_ALIASES:
             ps = (alias_meta_map.get(_toolkit_key) or {}).get('provided_settings')
             return {**item, 'provided_settings': ps} if ps else item
 
-    # Strategy 2: URL match, only when unambiguous
+    # Strategy 3: URL match, deduplicated by toolkit identity
     server_url = item.get('server_url')
     if server_url and alias_url_map:
         _normalized = normalize_mcp_server_url(server_url).rstrip("/")
@@ -280,8 +321,16 @@ def backfill_mcp_provided_settings_dict(
             alias_key for alias_key, registered_url in alias_url_map.items()
             if normalize_mcp_server_url(registered_url).rstrip("/") == _normalized
         ]
-        if len(matched_keys) == 1:
-            ps = (alias_meta_map.get(matched_keys[0]) or {}).get('provided_settings')
+        seen_identities: set = set()
+        unique_keys: List[str] = []
+        for k in matched_keys:
+            _m = alias_meta_map.get(k) or {}
+            identity = _m.get('toolkit_id') if _m.get('toolkit_id') is not None else _m.get('toolkit_name', k)
+            if identity not in seen_identities:
+                seen_identities.add(identity)
+                unique_keys.append(k)
+        if len(unique_keys) == 1:
+            ps = (alias_meta_map.get(unique_keys[0]) or {}).get('provided_settings')
             if ps:
                 return {**item, 'provided_settings': ps}
     return item
