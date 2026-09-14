@@ -31,42 +31,44 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 # sys.modules isolation helper
 #
-# The only stubs that MUST NOT persist in sys.modules are the elitea_sdk.*
-# ones: when the full worker suite runs with a real SDK checkout those stubs
-# would replace genuine modules and break tests that import from the real SDK
-# (e.g. test_6532_trace_and_panel_serialization.py).
-#
-# Infrastructure stubs (pylon.*, langchain_core.*, indexer_worker.*) have no
-# real counterpart on this path and must stay in sys.modules so that Python's
-# import machinery does not try to load the real indexer_worker/__init__.py
-# (which depends on pylon and would fail outside a container).
+# These contract tests load production files against small dependency stubs.
+# Every replaced external dependency must be restored after each load: leaving
+# one behind can shadow a real package imported by a later test module and make
+# collection depend on file order.
 # ---------------------------------------------------------------------------
 
+_ISOLATED_MODULE_PREFIXES = (
+    "elitea_sdk",
+    "langchain_core",
+    "pydantic",
+    "pylon",
+    "requests",
+)
+
+
 @contextmanager
-def _sdk_isolated_import():
-    """Snapshot elitea_sdk.* entries, yield, then restore only those entries.
+def _isolated_import():
+    """Restore external dependencies replaced during a stubbed import.
 
-    All other sys.modules changes (pylon, langchain_core, indexer_worker stubs)
-    persist after the block — they are harmless and required so pytest's own
-    import setup does not try to exec the real package __init__.py files.
-
-    Usage::
-
-        with _sdk_isolated_import():
-            sys.modules["elitea_sdk.foo"] = stub
-            mod = _exec_module_from_file(...)
-        # elitea_sdk.* restored to pre-block state; everything else untouched.
+    The synthetic indexer_worker package remains available because production
+    helpers under test perform lazy relative imports when they are called.
     """
-    sdk_before = {k: v for k, v in sys.modules.items() if k.startswith("elitea_sdk")}
+    def is_isolated(module_name: str) -> bool:
+        return any(
+            module_name == prefix or module_name.startswith(f"{prefix}.")
+            for prefix in _ISOLATED_MODULE_PREFIXES
+        )
+
+    modules_before = {
+        key: value for key, value in sys.modules.items() if is_isolated(key)
+    }
     try:
         yield
     finally:
-        # Remove any elitea_sdk.* keys added during the block.
         for key in list(sys.modules):
-            if key.startswith("elitea_sdk") and key not in sdk_before:
+            if is_isolated(key):
                 del sys.modules[key]
-        # Restore elitea_sdk.* entries that existed before (e.g. real SDK modules).
-        sys.modules.update(sdk_before)
+        sys.modules.update(modules_before)
 
 
 def _exec_module_from_file(module_name: str, file_path: pathlib.Path, package: str):
@@ -216,14 +218,8 @@ def _build_mcp_auth_tools_stubs() -> Dict[str, types.ModuleType]:
 
 
 def _load_mcp_auth_tools():
-    """Load mcp_auth_tools.py with SDK stubs isolated.
-
-    elitea_sdk.* stubs are removed from sys.modules after the module body
-    executes so they do not shadow real SDK modules when the full worker suite
-    runs with a real SDK checkout.  Infrastructure stubs (pylon, indexer_worker,
-    langchain_core) remain because there is no real counterpart on this path.
-    """
-    with _sdk_isolated_import():
+    """Load mcp_auth_tools.py without leaking dependency stubs."""
+    with _isolated_import():
         stubs = _build_mcp_auth_tools_stubs()
         sys.modules.update(stubs)
 
@@ -1181,17 +1177,13 @@ def _build_agent_common_stubs(mat_mod) -> Dict[str, types.ModuleType]:
 
 
 def _load_agent_common():
-    """Load methods/agent_common.py with SDK stubs isolated.
-
-    elitea_sdk.* stubs are scoped to the loading call and removed from
-    sys.modules afterwards, so the full worker suite with a real SDK checkout
-    never sees the partial stubs used here.  Infrastructure stubs persist.
+    """Load methods/agent_common.py without leaking dependency stubs.
 
     Returns the loaded module, or None if loading fails (individual tests skip
     with a clear message rather than erroring on a future SDK change).
     """
     try:
-        with _sdk_isolated_import():
+        with _isolated_import():
             stubs = _build_agent_common_stubs(_MAT)
             sys.modules.update(stubs)
 
