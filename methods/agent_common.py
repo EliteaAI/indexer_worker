@@ -2190,6 +2190,10 @@ class EliteACustomCallback(BaseCallbackHandler):
         # to separate callback objects, so durable-auth suppression must be
         # shared across both objects for the lifetime of this run.
         self.parallel_hitl_run_state: dict = {}
+        # Populated by indexer_agent after create_callbacks() returns, shared with
+        # EliteACallback so both callbacks can backfill provided_settings.
+        self.mcp_alias_meta_map: Dict[str, Any] = {}
+        self.mcp_alias_url_map: Dict[str, str] = {}
         # self.pending_llm_requests = defaultdict(int)
         # self.current_model_name = 'gpt-4'
         # self.stream_id = node_interface.stream_id
