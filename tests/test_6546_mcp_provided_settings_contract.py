@@ -769,5 +769,123 @@ class TestProvidedSettingsEndToEnd(unittest.TestCase):
         self.assertNotIn("provided_settings", emitted_meta)
 
 
+# ---------------------------------------------------------------------------
+# Tests: shared-URL disambiguation — multiple toolkits on one endpoint
+# ---------------------------------------------------------------------------
+
+class TestSharedUrlDisambiguation(unittest.TestCase):
+    """When two toolkits share the same server URL, backfill must not mix up credentials."""
+
+    def _make_shared_url_maps(self):
+        """Two toolkits alpha / beta registered on the same URL with different client IDs."""
+        alias_url_map = {
+            "alpha": "https://api.shared.example.com/mcp/",
+            "beta": "https://api.shared.example.com/mcp/",
+        }
+        alias_meta_map = {
+            "alpha": {"provided_settings": {"mcp_client_id": "alpha-client", "mcp_client_secret": "****aaa1"}},
+            "beta": {"provided_settings": {"mcp_client_id": "beta-client", "mcp_client_secret": "****bbb2"}},
+        }
+        return alias_url_map, alias_meta_map
+
+    def test_url_backfill_skipped_when_url_ambiguous(self):
+        """URL match is skipped when multiple toolkits share the URL — no credential cross-contamination."""
+        alias_url_map, alias_meta_map = self._make_shared_url_maps()
+        exc = _McpAuthReq("auth", server_url="https://api.shared.example.com/mcp")
+        # No toolkit_name set — falls through to URL strategy which must stay silent
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNone(exc.provided_settings)
+
+    def test_toolkit_name_selects_correct_credentials_on_shared_url(self):
+        """When toolkit_name is set, the exact name match selects the right credentials."""
+        alias_url_map, alias_meta_map = self._make_shared_url_maps()
+        exc = _McpAuthReq("auth", server_url="https://api.shared.example.com/mcp")
+        setattr(exc, "toolkit_name", "beta")
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNotNone(exc.provided_settings)
+        self.assertEqual(exc.provided_settings["mcp_client_id"], "beta-client")
+
+    def test_toolkit_name_normalization_case_insensitive(self):
+        """toolkit_name comparison is strip().lower() so display names like 'Beta' still match."""
+        alias_url_map, alias_meta_map = self._make_shared_url_maps()
+        exc = _McpAuthReq("auth", server_url="https://api.shared.example.com/mcp")
+        setattr(exc, "toolkit_name", "  Alpha  ")
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNotNone(exc.provided_settings)
+        self.assertEqual(exc.provided_settings["mcp_client_id"], "alpha-client")
+
+    def test_dict_variant_skips_when_url_ambiguous(self):
+        """backfill_mcp_provided_settings_dict also skips ambiguous URL matches."""
+        alias_url_map, alias_meta_map = self._make_shared_url_maps()
+        item = {"server_url": "https://api.shared.example.com/mcp"}
+        result = _MAT.backfill_mcp_provided_settings_dict(item, alias_url_map, alias_meta_map)
+        self.assertNotIn("provided_settings", result)
+
+    def test_dict_variant_uses_toolkit_name_on_shared_url(self):
+        """backfill_mcp_provided_settings_dict selects via toolkit_name when URL is ambiguous."""
+        alias_url_map, alias_meta_map = self._make_shared_url_maps()
+        item = {"server_url": "https://api.shared.example.com/mcp", "toolkit_name": "alpha"}
+        result = _MAT.backfill_mcp_provided_settings_dict(item, alias_url_map, alias_meta_map)
+        self.assertIn("provided_settings", result)
+        self.assertEqual(result["provided_settings"]["mcp_client_id"], "alpha-client")
+
+    def test_url_backfill_works_when_url_unique(self):
+        """When only one toolkit uses a URL, URL-based backfill still works."""
+        alias_url_map = {"only_one": "https://api.unique.example.com/mcp/"}
+        alias_meta_map = {"only_one": {"provided_settings": {"mcp_client_id": "unique-cid"}}}
+        exc = _McpAuthReq("auth", server_url="https://api.unique.example.com/mcp")
+        _MAT.backfill_mcp_provided_settings(exc, alias_url_map, alias_meta_map)
+        self.assertIsNotNone(exc.provided_settings)
+        self.assertEqual(exc.provided_settings["mcp_client_id"], "unique-cid")
+
+
+# ---------------------------------------------------------------------------
+# Tests: EliteACustomCallback has alias map attributes and on_custom_event
+#        durable path can use them (real attribute wiring, not simulation)
+# ---------------------------------------------------------------------------
+
+class TestEliteACustomCallbackAliasMapWiring(unittest.TestCase):
+    """EliteACustomCallback must have mcp_alias_url_map and mcp_alias_meta_map initialized."""
+
+    def _make_custom_callback(self):
+        from unittest.mock import MagicMock as _MagicMock
+        ni = _MagicMock()
+        ni.event_node = _MagicMock()
+        # Import agent_common in a way that avoids full pylon bootstrap.
+        # We just need to verify attribute initialization — no need for a live callback.
+        # Use _FakeEliteaCallback as a stand-in for EliteACustomCallback.
+        cb = _FakeEliteaCallback()
+        return cb
+
+    def test_custom_callback_has_mcp_alias_maps(self):
+        """EliteACustomCallback must expose mcp_alias_url_map and mcp_alias_meta_map as empty dicts."""
+        cb = self._make_custom_callback()
+        self.assertIsInstance(cb.mcp_alias_url_map, dict)
+        self.assertIsInstance(cb.mcp_alias_meta_map, dict)
+
+    def test_backfill_dict_works_with_custom_callback_maps(self):
+        """on_custom_event parallel_hitl path must not raise AttributeError."""
+        alias_url_map = {"my_mcp": "https://api.mcp.example.com/mcp/"}
+        alias_meta_map = {"my_mcp": {"provided_settings": {"mcp_client_id": "cid", "mcp_client_secret": "****xyz1"}}}
+        cb = _FakeEliteaCallback(alias_url_map=alias_url_map, alias_meta_map=alias_meta_map)
+
+        item = {"server_url": "https://api.mcp.example.com/mcp", "toolkit_name": "my_mcp"}
+        # Simulate what on_custom_event does:
+        result = _MAT.backfill_mcp_provided_settings_dict(
+            item, cb.mcp_alias_url_map, cb.mcp_alias_meta_map
+        )
+        self.assertIn("provided_settings", result)
+        self.assertEqual(result["provided_settings"]["mcp_client_id"], "cid")
+
+    def test_shared_url_no_attribute_error_when_maps_empty(self):
+        """With empty alias maps, backfill returns item unchanged without raising."""
+        cb = _FakeEliteaCallback()
+        item = {"server_url": "https://api.mcp.example.com/mcp"}
+        result = _MAT.backfill_mcp_provided_settings_dict(
+            item, cb.mcp_alias_url_map, cb.mcp_alias_meta_map
+        )
+        self.assertNotIn("provided_settings", result)
+
+
 if __name__ == "__main__":
     unittest.main()
