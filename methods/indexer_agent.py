@@ -74,6 +74,11 @@ from ..utils.image_helpers import resolve_filepath_images, resolve_generated_ima
 from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils import parallel_hitl_router, predict_router
+from ..utils.mcp_auth_tools import (
+    _has_mcp_toolkits,
+    _build_mcp_server_alias_map,
+    backfill_mcp_provided_settings,
+)
 
 from pydantic import ValidationError
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired
@@ -373,6 +378,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Stop and HITL pause end a run with no terminal event; partial saves
             # are the only chance to persist which skills applied.
+            elitea_callback.mcp_alias_url_map, elitea_callback.mcp_alias_meta_map = _build_mcp_server_alias_map(app_tool_configs)
             elitea_callback.applied_skills = applied_skills
             elitea_callback.skills_by_name = {
                 (s.get('name') or '').strip().lower(): s
@@ -663,6 +669,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time
             )
         except McpAuthorizationRequired as e:
+            if elitea_callback is not None:
+                _alias_url_map = getattr(elitea_callback, 'mcp_alias_url_map', None)
+                _alias_meta_map = getattr(elitea_callback, 'mcp_alias_meta_map', None)
+            else:
+                _alias_url_map, _alias_meta_map = _build_mcp_server_alias_map(app_tool_configs)
+            backfill_mcp_provided_settings(e, _alias_url_map, _alias_meta_map)
             pause_result = build_mcp_auth_pause_result(
                 elitea_callback, chat_history, fallback_error=str(e),
                 node_interface=node_interface,
@@ -696,6 +708,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 )
             # Dev-reload-safe fallback: class identity can differ across reloaded SDK modules.
             if is_mcp_authorization_required_error(e):
+                if elitea_callback is not None:
+                    _alias_url_map = getattr(elitea_callback, 'mcp_alias_url_map', None)
+                    _alias_meta_map = getattr(elitea_callback, 'mcp_alias_meta_map', None)
+                else:
+                    _alias_url_map, _alias_meta_map = _build_mcp_server_alias_map(app_tool_configs)
+                backfill_mcp_provided_settings(e, _alias_url_map, _alias_meta_map)
                 return build_mcp_auth_required_result(
                     node_interface,
                     e,

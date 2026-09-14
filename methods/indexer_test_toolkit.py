@@ -35,6 +35,7 @@ from ..utils.funcs import (
     backfill_mcp_auth_metadata,
     budget_exceeded_error_code,
 )
+from ..utils.mcp_auth_tools import build_provided_settings_from_mcp_settings
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent, InitiatorType
 
 # Import shared components from the agent common module
@@ -72,23 +73,11 @@ def build_mcp_auth_metadata(
     if chat_project_id is not None:
         auth_metadata['chat_project_id'] = chat_project_id
 
-    # For pre-built MCP toolkits (type starts with 'mcp_'), add provided_settings info
+    # For all MCP toolkits, add provided_settings info
     toolkit_type = toolkit_config.get('type', '')
-    if toolkit_type.startswith('mcp_') or toolkit_config.get('settings', {}).get('server_name'):
+    if toolkit_type == 'mcp' or toolkit_type.startswith('mcp_') or toolkit_config.get('settings', {}).get('server_name'):
         settings = toolkit_config.get('settings', {})
-        provided_settings = {}
-
-        # Only include client_id, client_secret, and scopes
-        if settings.get('client_id'):
-            provided_settings['mcp_client_id'] = settings['client_id']
-
-        if settings.get('client_secret'):
-            from ..utils.funcs import mask_secret
-            provided_settings['mcp_client_secret'] = mask_secret(settings['client_secret'])
-
-        if settings.get('scopes'):
-            provided_settings['scopes'] = settings['scopes']
-
+        provided_settings = build_provided_settings_from_mcp_settings(settings)
         if provided_settings:
             auth_metadata['provided_settings'] = provided_settings
 
