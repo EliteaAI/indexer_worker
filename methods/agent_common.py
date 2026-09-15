@@ -118,6 +118,7 @@ from ..utils.node_interface import (
     NodeEventInterface,
 )
 from ..utils.parallel_dispatch_contract import is_fanout_child
+from ..utils.mcp_auth_tools import backfill_mcp_provided_settings, backfill_mcp_provided_settings_dict
 
 # Event node names
 EVENTNODE_EVENT_NAME = "application_stream_response"
@@ -729,6 +730,8 @@ class EliteACallback(BaseCallbackHandler):
         self.mcp_auth_durable_interrupt_seen = False
         self.parallel_hitl_run_state: dict = {}
         self.mcp_auth_pause_message: Optional[str] = None
+        self.mcp_alias_meta_map: Dict[str, Any] = {}
+        self.mcp_alias_url_map: Dict[str, str] = {}
         self.created_entities: list = []  # Entities created via MCP tools during this run
         self.toolkit_metadata: dict = toolkit_metadata or {}
         # Extract and cache toolkit_name and toolkit_type from toolkit_metadata for injection
@@ -1403,6 +1406,7 @@ class EliteACallback(BaseCallbackHandler):
             if auth_payload.get("toolkit_name") and not auth_payload.get("tool_name"):
                 auth_payload["tool_name"] = auth_payload["toolkit_name"]
 
+            backfill_mcp_provided_settings(tool_exception, self.mcp_alias_url_map, self.mcp_alias_meta_map)
             provided_settings = getattr(tool_exception, 'provided_settings', None)
             if provided_settings:
                 auth_payload['provided_settings'] = provided_settings
@@ -2186,6 +2190,10 @@ class EliteACustomCallback(BaseCallbackHandler):
         # to separate callback objects, so durable-auth suppression must be
         # shared across both objects for the lifetime of this run.
         self.parallel_hitl_run_state: dict = {}
+        # Populated by indexer_agent after create_callbacks() returns, shared with
+        # EliteACallback so both callbacks can backfill provided_settings.
+        self.mcp_alias_meta_map: Dict[str, Any] = {}
+        self.mcp_alias_url_map: Dict[str, str] = {}
         # self.pending_llm_requests = defaultdict(int)
         # self.current_model_name = 'gpt-4'
         # self.stream_id = node_interface.stream_id
@@ -2384,6 +2392,9 @@ class EliteACustomCallback(BaseCallbackHandler):
                     "mcp_auth_durable_interrupt_seen"
                 ] = True
             for item in auth_entries:
+                item = backfill_mcp_provided_settings_dict(
+                    item, self.mcp_alias_url_map, self.mcp_alias_meta_map
+                )
                 self.node_interface.emit(
                     type=EventTypes.mcp_authorization_required,
                     content=item.get("message", "Toolkit authorization required"),

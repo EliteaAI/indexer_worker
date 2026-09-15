@@ -53,9 +53,44 @@ def _mcp_discovery_url(server_url: str) -> str:
     return server_url.strip()
 
 
+def build_provided_settings_from_mcp_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the provided_settings dict from a raw MCP toolkit settings dict.
+
+    Handles both plain string secrets and Pydantic SecretStr values.
+    Returns an empty dict when no relevant fields are present.
+    """
+    from .funcs import mask_secret
+
+    result: Dict[str, Any] = {}
+    client_id = settings.get("client_id")
+    if client_id:
+        result["mcp_client_id"] = client_id
+
+    client_secret = settings.get("client_secret")
+    if client_secret:
+        secret_val = (
+            client_secret.get_secret_value()
+            if hasattr(client_secret, "get_secret_value")
+            else str(client_secret)
+        )
+        result["mcp_client_secret"] = mask_secret(secret_val)
+
+    scopes = settings.get("scopes")
+    if scopes:
+        result["scopes"] = scopes
+
+    headers = settings.get("headers") or {}
+    if isinstance(headers, dict):
+        auth_key = next((k for k in headers if k.lower() == "authorization"), None)
+        if auth_key:
+            result["has_pat"] = True
+
+    return result
+
+
 def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
     """Build alias maps for MCP URL resolution and toolkit metadata lookup."""
-    from .funcs import _extract_mcp_server_url, mask_secret, normalize_mcp_toolkit_type
+    from .funcs import _extract_mcp_server_url, normalize_mcp_toolkit_type
 
     alias_map: Dict[str, str] = {}
     alias_meta_map: Dict[str, Dict[str, Any]] = {}
@@ -66,6 +101,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         toolkit_type: Optional[str],
         toolkit_name: Optional[str],
         provided_settings: Optional[Dict[str, Any]] = None,
+        toolkit_id: Optional[Any] = None,
     ) -> None:
         if not alias or not url or not _is_http_url(url):
             return
@@ -79,6 +115,8 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         }
         if provided_settings:
             entry["provided_settings"] = provided_settings
+        if toolkit_id is not None:
+            entry["toolkit_id"] = toolkit_id
         alias_meta_map[key] = entry
 
     for tool in tool_configs or []:
@@ -104,35 +142,20 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
         if tool_type.startswith("mcp_") and tool_type != "mcp_config":
             aliases.add(tool_type[4:])
 
-        # Build provided_settings if client_id/client_secret are pre-configured
-        _provided: Dict[str, Any] = {}
-        _client_id = settings.get("client_id")
-        _client_secret = settings.get("client_secret")
-        if _client_id:
-            _provided["mcp_client_id"] = _client_id
-        if _client_secret:
-            _secret_val = (
-                _client_secret.get_secret_value()
-                if hasattr(_client_secret, "get_secret_value")
-                else str(_client_secret)
-            )
-            _provided["mcp_client_secret"] = mask_secret(_secret_val)
-        _scopes = settings.get("scopes")
-        if _scopes:
-            _provided["scopes"] = _scopes
+        _provided = build_provided_settings_from_mcp_settings(settings)
 
-        # Detect static Authorization header (PAT / API key) in toolkit headers.
-        # This lets _mcp_auth_control reuse the PAT for discover_mcp_tools instead of
-        # falling through to the OAuth modal when no mcp_tokens entry exists.
+        # Extract the raw Authorization header value separately — used by
+        # _mcp_auth_control to pass the PAT to discover_mcp_tools directly.
         _headers = settings.get("headers") or {}
         _pat_headers: Optional[Dict[str, str]] = None
         if isinstance(_headers, dict):
             _auth_key = next((k for k in _headers if k.lower() == "authorization"), None)
             if _auth_key:
-                _provided["has_pat"] = True
                 _pat_headers = {_auth_key: _headers[_auth_key]}
 
         _provided_settings = _provided if _provided else None
+
+        _toolkit_id = tool.get("toolkit_id") or tool.get("id")
 
         def _register_with_pat(
             alias: Optional[str],
@@ -141,7 +164,7 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
             tk_name: Optional[str],
             ps: Optional[Dict[str, Any]] = None,
         ) -> None:
-            _register(alias, url, tk_type, tk_name, ps)
+            _register(alias, url, tk_type, tk_name, ps, toolkit_id=_toolkit_id)
             if _pat_headers and alias and url and _is_http_url(url):
                 key = alias.strip().lower()
                 if key in alias_meta_map:
@@ -161,6 +184,156 @@ def _build_mcp_server_alias_map(tool_configs: list) -> tuple[Dict[str, str], Dic
             _register_with_pat(alias, cfg_url, toolkit_type, toolkit_name, _provided_settings)
 
     return alias_map, alias_meta_map
+
+
+def _enrich_mcp_auth_exc(
+    exc: Any,
+    normalized_url: Optional[str],
+    resolved_tool_name: str,
+    meta: Dict[str, Any],
+) -> None:
+    """Populate missing fields on a McpAuthorizationRequired exception from discovery meta.
+
+    Called in both the direct `except McpAuthorizationRequired` catch and the
+    dev-reload-safe `except Exception / is_mcp_authorization_required_error` path so
+    the enrichment logic is not duplicated.
+    """
+    if normalized_url:
+        setattr(exc, "server_url", normalized_url)
+    if not getattr(exc, "tool_name", None) or _is_http_url(getattr(exc, "tool_name", None)):
+        setattr(exc, "tool_name", resolved_tool_name)
+    if _is_unresolved_mcp_type(getattr(exc, "toolkit_type", None)):
+        setattr(exc, "toolkit_type", meta.get("toolkit_type"))
+    if not getattr(exc, "toolkit_name", None):
+        setattr(exc, "toolkit_name", meta.get("toolkit_name") or resolved_tool_name)
+    if not getattr(exc, "provided_settings", None):
+        _ps = meta.get("provided_settings")
+        if _ps:
+            setattr(exc, "provided_settings", _ps)
+
+
+def backfill_mcp_provided_settings(
+    exc: Any,
+    alias_url_map: Optional[Dict[str, str]],
+    alias_meta_map: Optional[Dict[str, Any]],
+) -> None:
+    """Attach provided_settings to exc in-place when it is not already set.
+
+    Resolution order:
+    1. Exact toolkit_id — when the SDK forwards toolkit_id on the exception and
+       an alias entry carries the same id, use those credentials directly.  Generic
+       alias keys (e.g. "mcp") share the same toolkit_id as the real entry, so this
+       finds the right entry without counting aliases.
+    2. Exact toolkit-name match — toolkit_name normalized to strip().lower() matches
+       an alias key that is NOT a generic type alias (not "mcp" / "mcp_config" / a bare
+       tool_type value).  Safe even when multiple toolkits share a server URL.
+    3. URL match deduplicated by toolkit identity — collect all alias keys whose URL
+       matches, then deduplicate by toolkit_id (when stored) or toolkit_name.  Resolves
+       only when all matched keys belong to a single unique toolkit identity.
+    """
+    if getattr(exc, 'provided_settings', None):
+        return
+    if not alias_meta_map:
+        return
+
+    # Strategy 1: exact toolkit_id forwarded by the release SDK
+    exc_toolkit_id = getattr(exc, 'toolkit_id', None)
+    if exc_toolkit_id is not None:
+        for _key, _meta in alias_meta_map.items():
+            if (_meta or {}).get('toolkit_id') == exc_toolkit_id:
+                ps = _meta.get('provided_settings')
+                if ps:
+                    exc.provided_settings = ps
+                return  # found the identity; stop regardless of ps
+
+    # Strategy 2: exact toolkit-name lookup (normalized key), skipping generic aliases
+    _GENERIC_ALIASES = {"mcp", "mcp_config"}
+    exc_toolkit = getattr(exc, 'toolkit_name', None)
+    if exc_toolkit:
+        _toolkit_key = exc_toolkit.strip().lower()
+        if _toolkit_key in alias_meta_map and _toolkit_key not in _GENERIC_ALIASES:
+            ps = (alias_meta_map.get(_toolkit_key) or {}).get('provided_settings')
+            if ps:
+                exc.provided_settings = ps
+            return
+
+    # Strategy 3: URL match, deduplicated by toolkit identity
+    exc_url = getattr(exc, 'server_url', None)
+    if exc_url and alias_url_map:
+        _normalized = normalize_mcp_server_url(exc_url).rstrip("/")
+        matched_keys = [
+            alias_key for alias_key, registered_url in alias_url_map.items()
+            if normalize_mcp_server_url(registered_url).rstrip("/") == _normalized
+        ]
+        # Deduplicate by toolkit identity: prefer toolkit_id, fall back to toolkit_name
+        seen_identities: set = set()
+        unique_keys: List[str] = []
+        for k in matched_keys:
+            _m = alias_meta_map.get(k) or {}
+            identity = _m.get('toolkit_id') if _m.get('toolkit_id') is not None else _m.get('toolkit_name', k)
+            if identity not in seen_identities:
+                seen_identities.add(identity)
+                unique_keys.append(k)
+        if len(unique_keys) == 1:
+            ps = (alias_meta_map.get(unique_keys[0]) or {}).get('provided_settings')
+            if ps:
+                exc.provided_settings = ps
+
+
+def backfill_mcp_provided_settings_dict(
+    item: Dict[str, Any],
+    alias_url_map: Optional[Dict[str, str]],
+    alias_meta_map: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return item (or a shallow copy) with provided_settings added when absent.
+
+    Used for plain dicts (e.g. durable interrupt items) where in-place attribute
+    mutation is not possible.  Returns the original dict if no backfill is needed.
+    Same three-strategy resolution as backfill_mcp_provided_settings.
+    """
+    if item.get('provided_settings') or not alias_meta_map:
+        return item
+
+    _GENERIC_ALIASES = {"mcp", "mcp_config"}
+
+    # Strategy 1: exact toolkit_id
+    item_toolkit_id = item.get('toolkit_id')
+    if item_toolkit_id is not None:
+        for _key, _meta in alias_meta_map.items():
+            if (_meta or {}).get('toolkit_id') == item_toolkit_id:
+                ps = _meta.get('provided_settings')
+                return {**item, 'provided_settings': ps} if ps else item
+        return item  # found identity, no credentials → stop
+
+    # Strategy 2: exact toolkit-name lookup, skipping generic aliases
+    toolkit_name = item.get('toolkit_name')
+    if toolkit_name:
+        _toolkit_key = toolkit_name.strip().lower()
+        if _toolkit_key in alias_meta_map and _toolkit_key not in _GENERIC_ALIASES:
+            ps = (alias_meta_map.get(_toolkit_key) or {}).get('provided_settings')
+            return {**item, 'provided_settings': ps} if ps else item
+
+    # Strategy 3: URL match, deduplicated by toolkit identity
+    server_url = item.get('server_url')
+    if server_url and alias_url_map:
+        _normalized = normalize_mcp_server_url(server_url).rstrip("/")
+        matched_keys = [
+            alias_key for alias_key, registered_url in alias_url_map.items()
+            if normalize_mcp_server_url(registered_url).rstrip("/") == _normalized
+        ]
+        seen_identities: set = set()
+        unique_keys: List[str] = []
+        for k in matched_keys:
+            _m = alias_meta_map.get(k) or {}
+            identity = _m.get('toolkit_id') if _m.get('toolkit_id') is not None else _m.get('toolkit_name', k)
+            if identity not in seen_identities:
+                seen_identities.add(identity)
+                unique_keys.append(k)
+        if len(unique_keys) == 1:
+            ps = (alias_meta_map.get(unique_keys[0]) or {}).get('provided_settings')
+            if ps:
+                return {**item, 'provided_settings': ps}
+    return item
 
 
 def _make_mcp_auth_tools(
@@ -238,9 +411,12 @@ def _make_mcp_auth_tools(
                 # Reverse-lookup: find the alias whose registered URL matches server_url.
                 # This handles prebuild MCPs where the LLM passes the real OAuth server URL
                 # (e.g. https://api.github.com) instead of the symbolic alias (e.g. 'github').
-                normalized_input = normalize_mcp_server_url(server_url)
+                # Strip trailing slash on both sides: canonical_resource() (used by SDK to set
+                # exc.server_url) strips trailing slash, while alias_map stores the raw settings
+                # URL which may retain it.
+                normalized_input = normalize_mcp_server_url(server_url).rstrip("/")
                 for alias_key, registered_url in alias_to_server_url.items():
-                    if normalize_mcp_server_url(registered_url) == normalized_input:
+                    if normalize_mcp_server_url(registered_url).rstrip("/") == normalized_input:
                         alias_meta = alias_to_tool_meta.get(alias_key) or {}
                         if alias_meta.get("toolkit_type"):
                             resolved_meta = {**alias_meta, **resolved_meta}
@@ -369,31 +545,11 @@ def _make_mcp_auth_tools(
                     ssl_verify=True,
                 )
             except McpAuthorizationRequired as exc:
-                setattr(exc, "server_url", normalized_url)
-                if not getattr(exc, "tool_name", None) or _is_http_url(getattr(exc, "tool_name", None)):
-                    exc.tool_name = resolved_tool_name
-                if _is_unresolved_mcp_type(getattr(exc, "toolkit_type", None)):
-                    exc.toolkit_type = meta.get("toolkit_type")
-                if not getattr(exc, "toolkit_name", None):
-                    exc.toolkit_name = meta.get("toolkit_name") or resolved_tool_name
-                if not getattr(exc, "provided_settings", None):
-                    _ps = meta.get("provided_settings")
-                    if _ps:
-                        exc.provided_settings = _ps
+                _enrich_mcp_auth_exc(exc, normalized_url, resolved_tool_name, meta)
                 raise
             except Exception as exc:
                 if is_mcp_authorization_required_error(exc):
-                    setattr(exc, "server_url", normalized_url)
-                    if not getattr(exc, "tool_name", None) or _is_http_url(getattr(exc, "tool_name", None)):
-                        setattr(exc, "tool_name", resolved_tool_name)
-                    if _is_unresolved_mcp_type(getattr(exc, "toolkit_type", None)):
-                        setattr(exc, "toolkit_type", meta.get("toolkit_type"))
-                    if not getattr(exc, "toolkit_name", None):
-                        setattr(exc, "toolkit_name", meta.get("toolkit_name") or resolved_tool_name)
-                    if not getattr(exc, "provided_settings", None):
-                        _ps = meta.get("provided_settings")
-                        if _ps:
-                            setattr(exc, "provided_settings", _ps)
+                    _enrich_mcp_auth_exc(exc, normalized_url, resolved_tool_name, meta)
                     raise
                 log.warning("MCP auth discovery failed for %s: %s", normalized_url, exc)
                 return build_mcp_auth_decision_result(
