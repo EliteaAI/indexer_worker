@@ -31,42 +31,58 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 # sys.modules isolation helper
 #
-# The only stubs that MUST NOT persist in sys.modules are the elitea_sdk.*
-# ones: when the full worker suite runs with a real SDK checkout those stubs
-# would replace genuine modules and break tests that import from the real SDK
-# (e.g. test_6532_trace_and_panel_serialization.py).
-#
-# Infrastructure stubs (pylon.*, langchain_core.*, indexer_worker.*) have no
-# real counterpart on this path and must stay in sys.modules so that Python's
-# import machinery does not try to load the real indexer_worker/__init__.py
-# (which depends on pylon and would fail outside a container).
+# Restore all externally owned namespaces replaced by these loaders. In particular,
+# langchain_core is a real Worker test dependency; keeping its partial stubs breaks
+# later message-conversion tests. Keep only synthetic indexer_worker.* packages for
+# the loaded functions' lazy relative imports.
 # ---------------------------------------------------------------------------
+
+_EXTERNAL_ROOTS = ("elitea_sdk", "langchain_core", "pylon", "pydantic", "requests")
+
+
+def _external_module(name):
+    return any(name == root or name.startswith(root + ".") for root in _EXTERNAL_ROOTS)
+
 
 @contextmanager
 def _sdk_isolated_import():
-    """Snapshot elitea_sdk.* entries, yield, then restore only those entries.
-
-    All other sys.modules changes (pylon, langchain_core, indexer_worker stubs)
-    persist after the block — they are harmless and required so pytest's own
-    import setup does not try to exec the real package __init__.py files.
-
-    Usage::
-
-        with _sdk_isolated_import():
-            sys.modules["elitea_sdk.foo"] = stub
-            mod = _exec_module_from_file(...)
-        # elitea_sdk.* restored to pre-block state; everything else untouched.
-    """
-    sdk_before = {k: v for k, v in sys.modules.items() if k.startswith("elitea_sdk")}
+    """Restore external module identity; retain local synthetic package shells."""
+    before = {k: v for k, v in sys.modules.items() if _external_module(k)}
     try:
         yield
     finally:
-        # Remove any elitea_sdk.* keys added during the block.
         for key in list(sys.modules):
-            if key.startswith("elitea_sdk") and key not in sdk_before:
+            if _external_module(key) and key not in before:
                 del sys.modules[key]
-        # Restore elitea_sdk.* entries that existed before (e.g. real SDK modules).
-        sys.modules.update(sdk_before)
+        sys.modules.update(before)
+
+
+class TestImportIsolation(unittest.TestCase):
+    def test_external_identity_is_restored_and_only_local_shells_persist(self):
+        from unittest.mock import patch
+        with patch.dict(sys.modules):
+            originals = {root: types.ModuleType(root) for root in _EXTERNAL_ROOTS}
+            sys.modules.update(originals)
+            local = types.ModuleType("indexer_worker.isolation_fixture")
+            with _sdk_isolated_import():
+                for root in _EXTERNAL_ROOTS:
+                    sys.modules[root] = types.ModuleType(root)
+                    sys.modules[root + ".isolation_fixture"] = types.ModuleType(root + ".isolation_fixture")
+                sys.modules[local.__name__] = local
+            for root, original in originals.items():
+                self.assertIs(sys.modules[root], original)
+                self.assertNotIn(root + ".isolation_fixture", sys.modules)
+            self.assertIs(sys.modules[local.__name__], local)
+
+    def test_external_modules_restore_after_loader_exception(self):
+        before = {k: v for k, v in sys.modules.items() if _external_module(k)}
+        with self.assertRaisesRegex(RuntimeError, "loader failure"):
+            with _sdk_isolated_import():
+                sys.modules["langchain_core.messages"] = types.ModuleType("langchain_core.messages")
+                sys.modules["elitea_sdk.isolation_fixture"] = types.ModuleType("elitea_sdk.isolation_fixture")
+                raise RuntimeError("loader failure")
+        after = {k: v for k, v in sys.modules.items() if _external_module(k)}
+        self.assertEqual(before, after)
 
 
 def _exec_module_from_file(module_name: str, file_path: pathlib.Path, package: str):
@@ -218,10 +234,8 @@ def _build_mcp_auth_tools_stubs() -> Dict[str, types.ModuleType]:
 def _load_mcp_auth_tools():
     """Load mcp_auth_tools.py with SDK stubs isolated.
 
-    elitea_sdk.* stubs are removed from sys.modules after the module body
-    executes so they do not shadow real SDK modules when the full worker suite
-    runs with a real SDK checkout.  Infrastructure stubs (pylon, indexer_worker,
-    langchain_core) remain because there is no real counterpart on this path.
+    External SDK/LangChain/Pylon stubs are removed after loading; only local
+    indexer_worker package shells remain for lazy relative imports.
     """
     with _sdk_isolated_import():
         stubs = _build_mcp_auth_tools_stubs()
@@ -1183,9 +1197,8 @@ def _build_agent_common_stubs(mat_mod) -> Dict[str, types.ModuleType]:
 def _load_agent_common():
     """Load methods/agent_common.py with SDK stubs isolated.
 
-    elitea_sdk.* stubs are scoped to the loading call and removed from
-    sys.modules afterwards, so the full worker suite with a real SDK checkout
-    never sees the partial stubs used here.  Infrastructure stubs persist.
+    External stubs are scoped to the loading call. Local indexer_worker package
+    shells persist so loaded callbacks can resolve their relative imports.
 
     Returns the loaded module, or None if loading fails (individual tests skip
     with a clear message rather than erroring on a future SDK change).

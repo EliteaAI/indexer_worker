@@ -423,7 +423,8 @@ def prepend_vision_system_message(
 
 def prepend_attachment_system_message(
     chat_history: List[Union[Dict[str, Any], Any]],
-    conversation_id: str
+    conversation_id: str,
+    routing_projection: bool = False,
 ) -> List[Union[Dict[str, Any], Any]]:
     """
     Prepend attachment system message to chat_history describing file storage location.
@@ -446,22 +447,28 @@ def prepend_attachment_system_message(
     attachment_msg = ATTACHMENT_SYSTEM_MESSAGE_TEMPLATE.format(conversation_id=conversation_id)
     
     if not chat_history:
-        return [{'role': 'system', 'content': attachment_msg}]
+        return [{'role': 'system', 'content': attachment_msg,
+                 **({'additional_kwargs': {'elitea_routing_content': ''}} if routing_projection else {})}]
     
     first_msg = chat_history[0]
     
     # Check if first message is a system message (dict format)
     if isinstance(first_msg, dict) and first_msg.get('role') == 'system':
+        if routing_projection:
+            first_msg.setdefault('additional_kwargs', {}).setdefault('elitea_routing_content', first_msg.get('content', ''))
         first_msg['content'] = attachment_msg + '\n\n' + first_msg.get('content', '')
         return chat_history
     
     # Check if first message is a LangChain SystemMessage
     if isinstance(first_msg, SystemMessage):
+        if routing_projection:
+            first_msg.additional_kwargs.setdefault('elitea_routing_content', first_msg.content)
         first_msg.content = attachment_msg + '\n\n' + first_msg.content
         return chat_history
     
     # No existing system message - prepend new one (dict format for compatibility)
-    return [{'role': 'system', 'content': attachment_msg}] + chat_history
+    return [{'role': 'system', 'content': attachment_msg,
+             **({'additional_kwargs': {'elitea_routing_content': ''}} if routing_projection else {})}] + chat_history
 
 def normalize_mcp_toolkit_name(name: str) -> str:
     """

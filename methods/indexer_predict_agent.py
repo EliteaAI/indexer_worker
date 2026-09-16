@@ -44,6 +44,7 @@ from ..utils.agent_execution_common import (
     create_memory_saver,
     setup_event_node,
     create_elitea_client,
+    install_routing_context_signer,
     create_node_interface,
     ensure_thread_id,
     create_callbacks,
@@ -228,6 +229,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Create EliteAClient AFTER fork
         client = create_elitea_client(client_args, api_token, api_extra_headers)
+        install_routing_context_signer(client, local_event_node, kwargs.get("routing_principal"))
 
         should_continue = kwargs.get('should_continue', False)
         hitl_resume = kwargs.get('hitl_resume', False)
@@ -312,6 +314,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             llm = client.get_llm(
                 model_name=client_args.get("model"),
                 model_config={
+                    **({"routing_instructions": kwargs["routing_projection"]["instructions"]}
+                       if "instructions" in (kwargs.get("routing_projection") or {}) else {}),
+                    "selection": client_args.get("selection"),
+                    "routing_surface": client_args.get("routing_surface", "chat"),
                     "model_project_id": client_args.get("model_project_id"),
                     "max_tokens": client_args.get("max_tokens"),
                     "max_output_tokens": client_args.get("max_output_tokens"),
@@ -415,6 +421,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             user_message_content = hitl_value if hitl_resume and hitl_action == 'edit' else user_input
             user_message = HumanMessage(content=user_message_content or '')
+            projection = kwargs.get('routing_projection')
+            if projection is not None and not hitl_resume:
+                user_message.additional_kwargs['elitea_routing_content'] = projection['task']
             log.debug(f'invoke payload thread_id={thread_id}')
 
             invoke_input = prepare_invoke_input(
@@ -426,11 +435,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 ),
                 model_name=client_args.get('model', ''),
                 supports_vision=supports_vision,
+                routing_projection=projection if (client_args.get('selection') or {}).get('mode') == 'auto' else None,
             )
             invoke_config = {
                 "callbacks": callbacks,
                 "configurable": {
                     "thread_id": thread_id,
+                    "elitea_routing_run_id": kwargs.get(PREDICT_RUN_ID_KWARGS_KEY),
                     # Applications derive nested checkpoint thread ids. Keep
                     # the worker-owned mailbox address stable across every
                     # boundary for live supervised decisions.
