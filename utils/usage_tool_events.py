@@ -71,13 +71,13 @@ _write_errors_seen = set()
 
 _INSERT_SQL = f"""
 INSERT INTO {_SCHEMA}.usage_event (
-    idempotency_key, ts, period, project_id, user_id, user_email,
+    idempotency_key, ts, project_id, user_id, user_email,
     run_id, conversation_id,
     root_entity_type, root_entity_id, root_entity_version_id,
     entity_type, entity_id, entity_version_id, entity_name,
     event_type, tool_name, duration_ms, is_error, meta
 ) VALUES (
-    :idempotency_key, :ts, :period, :project_id, :user_id, :user_email,
+    :idempotency_key, :ts, :project_id, :user_id, :user_email,
     :run_id, :conversation_id,
     :root_entity_type, :root_entity_id, :root_entity_version_id,
     :entity_type, :entity_id, :entity_version_id, :entity_name,
@@ -230,7 +230,6 @@ def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, 
         params = {
             "idempotency_key": f"tool:{correlation}:{lc_run_id}",
             "ts": ts,
-            "period": ts.strftime("%Y%m"),
             "project_id": attribution["project_id"],
             "user_id": attribution.get("user_id") or SYSTEM_USER_ID,
             "user_email": attribution.get("user_email"),
