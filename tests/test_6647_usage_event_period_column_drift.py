@@ -19,11 +19,15 @@ MODULE_PATH = (
 
 
 def _load_module():
-    """Import usage_tool_events.py with its two external deps stubbed.
+    """Import usage_tool_events.py with its external deps stubbed where missing.
 
     Neither `pylon` nor `elitea_sdk` is installed outside the container, and this
     module's only use of either is `log` (unused by the assertions below) and a
-    string constant, so a bare stub is enough.
+    string constant, so a bare stub is enough. `sqlalchemy` isn't in this repo's
+    tests/requirements-dev.txt (CI installs only that file), and record_tool_event
+    imports `text` from it lazily inside a try/except that swallows the resulting
+    ImportError — so without a stub the CI run "passes" the import and silently
+    never populates `params` at all, masking the very column it should be checking.
     """
     pylon_core_tools = types.ModuleType("pylon.core.tools")
     pylon_core_tools.log = MagicMock()
@@ -37,6 +41,13 @@ def _load_module():
     sys.modules["elitea_sdk.runtime"] = types.ModuleType("elitea_sdk.runtime")
     sys.modules["elitea_sdk.runtime.utils"] = types.ModuleType("elitea_sdk.runtime.utils")
     sys.modules["elitea_sdk.runtime.utils.utils"] = sdk_utils
+
+    try:
+        import sqlalchemy  # noqa: F401
+    except ImportError:
+        sqlalchemy_stub = types.ModuleType("sqlalchemy")
+        sqlalchemy_stub.text = lambda statement: statement
+        sys.modules["sqlalchemy"] = sqlalchemy_stub
 
     spec = importlib.util.spec_from_file_location("usage_tool_events", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
