@@ -46,11 +46,17 @@ _KNOWN_MODES = (MODE_OFF, MODE_OBSERVE, MODE_ENFORCE)
 
 EVENT_TYPE_TOOL = "tool"
 ENTITY_TYPE_APPLICATION = "application"
+ENTITY_TYPE_EVALUATION = "evaluation"
 
 #: Root entity of the run, propagated to sub-agent children. Indexer-internal:
 #: the indexer builds the child payload and pylon_main replays it verbatim, so
 #: unlike PREDICT_RUN_ID_KWARGS_KEY this needs no shared SDK constant.
 ROOT_ENTITY_KWARGS_KEY = "_elitea_root_entity"
+
+#: Explicit leaf entity, for a caller (an eval/judge run, #6677) whose leaf identity is not
+#: the `application` dict — e.g. it wants entity_type='evaluation' while root stays the
+#: application/pipeline being evaluated. Same convention as ROOT_ENTITY_KWARGS_KEY.
+ENTITY_KWARGS_KEY = "_elitea_entity"
 
 #: Carries run_attribution() to the LLM interfaces in pylon_main, which write the
 #: llm rows of the same run. A literal on both sides, like PREDICT_RUN_ID_HEADER
@@ -166,7 +172,9 @@ def run_attribution(kwargs):
     """
     kwargs = kwargs or {}
 
-    entity = entity_from_application(kwargs.get("application")) or {}
+    entity = kwargs.get(ENTITY_KWARGS_KEY)
+    if not isinstance(entity, dict) or not entity.get("id"):
+        entity = entity_from_application(kwargs.get("application")) or {}
     root = kwargs.get(ROOT_ENTITY_KWARGS_KEY)
     if not isinstance(root, dict) or not root.get("id"):
         root = entity
