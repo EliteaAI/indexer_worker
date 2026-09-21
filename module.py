@@ -65,6 +65,33 @@ def _preload_unstructured_nlp_model():
         )
 
 
+def _preload_elitea_client():
+    """Import EliteAClient in the parent before any TaskNode forks workers.
+
+    create_elitea_client() (agent_execution_common.py) deliberately imports
+    elitea_sdk.runtime.clients.client lazily, after the fork, to avoid
+    pickling RLock objects. If that module's first-ever import instead
+    happens to be triggered by another thread in this process right as a
+    TaskNode forks a new worker, the forked child inherits a permanently
+    half-initialized module (the importing thread doesn't exist in the
+    child to finish it), and every later "from ...client import
+    EliteAClient" in that child fails with a misleading
+    "partially initialized module (most likely due to a circular import)"
+    error. Importing it here, single-threaded, before any TaskNode starts,
+    makes it fully initialized in the parent so every forked worker
+    inherits a complete copy.
+    """
+    try:
+        from elitea_sdk.runtime.clients.client import EliteAClient  # pylint: disable=C0415,W0611
+
+        log.info("Preloaded EliteAClient ahead of worker forks")
+    except Exception:  # pylint: disable=W0718
+        log.exception(
+            "Failed to preload EliteAClient; workers will import it lazily"
+        )
+
+
+
 class Module(module.ModuleModel):  # pylint: disable=R0902
     """ Pylon module """
 
@@ -242,6 +269,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 log.warning("Failed to refresh NLTK bundle; using existing data")
         #
         _preload_unstructured_nlp_model()
+        _preload_elitea_client()
         #
         for key, value in self.descriptor.config.get("env_vars", {}).items():
             os.environ[key] = value
