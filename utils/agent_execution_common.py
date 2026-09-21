@@ -346,6 +346,24 @@ def create_elitea_client(client_args: Dict[str, Any], api_token: str, api_extra_
     )
 
 
+def install_routing_context_signer(client, local_event_node, principal):
+    """Use the existing Worker/Main bus with the authenticated server principal."""
+    principal = dict(principal or {})
+    if principal.get("user_id") is not None:
+        def sign_routing_context(**payload):
+            # The parent's RPC response listener does not survive fork.
+            # Reuse the already-started Worker/Main transport in this execution.
+            from arbiter.rpcnode import RpcNode
+            node = RpcNode(local_event_node, id_prefix="indexer_", proxy_timeout=10)
+            node.start()
+            try:
+                return node.proxy.restricted_sign_routing_context(
+                    **payload, project_id=principal["project_id"], user_id=principal["user_id"])
+            finally:
+                node.stop()
+        client._routing_context_signer = sign_routing_context
+
+
 def create_node_interface(
     local_event_node,
     stream_id: Optional[str],
@@ -1394,7 +1412,25 @@ def build_child_launch_payloads(
         # llm_settings inherit the parent's model. Token/base_url/headers are
         # always the parent's (valid for the same project + user).
         child_llm_kwargs = dict(parent_llm_kwargs)
-        child_llm_kwargs['model'] = llm_settings.get('model_name') or parent_llm_kwargs.get('model')
+        child_selection = llm_settings.get('selection') or {}
+        child_auto = child_selection.get('mode') == 'auto'
+        if not child_auto and not llm_settings.get('model_name') and (parent_llm_kwargs.get('selection') or {}).get('mode') == 'auto':
+            from elitea_sdk.runtime.exceptions import AutoRoutingChildModelRequired
+            raise AutoRoutingChildModelRequired()
+        if child_auto and version_details.get('agent_type') == 'pipeline':
+            raise ValueError('Auto is not available for Pipelines')
+        if child_auto:
+            child_llm_kwargs['model'] = None
+            from copy import deepcopy
+            child_llm_kwargs['selection'] = deepcopy(child_selection)
+            child_llm_kwargs['routing_surface'] = 'agent'
+        else:
+            child_llm_kwargs['model'] = llm_settings.get('model_name') or parent_llm_kwargs.get('model')
+            if llm_settings.get('model_name'):
+                child_llm_kwargs.pop('selection', None)
+        for parameter in ('model_project_id', 'max_tokens', 'max_output_tokens', 'temperature', 'reasoning_effort'):
+            if parameter in llm_settings:
+                child_llm_kwargs[parameter] = llm_settings[parameter]
         child_llm_kwargs['openai_compatible'] = llm_settings.get(
             'openai_compatible', parent_llm_kwargs.get('openai_compatible', False)
         )
@@ -1410,6 +1446,7 @@ def build_child_launch_payloads(
         )
 
         child_payload = {
+            'routing_principal': dict(parent_kwargs.get('routing_principal') or {}),
             'llm': {'kwargs': child_llm_kwargs},
             'chat_history': [],
             'user_input': task_input.get('task') or '',
@@ -1585,6 +1622,7 @@ def prepare_invoke_input(
     include_attachment_system_message: bool = True,
     model_name: Optional[str] = None,
     supports_vision: bool = True,
+    routing_projection: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Prepare unified invoke input using messages format.
 
@@ -1594,6 +1632,18 @@ def prepare_invoke_input(
     ``image_helpers.strip_image_chunks_from_assistant_messages`` for why no
     provider's replay contract is relied on here.
     """
+    if routing_projection is not None and 'history' in routing_projection:
+        from copy import deepcopy
+        projected = routing_projection['history']
+        if len(projected) != len(chat_history):
+            raise ValueError('Routing history no longer matches the server history')
+        chat_history = deepcopy(chat_history)
+        for message, routing_message in zip(chat_history, projected):
+            if message.get('role') != routing_message.get('role'):
+                raise ValueError('Routing history role does not match the server history')
+            if message.get('role') == 'user':
+                message.setdefault('additional_kwargs', {})['elitea_routing_content'] = routing_message['content']
+
     # Remove unresolved filepath: image refs from older turns
     strip_stale_filepath_image_chunks(chat_history)
 
@@ -1619,7 +1669,8 @@ def prepare_invoke_input(
     # history is [] and adding [ATTACHMENTS] as the sole context message causes
     # the model to echo it instead of continuing the response.
     if conversation_id and include_attachment_system_message and invoke_messages:
-        invoke_messages = prepend_attachment_system_message(invoke_messages, str(conversation_id))
+        invoke_messages = prepend_attachment_system_message(
+            invoke_messages, str(conversation_id), routing_projection=routing_projection is not None)
     
     # Prepend vision system message if images are present
     if has_images_in_messages(chat_history, user_message):

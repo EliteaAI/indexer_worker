@@ -258,6 +258,11 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         self._apply_tool_result_limits()
         #
         if self.descriptor.config.get("worker_enabled", True):
+            # The pgvector warm thread imports this client before the first fork.
+            # Finish module initialization now so children cannot inherit a
+            # partially initialized class; client instances stay execution-local.
+            from elitea_sdk.runtime.clients.client import EliteAClient  # pylint: disable=C0415,E0401
+            _ = EliteAClient
             # Agent prereqs
             self.agent_event_node = worker_core.event_node.clone()
             self.agent_event_node.start()
