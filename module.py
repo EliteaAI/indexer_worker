@@ -256,6 +256,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         self._apply_toolkit_security()
         # Configure tool-result bounds from config (live-reloadable via reconfig)
         self._apply_tool_result_limits()
+        # Registered before the task nodes so every forked agent run inherits the backend
+        self._configure_mcp_discovery_cache()
         #
         if self.descriptor.config.get("worker_enabled", True):
             # The pgvector warm thread imports this client before the first fork.
@@ -469,6 +471,13 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 configure_tool_result_limits(enabled=False)
             except Exception:  # pylint: disable=W0718
                 log.exception("Failed to disable tool result bounds")
+
+    def _configure_mcp_discovery_cache(self):
+        try:
+            from .utils.mcp_discovery_cache import configure_mcp_discovery_cache  # pylint: disable=C0415
+            configure_mcp_discovery_cache(worker_core.event_node)
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure MCP discovery cache - discovery stays live")
 
     def _apply_toolkit_security(self):
         """Apply the toolkit security guardrails from the current config.
