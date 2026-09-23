@@ -5,6 +5,12 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join as joinPath, resolve as resolvePath, isAbsolute } from "node:path";
 
+const processStartMs = performance.now();
+const timings = {};
+function markTiming(name, sinceMs) {
+  timings[name] = Math.round(performance.now() - sinceMs);
+}
+
 const require = createRequire(import.meta.url);
 if (!globalThis.require) {
   globalThis.require = require;
@@ -121,6 +127,7 @@ const runtimePaths = {
 const localWheelUriMap = buildLocalWheelUriMap(runtimePaths.pyodideDir);
 
 const { loadPyodide } = await import(pathToFileURL(pyodideModulePath).href);
+markTiming("startup_ms", processStartMs);
 
 const prepareEnvCodeTemplate = `
 import datetime
@@ -525,17 +532,16 @@ async function runPython(pythonCode, options) {
   console.log = () => {};
 
   try {
+    let phaseStart = performance.now();
     const pyodide = await loadPyodide({
       stdout: (msg) => output.push(msg),
       stderr: (msg) => errOutput.push(msg),
     });
-    await pyodide.loadPackage(["micropip"], {
-      messageCallback: () => {},
-      errorCallback: (msg) => {
-        output.push(`install error: ${msg}`);
-      },
-    });
+    markTiming("load_pyodide_ms", phaseStart);
+    // micropip is loaded by install_imports only when something actually needs installing.
+    phaseStart = performance.now();
     await initPyodide(pyodide);
+    markTiming("init_env_ms", phaseStart);
 
     let sessionMetadata;
     if (options.sessionMetadata) {
@@ -565,6 +571,7 @@ async function runPython(pythonCode, options) {
 
     const installErrors = [];
 
+    phaseStart = performance.now();
     const installedPackages = await prepareEnv.install_imports(
       pythonCode,
       additionalPackagesToInstall,
@@ -574,6 +581,7 @@ async function runPython(pythonCode, options) {
         }
       },
     );
+    markTiming("install_imports_ms", phaseStart);
 
     if (installErrors.length > 0) {
       console.log = originalLog;
@@ -596,7 +604,9 @@ async function runPython(pythonCode, options) {
     const packages = installedPackages.map((pkg) => pkg.get("package"));
 
     console.log = originalLog;
+    phaseStart = performance.now();
     const rawValue = await pyodide.runPythonAsync(pythonCode);
+    markTiming("user_code_ms", phaseStart);
     const jsonValue = await prepareEnv.dumps(rawValue);
 
     sessionMetadata.packages = [
@@ -705,9 +715,10 @@ async function main() {
       // on individual CLI arguments when passing large code payloads
       const stdinTimeoutMs = 30000;
       const stdinPromise = new Response(Deno.stdin.readable).text();
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`stdin read timeout after ${stdinTimeoutMs}ms`)), stdinTimeoutMs)
-      );
+      let stdinTimer;
+      const timeoutPromise = new Promise((_, reject) => {
+        stdinTimer = setTimeout(() => reject(new Error(`stdin read timeout after ${stdinTimeoutMs}ms`)), stdinTimeoutMs);
+      });
 
       try {
         pythonCode = await Promise.race([stdinPromise, timeoutPromise]);
@@ -715,6 +726,10 @@ async function main() {
         console.error(`Error: Failed to read code from stdin: ${err.message}`);
         Deno.exit(1);
         return;
+      } finally {
+        // A pending timer keeps the event loop alive, so the process would not
+        // exit until it fires — the caller waits for exit, adding 30s per run.
+        clearTimeout(stdinTimer);
       }
 
       if (!pythonCode || !pythonCode.trim()) {
@@ -741,6 +756,7 @@ async function main() {
       success: result.success,
       sessionBytes: result.sessionBytes,
       sessionMetadata: result.sessionMetadata,
+      timings: { ...timings, total_ms: Math.round(performance.now() - processStartMs) },
     };
 
     console.log(JSON.stringify(outputJson));
