@@ -21,6 +21,11 @@ from elitea_sdk.runtime.utils.mcp_oauth import (
 _DEV_MODE_RELOAD = None
 
 
+# The discovery-cache registry is process state pushed in by the parent at init, not code to
+# hot-reload: dropping it would silently disable Load Tools invalidation. Restart pylon to iterate on it.
+KEPT_ACROSS_DEV_RELOAD = ('elitea_sdk.runtime.utils.mcp_discovery_cache',)
+
+
 def is_dev_reload_enabled() -> bool:
     """Check if development mode SDK reload is enabled."""
     global _DEV_MODE_RELOAD
@@ -69,6 +74,7 @@ def clear_sdk_modules(target_module: str = None) -> int:
     else:
         # Clear all SDK modules
         sdk_modules = [key for key in list(sys.modules.keys()) if key.startswith('elitea_sdk')]
+    sdk_modules = [key for key in sdk_modules if key not in KEPT_ACROSS_DEV_RELOAD]
 
     count = len(sdk_modules)
 

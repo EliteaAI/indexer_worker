@@ -35,6 +35,16 @@ from .agent_common import (
 )
 
 
+CACHE_NOT_RETIRED_WARNING = (
+    "Tools were fetched, but cached tool lists could not be retired; "
+    "runs may use the previous list until the Cache TTL expires."
+)
+
+
+def _describe_error_without_sdk(exc: Exception, headers: Optional[Dict[str, Any]] = None) -> str:
+    return str(exc)
+
+
 def safe_json_dumps(data: Any, indent: int = 2) -> str:
     """Safely serialize data to JSON string."""
     try:
@@ -99,28 +109,40 @@ class Method:
             message_id=message_id,
         )
 
-        # Import the discovery function from elitea-sdk
-        # Note: We must import McpAuthorizationRequired AFTER dev_reload_sdk
-        # to ensure we catch the same class that will be raised (not a stale reference)
-        from ..utils.funcs import dev_reload_sdk
-        dev_reload_sdk('elitea_sdk.runtime.utils')
-        from elitea_sdk.runtime.utils.mcp_tools_discovery import discover_mcp_tools
-        from elitea_sdk.runtime.utils.mcp_oauth import canonical_resource, McpAuthorizationRequired, extract_user_friendly_mcp_error
+        from ..utils.funcs import dev_reload_sdk, is_mcp_authorization_required_error
 
+        connection_headers = {}
+        describe_error = _describe_error_without_sdk
         try:
-            # Prepare connection configuration (secrets already substituted by caller)
-            connection_headers = headers or {}
+            # The SDK imports sit inside the handler's reach: on SDK skew an ImportError must
+            # become a "Failed to sync" response, not a raw 500. The auth-required check goes
+            # by class name for the same reason, and because dev reload re-creates the class.
+            dev_reload_sdk('elitea_sdk.runtime.utils')
+            from elitea_sdk.runtime.utils.mcp_tools_discovery import discover_mcp_tools
+            from elitea_sdk.runtime.utils.mcp_oauth import (
+                canonical_resource,
+                drop_unusable_authorization,
+                extract_user_friendly_mcp_error,
+                has_authorization_on_the_wire,
+                has_configured_authorization,
+                merge_oauth_authorization,
+            )
+            from elitea_sdk.runtime.utils.mcp_discovery_cache import invalidate_server_discovery
+            describe_error = extract_user_friendly_mcp_error
+
+            connection_headers = dict(headers or {})
+            configured_auth = has_configured_authorization(connection_headers)
+            access_token = None
             session_id = None
-            
-            # Add OAuth token if available
-            if mcp_tokens:
+
+            if mcp_tokens and not configured_auth:
                 server_key = canonical_resource(normalized_url)
                 original_server_key = canonical_resource(url)
                 # can be None or type for pre-built mcp, e.g. "mcp_github"
                 toolkit_type = kwargs.get('toolkit_type')
                 log.debug(f"Looking for token with server_key: {server_key} or toolkit_type: {toolkit_type}")
                 log.debug(f"Available mcp_tokens keys: {list(mcp_tokens.keys())}")
-                
+
                 token_data = mcp_tokens.get(server_key) if not toolkit_type else mcp_tokens.get(toolkit_type)
                 if not token_data and original_server_key != server_key:
                     token_data = mcp_tokens.get(original_server_key)
@@ -129,18 +151,23 @@ class Method:
                     token_data = mcp_tokens.get(url)
                     if token_data:
                         log.debug(f"Found token using exact URL match: {url}")
-                
+
                 if token_data:
                     access_token = token_data.get('access_token')
                     session_id = token_data.get('session_id')
-                    if access_token:
-                        connection_headers['Authorization'] = f'Bearer {access_token}'
-                        log.debug(f"Added OAuth token for MCP server: {server_key}")
                     if session_id:
                         log.debug(f"Using session_id for MCP server: {server_key}")
                 else:
                     log.warning(f"No token found for server_key: {server_key} or url: {url}")
-            
+            elif mcp_tokens:
+                log.info(f"Configured Authorization header present for {normalized_url}; skipping OAuth token lookup")
+
+            connection_headers, oauth_token_injected = merge_oauth_authorization(connection_headers, access_token)
+            if oauth_token_injected:
+                log.debug(f"Added OAuth token for MCP server: {normalized_url}")
+            else:
+                connection_headers = drop_unusable_authorization(connection_headers)
+
             # Discover tools from the MCP server
             log.debug(f"Discovering tools from MCP server: {normalized_url} (ssl_verify={ssl_verify})")
             tools_list = discover_mcp_tools(
@@ -149,8 +176,11 @@ class Method:
                 timeout=timeout,
                 session_id=session_id,
                 ssl_verify=ssl_verify,
+                configured_auth=has_authorization_on_the_wire(connection_headers, oauth_token_injected),
             )
-            
+            # Load Tools is the explicit refresh: no user's next run may serve the list it replaced
+            cache_retired = invalidate_server_discovery(normalized_url)
+
             log.debug(f"Successfully discovered {len(tools_list)} tools from {normalized_url}")
             
             # Build success response
@@ -168,6 +198,10 @@ class Method:
                 'count': len(tools_list),
                 'server_url': normalized_url,
             }
+            if not cache_retired:
+                log.warning(f"Tools fetched from {normalized_url} but cached tool lists could not be retired")
+                result['warning'] = CACHE_NOT_RETIRED_WARNING
+                response_metadata['warning'] = CACHE_NOT_RETIRED_WARNING
             
             # Emit success response via socket
             response_event = NodeEvent(
@@ -182,7 +216,11 @@ class Method:
             
             return result
         
-        except McpAuthorizationRequired as e:
+        except Exception as e:  # pylint: disable=W0718
+            if not is_mcp_authorization_required_error(e):
+                return self._sync_tools_failed(
+                    e, describe_error, connection_headers, normalized_url, stream_id, message_id, local_event_node,
+                )
             log.info(f"MCP authorization required for server: {url}")
 
             # Get OAuth metadata from the exception
@@ -206,34 +244,36 @@ class Method:
                 'response_metadata': response_metadata,
             }
             
-        except Exception as e:
-            # Use shared SDK utility to extract user-friendly error message
-            user_error_message = extract_user_friendly_mcp_error(e, connection_headers)
-            error_msg = f"Failed to sync MCP tools: {user_error_message}"
-
-            log.error(f"{error_msg}\n{traceback.format_exc()}")
-            
-            # Emit error response
-            error_event = NodeEvent(
-                type=EventTypes.agent_exception,
-                stream_id=stream_id,
-                message_id=message_id,
-                content=error_msg,
-                response_metadata={
-                    'error': error_msg,
-                    'server_url': normalized_url,
-                }
-            ).model_dump_json()
-            error_event = json.loads(error_event)
-            local_event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, error_event)
-            
-            return {
-                'success': False,
-                'error': error_msg,
-                'server_url': normalized_url,
-            }
-            
         finally:
             # Stop event node if forked
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
+
+    def _sync_tools_failed(  # pylint: disable=R0913
+        self, e, describe_error, connection_headers, normalized_url, stream_id, message_id, local_event_node,
+    ):
+        user_error_message = describe_error(e, connection_headers)
+        error_msg = f"Failed to sync MCP tools: {user_error_message}"
+
+        log.error(f"{error_msg}\n{traceback.format_exc()}")
+        
+        # Emit error response
+        error_event = NodeEvent(
+            type=EventTypes.agent_exception,
+            stream_id=stream_id,
+            message_id=message_id,
+            content=error_msg,
+            response_metadata={
+                'error': error_msg,
+                'server_url': normalized_url,
+            }
+        ).model_dump_json()
+        error_event = json.loads(error_event)
+        local_event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, error_event)
+        
+        return {
+            'success': False,
+            'error': error_msg,
+            'server_url': normalized_url,
+        }
+        
