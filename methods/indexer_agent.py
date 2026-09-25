@@ -75,7 +75,9 @@ from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_co
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
-from ..utils.usage_tool_events import ATTRIBUTION_HEADER, attribution_header
+from ..utils.usage_tool_events import (
+    ATTRIBUTION_HEADER, attribution_header, attribution_signing_key,
+)
 from ..utils import parallel_hitl_router, predict_router
 from ..utils.mcp_auth_tools import (
     _has_mcp_toolkits,
@@ -136,7 +138,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 api_extra_headers = {**api_extra_headers, PREDICT_RUN_ID_HEADER: run_id}
 
             # Conversation and entity for the llm rows the interface writes; stripped there
-            attribution = attribution_header(kwargs)
+            # Signed for the project the interface will bill, i.e. the X-Project-Id we send
+            attribution = attribution_header(
+                kwargs,
+                project_id=api_extra_headers.get("X-Project-Id") or client_args.get("project_id"),
+                key=attribution_signing_key(),
+            )
             if attribution:
                 api_extra_headers = {**api_extra_headers, ATTRIBUTION_HEADER: attribution}
 
