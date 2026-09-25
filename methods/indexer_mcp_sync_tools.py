@@ -54,6 +54,34 @@ def safe_json_dumps(data: Any, indent: int = 2) -> str:
         return str(data)
 
 
+def _sync_tools_failed(  # pylint: disable=R0913
+    e, describe_error, connection_headers, normalized_url, stream_id, message_id, local_event_node,
+):
+    user_error_message = describe_error(e, connection_headers)
+    error_msg = f"Failed to sync MCP tools: {user_error_message}"
+
+    log.error(f"{error_msg}\n{traceback.format_exc()}")
+    
+    error_event = NodeEvent(
+        type=EventTypes.agent_exception,
+        stream_id=stream_id,
+        message_id=message_id,
+        content=error_msg,
+        response_metadata={
+            'error': error_msg,
+            'server_url': normalized_url,
+        }
+    ).model_dump_json()
+    error_event = json.loads(error_event)
+    local_event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, error_event)
+    
+    return {
+        'success': False,
+        'error': error_msg,
+        'server_url': normalized_url,
+    }
+
+
 class Method:
     @web.method("indexer_mcp_sync_tools")
     def indexer_mcp_sync_tools(
@@ -218,7 +246,7 @@ class Method:
         
         except Exception as e:  # pylint: disable=W0718
             if not is_mcp_authorization_required_error(e):
-                return self._sync_tools_failed(
+                return _sync_tools_failed(
                     e, describe_error, connection_headers, normalized_url, stream_id, message_id, local_event_node,
                 )
             log.info(f"MCP authorization required for server: {url}")
@@ -248,32 +276,3 @@ class Method:
             # Stop event node if forked
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
-
-    def _sync_tools_failed(  # pylint: disable=R0913
-        self, e, describe_error, connection_headers, normalized_url, stream_id, message_id, local_event_node,
-    ):
-        user_error_message = describe_error(e, connection_headers)
-        error_msg = f"Failed to sync MCP tools: {user_error_message}"
-
-        log.error(f"{error_msg}\n{traceback.format_exc()}")
-        
-        # Emit error response
-        error_event = NodeEvent(
-            type=EventTypes.agent_exception,
-            stream_id=stream_id,
-            message_id=message_id,
-            content=error_msg,
-            response_metadata={
-                'error': error_msg,
-                'server_url': normalized_url,
-            }
-        ).model_dump_json()
-        error_event = json.loads(error_event)
-        local_event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, error_event)
-        
-        return {
-            'success': False,
-            'error': error_msg,
-            'server_url': normalized_url,
-        }
-        

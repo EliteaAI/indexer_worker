@@ -163,6 +163,10 @@ def sync_tools(monkeypatch, boundary):  # pylint: disable=unused-argument
     )
 
 
+class PylonModule:
+    pass
+
+
 def _call(sync_tools_module, **overrides):
     kwargs = {
         "stream_id": "stream-1",
@@ -175,7 +179,7 @@ def _call(sync_tools_module, **overrides):
         "ssl_verify": True,
     }
     kwargs.update(overrides)
-    return sync_tools_module.Method().indexer_mcp_sync_tools(**kwargs)
+    return sync_tools_module.Method.indexer_mcp_sync_tools(PylonModule(), **kwargs)
 
 
 def test_a_configured_credential_skips_the_token_lookup_and_is_sent_as_configured(sync_tools, boundary):
@@ -302,6 +306,18 @@ def test_a_failed_discovery_leaves_the_cached_lists_alone(sync_tools, boundary):
 
     assert result["success"] is False
     boundary.invalidate_server_discovery.assert_not_called()
+
+
+def test_a_failed_discovery_returns_the_servers_message_as_a_sync_error(sync_tools, boundary):
+    boundary.discover_mcp_tools.side_effect = ValueError("The MCP endpoint https://x/sse has been retired")
+
+    result = _call(sync_tools)
+
+    assert result == {
+        "success": False,
+        "error": "Failed to sync MCP tools: The MCP endpoint https://x/sse has been retired",
+        "server_url": URL,
+    }
 
 
 def test_headers_that_are_not_a_mapping_produce_an_error_result_not_a_crash(sync_tools, boundary):
