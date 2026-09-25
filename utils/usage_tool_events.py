@@ -30,6 +30,8 @@ engine and the ON CONFLICT clause.
 """
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import threading
@@ -191,17 +193,41 @@ def run_attribution(kwargs):
     }
 
 
-def attribution_header(kwargs):
+#: Field of the header JSON holding its signature; the reader trusts nothing unsigned (#6762)
+ATTRIBUTION_SIGNATURE_KEY = "sig"
+_SIGNING_CONTEXT = b"usage-attribution-v1"
+
+
+def attribution_signing_key():
+    """Derived from the indexer event-node key, so the event bus key itself never signs a header."""
+    try:
+        from tools import worker_core  # pylint: disable=C0415,E0401
+        base_key = (worker_core.descriptor.config.get("event_node") or {}).get("hmac_key")
+    except Exception:  # pylint: disable=W0703
+        base_key = None
+    if not base_key:
+        return None
+    return hmac.new(str(base_key).encode("utf-8"), _SIGNING_CONTEXT, hashlib.sha256).digest()
+
+
+def sign_attribution(columns, project_id, key):
+    """Hex HMAC over the billed project and the canonical JSON; the reader recomputes it."""
+    canonical = json.dumps(columns, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+    message = f"{project_id}\n{canonical}".encode("utf-8")
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
+def attribution_header(kwargs, project_id=None, key=None):
     """ATTRIBUTION_HEADER value, or None when the payload names nothing to attribute.
 
-    base64url'd compact JSON: an agent name is free text, and a header carrying it raw
-    could break framing. The reader keeps only the columns it knows, so a pylon_main
-    that predates this ignores the header instead of failing.
+    base64url'd compact JSON, signed for the billed project; unsigned when no key is configured.
     """
     columns = {key: value for key, value in run_attribution(kwargs).items() if value is not None}
     if not columns:
         return None
     try:
+        if key and project_id:
+            columns[ATTRIBUTION_SIGNATURE_KEY] = sign_attribution(columns, project_id, key)
         packed = json.dumps(columns, separators=(",", ":"), ensure_ascii=False)
         return base64.urlsafe_b64encode(packed.encode("utf-8")).decode("ascii").rstrip("=")
     except Exception as exc:  # pylint: disable=W0703
