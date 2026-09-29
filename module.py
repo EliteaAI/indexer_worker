@@ -18,7 +18,14 @@
 """ Module """
 
 from copy import deepcopy
+import hashlib
+import importlib
 import os
+import shutil
+import sys
+import tempfile
+import urllib.request
+import zipfile
 
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import module  # pylint: disable=E0611,E0401
@@ -28,30 +35,106 @@ import arbiter  # pylint: disable=E0401
 from tools import worker_core  # pylint: disable=E0401
 
 
-REQUIRED_NLTK_PATHS = (
-    os.path.join("tokenizers", "punkt_tab", "english", "collocations.tab"),
-    os.path.join(
-        "taggers",
-        "averaged_perceptron_tagger_eng",
-        "averaged_perceptron_tagger_eng.weights.json",
-    ),
-)
+SPACY_MODEL_NAME = "en_core_web_sm"
+SPACY_MODEL_DOWNLOAD_TIMEOUT = 120
 
 
-def _has_required_nltk_data(nltk_data_target):
-    return all(
-        os.path.exists(os.path.join(nltk_data_target, relative_path))
-        for relative_path in REQUIRED_NLTK_PATHS
+def _spacy_model_pin():
+    # Unstructured owns the pin; reading it keeps our install in lockstep with its upgrades
+    from unstructured.nlp.tokenize import (  # pylint: disable=C0415,E0401
+        _SPACY_MODEL_SHA256,
+        _SPACY_MODEL_URL,
+        _SPACY_MODEL_VERSION,
     )
+    return _SPACY_MODEL_VERSION, _SPACY_MODEL_URL, _SPACY_MODEL_SHA256
 
 
-def _preload_unstructured_nlp_model():
+def _has_spacy_model(spacy_target, version):
+    versioned = f"{SPACY_MODEL_NAME}-{version}"
+    return os.path.isdir(os.path.join(spacy_target, f"{versioned}.dist-info")) and \
+        os.path.exists(os.path.join(spacy_target, SPACY_MODEL_NAME, versioned, "config.cfg"))
+
+
+def _remove_spacy_model(spacy_target):
+    for item in os.listdir(spacy_target):
+        if item.startswith(SPACY_MODEL_NAME):
+            path = os.path.join(spacy_target, item)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+
+
+def _download_spacy_model(spacy_target, url, sha256):
+    # A pure-python wheel unzipped onto sys.path is a complete install
+    with tempfile.TemporaryDirectory(dir=spacy_target) as tmp:
+        wheel_path = os.path.join(tmp, "model.whl")
+        with urllib.request.urlopen(url, timeout=SPACY_MODEL_DOWNLOAD_TIMEOUT) as response:
+            with open(wheel_path, "wb") as wheel_file:
+                shutil.copyfileobj(response, wheel_file)
+        #
+        with open(wheel_path, "rb") as wheel_file:
+            digest = hashlib.sha256(wheel_file.read()).hexdigest()
+        if digest != sha256:
+            raise RuntimeError(f"Hash mismatch for {SPACY_MODEL_NAME}: expected {sha256}, got {digest}")
+        #
+        with zipfile.ZipFile(wheel_path) as wheel_zip:
+            wheel_zip.extractall(spacy_target)
+
+
+def _install_spacy_bundle(spacy_target, version):
+    from tools import this  # pylint: disable=E0401,C0415
+    # Staged: a resolver may hand back a different asset, so adopt only a valid model
+    with tempfile.TemporaryDirectory(dir=spacy_target) as staging:
+        this.for_module("bootstrap").module.get_bundle(
+            f"{SPACY_MODEL_NAME}-{version}.tar.gz",
+            install_needed=lambda *_args, **_kwargs: not _has_spacy_model(spacy_target, version),
+            processing="tar_extract",
+            extract_target=staging,
+            extract_cleanup=False,
+        )
+        if not _has_spacy_model(staging, version):
+            raise RuntimeError(f"bundle does not contain {SPACY_MODEL_NAME} {version}")
+        for item in os.listdir(staging):
+            if item.startswith(SPACY_MODEL_NAME):
+                shutil.move(os.path.join(staging, item), os.path.join(spacy_target, item))
+
+
+def _prepare_spacy_model(spacy_target):
+    """Install the spaCy model onto the data volume: Unstructured would target read-only site-packages."""
+    os.makedirs(spacy_target, exist_ok=True)
+    if spacy_target not in sys.path:
+        sys.path.insert(0, spacy_target)
+    #
+    version, url, sha256 = _spacy_model_pin()
+    if _has_spacy_model(spacy_target, version):
+        log.info("spaCy model %s %s is present in %s", SPACY_MODEL_NAME, version, spacy_target)
+        return
+    #
+    _remove_spacy_model(spacy_target)
+    try:
+        _install_spacy_bundle(spacy_target, version)
+    except Exception as exc:  # pylint: disable=W0718
+        log.warning("spaCy model bundle unavailable (%s); falling back to pinned wheel", exc)
+        _remove_spacy_model(spacy_target)
+    #
+    if not _has_spacy_model(spacy_target, version):
+        log.info("Downloading spaCy model %s %s into %s", SPACY_MODEL_NAME, version, spacy_target)
+        _download_spacy_model(spacy_target, url, sha256)
+    importlib.invalidate_caches()
+    if not _has_spacy_model(spacy_target, version):
+        raise RuntimeError(f"spaCy model {SPACY_MODEL_NAME} {version} missing after install")
+    log.info("Installed spaCy model %s %s into %s", SPACY_MODEL_NAME, version, spacy_target)
+
+
+def _preload_unstructured_nlp_model(spacy_target):
     """Warm the pinned NLP model without making startup depend on GitHub."""
     try:
         from elitea_sdk.runtime.langchain.tools.utils import (  # pylint: disable=C0415
             preload_unstructured_nlp_model,
         )
 
+        _prepare_spacy_model(spacy_target)
         log.info("Preloading Unstructured NLP model")
         preload_unstructured_nlp_model()
         log.info("Unstructured NLP model is ready")
@@ -90,31 +173,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         """ Preload handler """
         log.debug("Preloading bundles")
         #
+        # nltk_data no longer holds NLTK corpora; it stays as the base dir for the sandbox
         nltk_data_target = self.descriptor.config.get("nltk_data", None)
-        #
-        try:
-            if nltk_data_target is None:
-                raise RuntimeError("None nltk_data is not supported for bundles")
-            #
-            from tools import this  # pylint: disable=E0401,C0415
-            #
-            os.makedirs(nltk_data_target, exist_ok=True)
-            #
-            def _install_needed(*_args, **_kwargs):
-                try:
-                    return not _has_required_nltk_data(nltk_data_target)
-                except:  # pylint: disable=W0702
-                    return True
-            #
-            this.for_module("bootstrap").module.get_bundle(
-                "nltk-data-all.tar.gz",
-                install_needed=_install_needed,
-                processing="tar_extract",
-                extract_target=nltk_data_target,
-                extract_cleanup=False,
-            )
-        except:  # pylint: disable=W0702
-            log.exception("Failed to preload NLTK bundle")
         #
         sandbox_base = self.descriptor.config.get(
             "sandbox_base",
@@ -208,37 +268,12 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         # Pyodide sandbox - set entrypoint via environment variable
         sandbox_entrypoint = os.path.join(self.descriptor.path, "data", "sandbox", "main.js")
         os.environ["PYODIDE_SANDBOX_PKG"] = sandbox_entrypoint
-        # Indexer
-        nltk_data_target = self.descriptor.config.get("nltk_data", None)
-        #
-        try:
-            if nltk_data_target is None:
-                raise RuntimeError("None nltk_data is not supported for bundles")
-            #
-            from tools import this  # pylint: disable=E0401,C0415
-            #
-            os.makedirs(nltk_data_target, exist_ok=True)
-            #
-            def _install_needed(*_args, **_kwargs):
-                try:
-                    return not _has_required_nltk_data(nltk_data_target)
-                except:  # pylint: disable=W0702
-                    return True
-            #
-            this.for_module("bootstrap").module.get_bundle(
-                "nltk-data-all.tar.gz",
-                install_needed=_install_needed,
-                processing="tar_extract",
-                extract_target=nltk_data_target,
-                extract_cleanup=False,
-            )
-            if not _has_required_nltk_data(nltk_data_target):
-                raise RuntimeError("Required NLTK resources missing after bundle extraction")
-        except:  # pylint: disable=W0702
-            from elitea_sdk.runtime.langchain.tools.utils import download_nltk  # pylint: disable=C0415,E0401
-            download_nltk(nltk_data_target)
-        #
-        _preload_unstructured_nlp_model()
+        # Indexer: spaCy model sits next to the sandbox on the data volume by default
+        spacy_target = self.descriptor.config.get("spacy_data", None) or os.path.join(
+            os.path.dirname(self.descriptor.config.get("nltk_data", "/tmp/nltk_data")),
+            "spacy",
+        )
+        _preload_unstructured_nlp_model(spacy_target)
         #
         for key, value in self.descriptor.config.get("env_vars", {}).items():
             os.environ[key] = value
