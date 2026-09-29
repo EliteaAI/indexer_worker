@@ -4,6 +4,8 @@ event_node:
 task_limit: null
 
 nltk_data: /tmp/nltk_data
+# Writable dir for the Unstructured spaCy model (site-packages may be read-only); defaults to <nltk_data>/../spacy
+# spacy_data: /data/cache/spacy
 tasknode_tmp: /tmp/tasknode
 
 # Coalesce streamed agent_llm_chunk token-deltas into fewer, larger emits.
