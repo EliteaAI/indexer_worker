@@ -51,8 +51,12 @@ def test_startup_preloads_unstructured_model(monkeypatch):
         sdk_utils,
     )
 
-    worker_module._preload_unstructured_nlp_model()
+    prepare = Mock()
+    monkeypatch.setattr(worker_module, "_prepare_spacy_model", prepare)
 
+    worker_module._preload_unstructured_nlp_model("/data/cache/spacy")
+
+    prepare.assert_called_once_with("/data/cache/spacy")
     preload.assert_called_once_with()
     log.info.assert_any_call("Unstructured NLP model is ready")
 
@@ -69,7 +73,9 @@ def test_startup_remains_available_when_model_download_fails(monkeypatch):
         sdk_utils,
     )
 
-    worker_module._preload_unstructured_nlp_model()
+    monkeypatch.setattr(worker_module, "_prepare_spacy_model", Mock())
+
+    worker_module._preload_unstructured_nlp_model("/data/cache/spacy")
 
     log.exception.assert_called_once_with(
         "Failed to preload Unstructured NLP model; "
