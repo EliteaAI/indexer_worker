@@ -1428,6 +1428,10 @@ def build_child_launch_payloads(
             child_llm_kwargs['model'] = llm_settings.get('model_name') or parent_llm_kwargs.get('model')
             if llm_settings.get('model_name'):
                 child_llm_kwargs.pop('selection', None)
+        # The parent's model-row capabilities describe the parent's model only (#6819)
+        if child_auto or llm_settings.get('model_name'):
+            for capability in ('thinking_type', 'supported_efforts', 'default_effort'):
+                child_llm_kwargs.pop(capability, None)
         for parameter in ('model_project_id', 'max_tokens', 'max_output_tokens', 'temperature', 'reasoning_effort'):
             if parameter in llm_settings:
                 child_llm_kwargs[parameter] = llm_settings[parameter]
