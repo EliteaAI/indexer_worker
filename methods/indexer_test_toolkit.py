@@ -623,6 +623,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 project_id=tasknode_task.meta.get("project_id"),
                 chat_project_id=tasknode_task.meta.get("chat_project_id"),
                 toolkit_metadata=clean_toolkit_config,
+                defer_root_tool_end=True,
             )
             elitea_custom_callback = EliteACustomCallback(
                 node_interface,
@@ -696,20 +697,28 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             elif not formatted_content:
                 formatted_content = "Tool executed successfully"
 
-            # Manually emit agent_tool_end to include content_type metadata
-            # (instead of relying on EliteACallback's automatic emission)
+            # The only agent_tool_end for the tested tool: EliteACallback was told to hold its
+            # own back (defer_root_tool_end) so the output crosses the socket once. The
+            # deferred payload supplies the tool_run_id the UI matches on, and its trace-capped
+            # output is what the tool action shows; the full result reaches the panel through
+            # agent_response. A failure keeps formatted_content, which the panel renders as the
+            # run's error body. Without a deferred end the tool raised (EliteACallback already
+            # emitted agent_tool_error) and this event only carries that failure body.
+            deferred_end = elitea_callback.deferred_tool_end
+            tool_end_metadata = {
+                'tool_name': tool_name,
+                'finish_reason': 'stop' if success else 'error',
+                'execution_time_seconds': execution_time,
+                'content_type': content_type  # For toolkit testing page formatting
+            }
+            if deferred_end is not None:
+                tool_end_metadata.update(deferred_end.model_dump(include={
+                    'tool_run_id', 'tool_meta', 'metadata', 'timestamp_start', 'timestamp_finish',
+                }))
             node_interface.emit(
                 type=EventTypes.agent_tool_end,
-                content=formatted_content,
-                response_metadata={
-                    'tool_name': tool_name,
-                    'tool_run_id': test_result.get('tool_run_id'),
-                    'tool_output': final_result,
-                    'timestamp_finish': test_result.get('timestamp_finish'),
-                    'finish_reason': 'stop' if success else 'error',
-                    'execution_time_seconds': execution_time,
-                    'content_type': content_type  # For toolkit testing page formatting
-                }
+                content=deferred_end.tool_output if deferred_end is not None and success else formatted_content,
+                response_metadata=tool_end_metadata,
             )
 
             # Emit response event

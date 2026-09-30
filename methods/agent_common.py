@@ -672,6 +672,7 @@ class EliteACallback(BaseCallbackHandler):
         chat_project_id: int = None,
         toolkit_metadata: dict = None,
         subagent_name: str = None,
+        defer_root_tool_end: bool = False,
     ):
         log.debug(f"EliteACallback init debug={debug}")
         self.node_interface = node_interface
@@ -719,6 +720,12 @@ class EliteACallback(BaseCallbackHandler):
         self._thinking_stream_mode: Dict[str, dict] = {}
         self.current_model_name = "gpt-4"
         self.tool_calls: Dict[str, ToolCallPayload] = {}  # tool_run_id -> payload
+        # Toolkit test runs emit the root tool's agent_tool_end themselves (it carries
+        # content_type for the test panel). Emitting it here too sent the whole tool
+        # output over the socket twice, so the root end is only recorded in
+        # `deferred_tool_end` for the caller to reuse its tool_run_id and timestamps.
+        self.defer_root_tool_end = defer_root_tool_end
+        self.deferred_tool_end: ToolCallPayload | None = None
         self.llm_start_timestamp: str | None = None
         self.message_id: str = message_id
         self.project_id: int = project_id
@@ -1167,11 +1174,14 @@ class EliteACallback(BaseCallbackHandler):
             "agent_type",
         }
 
-        self.node_interface.emit(
-            type=EventTypes.agent_tool_end,
-            response_metadata=tool_call.model_dump(include=include_fields),
-            content=tool_output,
-        )
+        if self.defer_root_tool_end and kwargs.get("parent_run_id") is None:
+            self.deferred_tool_end = tool_call
+        else:
+            self.node_interface.emit(
+                type=EventTypes.agent_tool_end,
+                response_metadata=tool_call.model_dump(include=include_fields),
+                content=tool_output,
+            )
 
         _tool_name_for_entity = kwargs.get("name") or (
             self.tool_calls[tool_run_id].tool_name if tool_run_id in self.tool_calls else None
