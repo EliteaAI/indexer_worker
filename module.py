@@ -127,6 +127,21 @@ def _prepare_spacy_model(spacy_target):
     log.info("Installed spaCy model %s %s into %s", SPACY_MODEL_NAME, version, spacy_target)
 
 
+def _preload_llm_client_modules():
+    """Import what the first ChatOpenAI loads lazily, so forked agent tasks inherit it.
+
+    Agent tasks fork from this process and exit after one run. langchain_openai reaches
+    `openai.resources` (~550 modules) through the client's lazy `.chat`, and
+    httpx pulls in `httpcore` when it builds a transport, so every task paid both again.
+    Module imports only: no client, connection pool or credentials exist before the fork.
+    """
+    try:
+        import openai.resources  # pylint: disable=C0415,W0611,E0401
+        import httpcore  # pylint: disable=C0415,W0611,E0401
+    except Exception:  # pylint: disable=W0718
+        log.exception("Failed to preload LLM client modules; agent tasks will import them lazily")
+
+
 def _preload_unstructured_nlp_model(spacy_target):
     """Warm the pinned NLP model without making startup depend on GitHub."""
     try:
@@ -297,6 +312,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             # partially initialized class; client instances stay execution-local.
             from elitea_sdk.runtime.clients.client import EliteAClient  # pylint: disable=C0415,E0401
             _ = EliteAClient
+            _preload_llm_client_modules()
             # Agent prereqs
             self.agent_event_node = worker_core.event_node.clone()
             self.agent_event_node.start()
