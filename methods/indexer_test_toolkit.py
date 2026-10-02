@@ -47,6 +47,15 @@ from .agent_common import (
     EliteACallback,
     EliteACustomCallback,
 )
+from ..utils.agent_execution_common import create_usage_tool_callback
+from ..utils.usage_tool_events import (
+    ATTRIBUTION_HEADER,
+    TRIGGER_SOURCE_KWARGS_KEY,
+    attribution_header,
+    attribution_signing_key,
+)
+
+INDEX_TOOL_NAME = 'index_data'
 
 def build_mcp_auth_metadata(
     exception: 'McpAuthorizationRequired',
@@ -591,13 +600,25 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             dev_reload_sdk('elitea_sdk.runtime.clients')
             from elitea_sdk.runtime.clients.client import EliteAClient  # pylint: disable=E0401,C0415
 
+            # Index runs are automated activity for usage analytics (#6881)
+            usage_kwargs = None
+            api_extra_headers = None
+            if tool_name == INDEX_TOOL_NAME:
+                usage_kwargs = {**kwargs, TRIGGER_SOURCE_KWARGS_KEY: "index"}
+                attribution = attribution_header(
+                    usage_kwargs, project_id=project_id, key=attribution_signing_key(),
+                )
+                if attribution:
+                    api_extra_headers = {ATTRIBUTION_HEADER: attribution}
+
             # Initialize EliteAClient with proper authentication
             client = EliteAClient(
                 project_id=project_id,
                 auth_token=project_auth_token,
                 base_url=deployment_url,
                 auth_session=auth_session,
-                session_cookie_name=session_cookie_name
+                session_cookie_name=session_cookie_name,
+                api_extra_headers=api_extra_headers,
             )
             # Seems like not used
             # Generate persistent tool_run_id for this execution
@@ -641,6 +662,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 },
             )
             callbacks = [elitea_callback, elitea_custom_callback]
+            if usage_kwargs is not None:
+                usage_tool_callback = create_usage_tool_callback(
+                    self.descriptor.config, usage_kwargs, tasknode_task.meta, tasknode_task.id,
+                )
+                if usage_tool_callback:
+                    callbacks.append(usage_tool_callback)
 
             # Add callbacks to params
             runtime_config.update({"callbacks": callbacks})
