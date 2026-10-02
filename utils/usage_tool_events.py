@@ -69,6 +69,10 @@ ATTRIBUTION_HEADER = "X-Elitea-Attribution"
 #: "no individual user" is a sentinel. usage_event.user_id is NOT NULL too.
 SYSTEM_USER_ID = 0
 
+#: How a run was started; NULL/absent means manual, so only automated sources are stamped (#6881)
+TRIGGER_SOURCE_KWARGS_KEY = "trigger_source"
+AUTOMATED_TRIGGER_SOURCES = ("scheduled", "webhook", "index")
+
 # `or` not a get() default: the var is present-but-empty in some deployments.
 _SCHEMA = os.environ.get("POSTGRES_SCHEMA") or "centry"
 
@@ -83,13 +87,13 @@ INSERT INTO {_SCHEMA}.usage_event (
     run_id, conversation_id,
     root_entity_type, root_entity_id, root_entity_version_id,
     entity_type, entity_id, entity_version_id, entity_name,
-    event_type, tool_name, duration_ms, is_error, meta
+    event_type, tool_name, duration_ms, is_error, meta, trigger_source
 ) VALUES (
     :idempotency_key, :ts, :project_id, :user_id, :user_email,
     :run_id, :conversation_id,
     :root_entity_type, :root_entity_id, :root_entity_version_id,
     :entity_type, :entity_id, :entity_version_id, :entity_name,
-    :event_type, :tool_name, :duration_ms, :is_error, CAST(:meta AS jsonb)
+    :event_type, :tool_name, :duration_ms, :is_error, CAST(:meta AS jsonb), :trigger_source
 )
 ON CONFLICT (idempotency_key, ts) DO NOTHING
 """
@@ -180,6 +184,7 @@ def run_attribution(kwargs):
     root = kwargs.get(ROOT_ENTITY_KWARGS_KEY)
     if not isinstance(root, dict) or not root.get("id"):
         root = entity
+    trigger_source = kwargs.get(TRIGGER_SOURCE_KWARGS_KEY)
 
     return {
         "conversation_id": kwargs.get("conversation_id"),
@@ -190,6 +195,7 @@ def run_attribution(kwargs):
         "root_entity_type": root.get("type"),
         "root_entity_id": root.get("id"),
         "root_entity_version_id": root.get("version_id"),
+        "trigger_source": trigger_source if trigger_source in AUTOMATED_TRIGGER_SOURCES else None,
     }
 
 
@@ -281,6 +287,7 @@ def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, 
             "duration_ms": duration_ms,
             "is_error": bool(is_error),
             "meta": json.dumps(meta) if meta else None,
+            "trigger_source": attribution.get("trigger_source"),
         }
         engine = _get_engine()
         with engine.connect() as connection:

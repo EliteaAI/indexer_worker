@@ -75,6 +75,7 @@ def test_no_override_is_byte_identical_to_today():
         "entity_version_id": 3, "entity_name": "My Agent",
         "root_entity_type": "application", "root_entity_id": 7,
         "root_entity_version_id": 3,
+        "trigger_source": None,
     }
 
 
