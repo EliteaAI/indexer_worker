@@ -176,6 +176,12 @@ def normalize_response_content(content: Any) -> str:
     return json.dumps(content, ensure_ascii=False)
 
 
+def _is_user_message(message: Any) -> bool:
+    if isinstance(message, dict):
+        return message.get('type') == 'human' or message.get('role') == 'user'
+    return getattr(message, 'type', None) == 'human'
+
+
 def extract_response_content(response: Dict[str, Any], response_format: str = 'messages') -> str:
     """
     Extract and normalize content from agent response.
@@ -194,11 +200,14 @@ def extract_response_content(response: Dict[str, Any], response_format: str = 'm
     # Primary extraction: use 'output' key (always present in standardized SDK responses)
     content = response.get("output", "")
 
-    # Fallback for legacy responses that may only have 'messages' key
+    # Fallback for legacy responses that may only have 'messages' key.
+    # User messages are skipped: an SDK run that finished without an answer returns
+    # output '' and messages ending in the user's input, which must not become the reply.
     if not content and "messages" in response:
         messages = response.get("messages", [])
-        if isinstance(messages, list) and len(messages) > 0:
-            last_message = messages[-1]
+        replies = [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+        if replies:
+            last_message = replies[-1]
             if hasattr(last_message, 'content'):
                 content = last_message.content
             elif isinstance(last_message, dict):
