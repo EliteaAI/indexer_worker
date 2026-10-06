@@ -85,13 +85,13 @@ _INSERT_SQL = f"""
 INSERT INTO {_SCHEMA}.usage_event (
     idempotency_key, ts, project_id, user_id, user_email,
     run_id, conversation_id,
-    root_entity_type, root_entity_id, root_entity_version_id,
+    root_entity_type, root_entity_id, root_entity_version_id, root_entity_project_id,
     entity_type, entity_id, entity_version_id, entity_name,
     event_type, tool_name, duration_ms, is_error, meta, trigger_source
 ) VALUES (
     :idempotency_key, :ts, :project_id, :user_id, :user_email,
     :run_id, :conversation_id,
-    :root_entity_type, :root_entity_id, :root_entity_version_id,
+    :root_entity_type, :root_entity_id, :root_entity_version_id, :root_entity_project_id,
     :entity_type, :entity_id, :entity_version_id, :entity_name,
     :event_type, :tool_name, :duration_ms, :is_error, CAST(:meta AS jsonb), :trigger_source
 )
@@ -152,7 +152,10 @@ def _get_engine():
 
 
 def entity_from_application(application):
-    """`{'type', 'id', 'version_id'}` for a saved Application, else None.
+    """`{'type', 'id', 'version_id', 'name', 'project_id'}` for a saved Application, else None.
+
+    project_id is the schema the application lives in — the public project for a public
+    agent run elsewhere (#6902) — not the project the run is billed to.
 
     A raw-LLM predict ships `application: {'instructions': ...}` with no ids —
     there is no entity to attribute, so every entity_* column stays NULL.
@@ -167,6 +170,7 @@ def entity_from_application(application):
         "id": application_id,
         "version_id": application.get("version_id"),
         "name": application.get("name"),
+        "project_id": application.get("project_id"),
     }
 
 
@@ -195,6 +199,7 @@ def run_attribution(kwargs):
         "root_entity_type": root.get("type"),
         "root_entity_id": root.get("id"),
         "root_entity_version_id": root.get("version_id"),
+        "root_entity_project_id": root.get("project_id"),
         "trigger_source": trigger_source if trigger_source in AUTOMATED_TRIGGER_SOURCES else None,
     }
 
@@ -278,6 +283,7 @@ def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, 
             "root_entity_type": attribution.get("root_entity_type"),
             "root_entity_id": attribution.get("root_entity_id"),
             "root_entity_version_id": attribution.get("root_entity_version_id"),
+            "root_entity_project_id": attribution.get("root_entity_project_id"),
             "entity_type": attribution.get("entity_type"),
             "entity_id": attribution.get("entity_id"),
             "entity_version_id": attribution.get("entity_version_id"),
