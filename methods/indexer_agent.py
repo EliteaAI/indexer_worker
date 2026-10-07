@@ -233,6 +233,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Create EliteAClient AFTER fork
         client = create_elitea_client(client_args, api_token, api_extra_headers)
         install_routing_context_signer(client, local_event_node, kwargs.get("routing_principal"))
+        # #6913: pre-expanded sub-agents from pylon_main; the SDK falls back to PATCH on a miss
+        client.prefetched_version_details = (kwargs.get("application") or {}).get("subagent_version_details") or {}
 
         should_continue = kwargs.get('should_continue', False)
         hitl_resume = kwargs.get('hitl_resume', False)
