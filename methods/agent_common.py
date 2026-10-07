@@ -155,6 +155,57 @@ _pgvector_connstr_cache: dict = {}
 
 
 
+def envelope_token_source(elitea_callback: Optional['EliteACallback']) -> str:
+    """Summarize per-call token provenance for the envelope totals.
+
+    ``provider`` when every LLM call reported API usage, ``estimate`` when every call
+    fell back to tiktoken, ``mixed`` when both occurred, ``none`` when no LLM call ran.
+    """
+    counts = getattr(elitea_callback, 'token_source_counts', None) or {}
+    provider, estimate = counts.get('provider', 0), counts.get('estimate', 0)
+    if provider and estimate:
+        return 'mixed'
+    if provider:
+        return 'provider'
+    if estimate:
+        return 'estimate'
+    return 'none'
+
+
+def build_execution_evidence(
+    elitea_callback: Optional['EliteACallback'],
+    tokens_in: Optional[int] = None,
+    tokens_out: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Trajectory and usage evidence shared by every task-result builder (#6809/#6716).
+
+    Error, parked and paused runs still made LLM and tool calls; without this they
+    would reach evaluation with no steps and zero tokens. Token totals default to the
+    callback's running counters when the caller has no final figure.
+    """
+    if elitea_callback is None:
+        return {
+            'thinking_steps': [],
+            'tool_calls': [],
+            'tool_calls_dict': {},
+            'chat_history_tokens_input': tokens_in or 0,
+            'llm_response_tokens_output': tokens_out or 0,
+            'token_source': 'none',
+        }
+    sanitized_steps = json.loads(json.dumps(elitea_callback.thinking_steps, default=str))
+    return {
+        'thinking_steps': sanitized_steps,
+        'tool_calls': [
+            i for i in sanitized_steps
+            if i.get('generation_info') and i['generation_info'].get('finish_reason') == 'tool_calls'
+        ],
+        'tool_calls_dict': {k: v.model_dump() for k, v in elitea_callback.tool_calls.items()},
+        'chat_history_tokens_input': elitea_callback.tokens_in if tokens_in is None else tokens_in,
+        'llm_response_tokens_output': elitea_callback.tokens_out if tokens_out is None else tokens_out,
+        'token_source': envelope_token_source(elitea_callback),
+    }
+
+
 def build_mcp_auth_pause_result(
     elitea_callback,
     chat_history: list,
@@ -187,6 +238,7 @@ def build_mcp_auth_pause_result(
                 response_metadata=elitea_callback.mcp_auth_pause_payload,
             )
         return {
+            **build_execution_evidence(elitea_callback),
             "chat_history": chat_history,
             "error": getattr(elitea_callback, "mcp_auth_pause_message", None) or fallback_error,
             # Durable-child reconcile must not mistake an auth pause for completion. Resume parity
@@ -203,6 +255,7 @@ def build_mcp_auth_required_result(
     exc: Exception,
     chat_project_id: Optional[int],
     chat_history: list,
+    elitea_callback: Optional["EliteACallback"] = None,
 ) -> dict:
     """Emit mcp_authorization_required with normalized metadata and return stop payload."""
     auth_metadata = _mcp_auth_error_to_metadata(exc)
@@ -217,6 +270,7 @@ def build_mcp_auth_required_result(
         response_metadata=auth_metadata,
     )
     return {
+        **build_execution_evidence(elitea_callback),
         "chat_history": chat_history,
         "error": str(exc),
         "paused": True,
@@ -518,6 +572,7 @@ def execution_error(
     execution_start_time: Optional[datetime] = None,
     budget_error_code: Optional[str] = None,
     continuation_error: Optional[dict] = None,
+    elitea_callback: Optional["EliteACallback"] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -534,6 +589,7 @@ def execution_error(
         execution_start_time: Execution start timestamp for duration calculation (optional)
         budget_error_code: Budget scope that blocked the call, for the UI to link to usage (optional)
         continuation_error: Structured output-continuation failure details (optional)
+        elitea_callback: Callback with the steps and token usage gathered before the error (optional)
 
     Returns:
         Dict containing chat_history and error information
@@ -630,6 +686,7 @@ def execution_error(
         "chat_history": chat_history,
         "error": error,
         "human_readable": human_readable or error_message,
+        **build_execution_evidence(elitea_callback),
     }
     if is_fanout_child(tasknode_task_meta):
         result["parallel_terminal_error"] = build_parallel_terminal_error(
@@ -705,6 +762,8 @@ class EliteACallback(BaseCallbackHandler):
         self.thinking_steps: list[dict] = []
         self.tokens_in = 0
         self.tokens_out = 0
+        # Per-call token provenance: 'provider' (API usage) or 'estimate' (tiktoken).
+        self.token_source_counts = {"provider": 0, "estimate": 0}
         self.pending_llm_requests = defaultdict(
             lambda: {"tokens_in": 0, "tokens_out": 0}
         )
@@ -1868,6 +1927,8 @@ class EliteACallback(BaseCallbackHandler):
         pending = self.pending_llm_requests.get(run_id, {})
         self.tokens_in += pending.get("tokens_in", 0)
         self.tokens_out += pending.get("tokens_out", 0)
+        if pending:
+            self.token_source_counts["estimate"] += 1
         self.pending_llm_requests.pop(run_id, None)
         #
         if args:
@@ -1945,6 +2006,7 @@ class EliteACallback(BaseCallbackHandler):
             completion_tokens = token_usage.get("completion_tokens", 0)
             self.tokens_in += prompt_tokens
             self.tokens_out += completion_tokens
+            token_source = "provider"
             log.debug(
                 f"Token counting strategy: API-provided (run_id={run_id}, prompt={prompt_tokens}, completion={completion_tokens})"
             )
@@ -1954,9 +2016,12 @@ class EliteACallback(BaseCallbackHandler):
             tokens_out = pending.get("tokens_out", 0)
             self.tokens_in += tokens_in
             self.tokens_out += tokens_out
+            token_source = "estimate"
             log.debug(
                 f"Token counting strategy: tiktoken estimation (run_id={run_id}, prompt={tokens_in}, completion={tokens_out})"
             )
+
+        self.token_source_counts[token_source] += 1
 
         # Get the timestamp_start, langgraph_node, and parent_agent_name before popping
         llm_timestamp_start = pending.get("timestamp_start")
@@ -1972,6 +2037,17 @@ class EliteACallback(BaseCallbackHandler):
                     "timestamp_start": llm_timestamp_start,
                     "timestamp_finish": datetime.now(tz=timezone.utc).isoformat(),
                 }
+                # ChatGeneration.message is typed BaseMessage, so model_dump() drops
+                # AIMessage.usage_metadata and tool_calls; carry them over explicitly.
+                generation_message = getattr(generation_item, "message", None)
+                if generation_message is not None and isinstance(generation_chunk.get("message"), dict):
+                    generation_chunk["message"]["usage_metadata"] = getattr(
+                        generation_message, "usage_metadata", None
+                    )
+                    generation_chunk["message"]["tool_calls"] = list(
+                        getattr(generation_message, "tool_calls", None) or []
+                    )
+                generation_chunk["token_source"] = token_source
                 # Add langgraph_node as tool_name in message.response_metadata for frontend display
                 if langgraph_node and "message" in generation_chunk:
                     if "response_metadata" not in generation_chunk["message"]:
