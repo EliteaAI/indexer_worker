@@ -50,6 +50,21 @@ EVENT_TYPE_TOOL = "tool"
 ENTITY_TYPE_APPLICATION = "application"
 ENTITY_TYPE_EVALUATION = "evaluation"
 
+#: An agent activating a skill (#6926). Zero tokens and cost: the body's tokens are already in
+#: the agent's own llm rows. tool_name stays NULL so tool analytics never count it.
+EVENT_TYPE_SKILL = "skill"
+#: Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
+ENTITY_TYPE_SKILL = "skill"
+SKILL_SOURCE_LOAD = "load_skill"
+SKILL_SOURCE_MENTION = "mention"
+SKILL_OUTCOME_LOADED = "loaded"
+SKILL_OUTCOME_UNKNOWN = "unknown_skill"
+#: Informational only, never priced: the usual chars-per-token rule of thumb
+BODY_CHARS_PER_TOKEN = 4
+#: Payload flags of a re-dispatch of a run that already started (HITL, MCP auth, continue,
+#: parallel sub-agent reconcile)
+RESUME_DISPATCH_FLAGS = ("hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile")
+
 #: Root entity of the run, propagated to sub-agent children. Indexer-internal:
 #: the indexer builds the child payload and pylon_main replays it verbatim, so
 #: unlike PREDICT_RUN_ID_KWARGS_KEY this needs no shared SDK constant.
@@ -81,19 +96,38 @@ _engine = None
 _engine_pid = None
 _write_errors_seen = set()
 
-_INSERT_SQL = f"""
-INSERT INTO {_SCHEMA}.usage_event (
+_COLUMNS = """
     idempotency_key, ts, project_id, user_id, user_email,
     run_id, conversation_id,
     root_entity_type, root_entity_id, root_entity_version_id, root_entity_project_id,
     entity_type, entity_id, entity_version_id, entity_name,
     event_type, tool_name, duration_ms, is_error, meta, trigger_source
-) VALUES (
+"""
+_VALUES = """
     :idempotency_key, :ts, :project_id, :user_id, :user_email,
     :run_id, :conversation_id,
     :root_entity_type, :root_entity_id, :root_entity_version_id, :root_entity_project_id,
     :entity_type, :entity_id, :entity_version_id, :entity_name,
     :event_type, :tool_name, :duration_ms, :is_error, CAST(:meta AS jsonb), :trigger_source
+"""
+
+_INSERT_SQL = f"""
+INSERT INTO {_SCHEMA}.usage_event ({_COLUMNS}) VALUES ({_VALUES})
+ON CONFLICT (idempotency_key, ts) DO NOTHING
+"""
+
+# The unique key includes ts, so ON CONFLICT alone cannot stop a second row for the same
+# activation: a resumed run or a parallel child writes it at a later ts. idempotency_key leads
+# that unique index, so the existence probe is an index lookup per partition.
+# Two parallel children can probe at the same moment, so writers of one key are serialised
+# with a transaction-scoped advisory lock taken first; the INSERT's fresh snapshot then sees
+# the committed row.
+_KEY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(:idempotency_key, 0))"
+_INSERT_ONCE_SQL = f"""
+INSERT INTO {_SCHEMA}.usage_event ({_COLUMNS})
+SELECT {_VALUES}
+WHERE NOT EXISTS (
+    SELECT 1 FROM {_SCHEMA}.usage_event WHERE idempotency_key = :idempotency_key
 )
 ON CONFLICT (idempotency_key, ts) DO NOTHING
 """
@@ -263,41 +297,39 @@ def build_attribution(kwargs, task_meta, task_id):
     }
 
 
-def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, meta=None):
-    """Write one tool row. Never raises: a usage write must not fail a user's run."""
-    if not attribution or not attribution.get("project_id"):
-        return
+def _row_params(attribution, idempotency_key, entity, **columns):
+    """One usage_event row for the run in attribution, naming entity as the node that acted."""
+    return {
+        "idempotency_key": idempotency_key,
+        "ts": datetime.now(tz=timezone.utc),
+        "project_id": attribution["project_id"],
+        "user_id": attribution.get("user_id") or SYSTEM_USER_ID,
+        "user_email": attribution.get("user_email"),
+        "run_id": attribution.get("run_id"),
+        "conversation_id": attribution.get("conversation_id"),
+        "root_entity_type": attribution.get("root_entity_type"),
+        "root_entity_id": attribution.get("root_entity_id"),
+        "root_entity_version_id": attribution.get("root_entity_version_id"),
+        "root_entity_project_id": attribution.get("root_entity_project_id"),
+        "entity_type": entity.get("entity_type"),
+        "entity_id": entity.get("entity_id"),
+        "entity_version_id": entity.get("entity_version_id"),
+        "entity_name": entity.get("entity_name"),
+        "trigger_source": attribution.get("trigger_source"),
+        **columns,
+    }
+
+
+def _write(statement, params, what, lock_key=False):
+    """Never raises: a usage write must not fail a user's run."""
     try:
         from sqlalchemy import text  # pylint: disable=C0415
 
-        ts = datetime.now(tz=timezone.utc)
-        correlation = attribution.get("run_id") or attribution.get("task_id")
-        params = {
-            "idempotency_key": f"tool:{correlation}:{lc_run_id}",
-            "ts": ts,
-            "project_id": attribution["project_id"],
-            "user_id": attribution.get("user_id") or SYSTEM_USER_ID,
-            "user_email": attribution.get("user_email"),
-            "run_id": attribution.get("run_id"),
-            "conversation_id": attribution.get("conversation_id"),
-            "root_entity_type": attribution.get("root_entity_type"),
-            "root_entity_id": attribution.get("root_entity_id"),
-            "root_entity_version_id": attribution.get("root_entity_version_id"),
-            "root_entity_project_id": attribution.get("root_entity_project_id"),
-            "entity_type": attribution.get("entity_type"),
-            "entity_id": attribution.get("entity_id"),
-            "entity_version_id": attribution.get("entity_version_id"),
-            "entity_name": attribution.get("entity_name"),
-            "event_type": EVENT_TYPE_TOOL,
-            "tool_name": (tool_name or "")[:256] or None,
-            "duration_ms": duration_ms,
-            "is_error": bool(is_error),
-            "meta": json.dumps(meta) if meta else None,
-            "trigger_source": attribution.get("trigger_source"),
-        }
         engine = _get_engine()
         with engine.connect() as connection:
-            connection.execute(text(_INSERT_SQL), params)
+            if lock_key:
+                connection.execute(text(_KEY_LOCK_SQL), {"idempotency_key": params["idempotency_key"]})
+            connection.execute(text(statement), params)
             connection.commit()
     except Exception as exc:  # pylint: disable=W0703
         # Dedup per unique message so a missing partition or a schema-drift
@@ -305,6 +337,85 @@ def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, 
         key = str(exc)[:200]
         if key not in _write_errors_seen:
             _write_errors_seen.add(key)
-            log.warning("usage: failed to write tool usage event: %s", exc)
+            log.warning("usage: failed to write %s usage event: %s", what, exc)
         else:
-            log.debug("usage: repeat tool usage write failure: %s", exc)
+            log.debug("usage: repeat %s usage write failure: %s", what, exc)
+
+
+def _correlation(attribution):
+    return attribution.get("run_id") or attribution.get("task_id")
+
+
+def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, meta=None):
+    """Write one tool row. Never raises: a usage write must not fail a user's run."""
+    if not attribution or not attribution.get("project_id"):
+        return
+    try:
+        params = _row_params(
+            attribution, f"tool:{_correlation(attribution)}:{lc_run_id}", attribution,
+            event_type=EVENT_TYPE_TOOL,
+            tool_name=(tool_name or "")[:256] or None,
+            duration_ms=duration_ms,
+            is_error=bool(is_error),
+            meta=json.dumps(meta) if meta else None,
+        )
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning("usage: failed to build tool usage event: %s", exc)
+        return
+    _write(_INSERT_SQL, params, "tool")
+
+
+def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED, body_chars=0,
+                       parent_agent_name=None):
+    """Write one skill activation row per (run, source, skill). Never raises.
+
+    The root stays the agent that ran. An unknown_skill outcome has no skill id, only the name
+    the model asked for, and is not an error: it must not mark the agent run as failed.
+    """
+    if not attribution or not attribution.get("project_id") or not isinstance(skill, dict):
+        return
+    try:
+        name = skill.get("name")
+        skill_key = skill.get("skill_id") or (name or "").strip().lower()
+        meta = {
+            "source": source,
+            "outcome": outcome,
+            "body_chars": body_chars,
+            "est_body_tokens": body_chars // BODY_CHARS_PER_TOKEN,
+        }
+        if parent_agent_name:
+            meta["parent_agent_name"] = parent_agent_name
+        params = _row_params(
+            attribution, f"skill:{_correlation(attribution)}:{source}:{skill_key}",
+            {
+                "entity_type": ENTITY_TYPE_SKILL,
+                "entity_id": skill.get("skill_id"),
+                "entity_version_id": skill.get("skill_version_id"),
+                "entity_name": name,
+            },
+            event_type=EVENT_TYPE_SKILL,
+            tool_name=None,
+            duration_ms=None,
+            is_error=False,
+            meta=json.dumps(meta),
+        )
+    except Exception as exc:  # pylint: disable=W0703
+        log.warning("usage: failed to build skill usage event: %s", exc)
+        return
+    _write(_INSERT_ONCE_SQL, params, "skill", lock_key=True)
+
+
+def record_skill_mentions(attribution, kwargs):
+    """One mention row per distinct skill the message invoked with ~name.
+
+    Only on the run's first dispatch: a resume re-dispatches the same run with the same message.
+    """
+    kwargs = kwargs or {}
+    if any(kwargs.get(flag) for flag in RESUME_DISPATCH_FLAGS):
+        return
+    for skill in kwargs.get("invoked_skills") or []:
+        if isinstance(skill, dict) and skill.get("name"):
+            record_skill_event(
+                attribution, skill, SKILL_SOURCE_MENTION,
+                body_chars=len(skill.get("instructions") or ""),
+            )

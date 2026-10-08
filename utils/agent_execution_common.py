@@ -61,9 +61,10 @@ from .parallel_dispatch_contract import (
     normalize_hitl_pause,
     split_mcp_auth_interrupts,
 )
-from .usage_tool_callback import UsageToolCallback
+from .usage_tool_callback import UsageToolCallback, subagent_skill_registries
 from .usage_tool_events import (
     build_attribution,
+    record_skill_mentions,
     enabled as usage_enabled,
     entity_from_application,
     ROOT_ENTITY_KWARGS_KEY,
@@ -575,7 +576,11 @@ def create_usage_tool_callback(
     """
     if not usage_enabled(plugin_config):
         return None
-    return UsageToolCallback(build_attribution(kwargs, task_meta, task_id))
+    attribution = build_attribution(kwargs, task_meta, task_id)
+    record_skill_mentions(attribution, kwargs)
+    return UsageToolCallback(
+        attribution, kwargs.get('attached_skills'), subagent_skill_registries(kwargs.get('application')),
+    )
 
 
 def create_langfuse_callback_with_metadata(
