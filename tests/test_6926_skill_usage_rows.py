@@ -218,6 +218,15 @@ class TestLoadSkill:
 
         assert [r["entity_name"] for r in skill_rows(rows)] == ["nope"]
 
+    def test_an_unknown_name_never_hides_a_later_name_only_load_of_it(self, rows):
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
+
+        run_tool(callback, LOAD_SKILL_UNKNOWN.format(name="pirate", available="tone"), skill="pirate")
+        run_tool(callback, loaded("pirate", "x"), metadata={"parent_agent_name": "Unprefetched"})
+
+        assert sorted(json.loads(r["meta"])["outcome"] for r in skill_rows(rows)) == ["loaded", "unknown_skill"]
+        assert len({r["idempotency_key"] for r in skill_rows(rows)}) == 2
+
     def test_every_skill_row_is_written_once_per_run_source_and_skill(self, rows):
         first = RunCallbacks(AGENT_RUN, REGISTRY)
         second = RunCallbacks(AGENT_RUN, REGISTRY)

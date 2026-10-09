@@ -51,6 +51,8 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
     try:
         name = skill.get("name")
         skill_key = skill.get("skill_id") or (name or "").strip().lower()
+        if outcome != SKILL_OUTCOME_LOADED:
+            skill_key = f"{outcome}:{skill_key}"
         meta = {
             "source": source,
             "outcome": outcome,
