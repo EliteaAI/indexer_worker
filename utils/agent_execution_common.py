@@ -61,10 +61,11 @@ from .parallel_dispatch_contract import (
     normalize_hitl_pause,
     split_mcp_auth_interrupts,
 )
-from .usage_tool_callback import UsageToolCallback, subagent_skill_registries
+from .usage_skill_callback import UsageSkillCallback, subagent_skill_registries
+from .usage_skill_events import fresh_dispatch_mentions
+from .usage_tool_callback import UsageToolCallback
 from .usage_tool_events import (
     build_attribution,
-    record_skill_mentions,
     enabled as usage_enabled,
     entity_from_application,
     ROOT_ENTITY_KWARGS_KEY,
@@ -576,10 +577,23 @@ def create_usage_tool_callback(
     """
     if not usage_enabled(plugin_config):
         return None
-    attribution = build_attribution(kwargs, task_meta, task_id)
-    record_skill_mentions(attribution, kwargs)
-    return UsageToolCallback(
-        attribution, kwargs.get('attached_skills'), subagent_skill_registries(kwargs.get('application')),
+    return UsageToolCallback(build_attribution(kwargs, task_meta, task_id))
+
+
+def create_usage_skill_callback(
+    plugin_config: Dict[str, Any],
+    kwargs: Dict[str, Any],
+    task_meta: Dict[str, Any],
+    task_id: str,
+):
+    """Attached even without skills on the root: a sub-agent can still load its own."""
+    if not usage_enabled(plugin_config):
+        return None
+    return UsageSkillCallback(
+        build_attribution(kwargs, task_meta, task_id),
+        kwargs.get('attached_skills'),
+        subagent_skill_registries(kwargs.get('application')),
+        fresh_dispatch_mentions(kwargs),
     )
 
 

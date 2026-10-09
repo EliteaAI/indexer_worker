@@ -49,12 +49,25 @@ def _load_package():
     package = types.ModuleType("usage_utils_6926")
     package.__path__ = [str(UTILS_DIR)]
     sys.modules["usage_utils_6926"] = package
-    events = importlib.import_module("usage_utils_6926.usage_tool_events")
-    callback = importlib.import_module("usage_utils_6926.usage_tool_callback")
-    return events, callback
+    return tuple(importlib.import_module(f"usage_utils_6926.{name}") for name in (
+        "usage_tool_events", "usage_skill_events", "usage_tool_callback", "usage_skill_callback",
+    ))
 
 
-events, callback_module = _load_package()
+events, skill_events, tool_callback_module, callback_module = _load_package()
+
+
+class RunCallbacks:
+    """Both usage handlers, attached together the way an agent run attaches them."""
+
+    def __init__(self, attribution, *args, **kwargs):
+        self.handlers = [
+            tool_callback_module.UsageToolCallback(attribution),
+            callback_module.UsageSkillCallback(attribution, *args, **kwargs),
+        ]
+
+    def __getattr__(self, event):
+        return lambda *args, **kwargs: [getattr(h, event)(*args, **kwargs) for h in self.handlers]
 
 REGISTRY = [
     {"skill_id": 41, "skill_version_id": 410, "name": "pdf-report", "instructions": "Write a PDF."},
@@ -120,7 +133,7 @@ def loaded(name, instructions):
 
 class TestLoadSkill:
     def test_a_returned_body_writes_one_skill_row_and_keeps_the_tool_row(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, loaded("pdf-report", "Write a PDF."))
 
@@ -138,8 +151,15 @@ class TestLoadSkill:
             "source": "load_skill", "outcome": "loaded", "body_chars": 12, "est_body_tokens": 3,
         }
 
+    def test_the_generic_tool_callback_alone_writes_no_skill_row(self, rows):
+        callback = tool_callback_module.UsageToolCallback(AGENT_RUN)
+
+        run_tool(callback, loaded("pdf-report", "Write a PDF."))
+
+        assert [(r["event_type"], r["tool_name"]) for r in rows] == [("tool", "load_skill")]
+
     def test_the_row_carries_no_tokens_or_cost(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, loaded("pdf-report", "Write a PDF."))
 
@@ -148,14 +168,14 @@ class TestLoadSkill:
         assert "input_tokens" not in row["_sql"] and "cost" not in row["_sql"]
 
     def test_a_tool_message_output_is_read_through_its_content(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, types.SimpleNamespace(content=loaded("tone", "Be kind.")), skill="tone")
 
         assert [r["entity_id"] for r in skill_rows(rows)] == [42]
 
     def test_an_already_loaded_answer_writes_no_skill_row(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, LOAD_SKILL_ALREADY_ACTIVE.format(name="pdf-report"))
 
@@ -163,14 +183,14 @@ class TestLoadSkill:
         assert [r["tool_name"] for r in rows] == ["load_skill"]
 
     def test_a_failed_load_skill_writes_no_skill_row(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, None, error=True)
 
         assert skill_rows(rows) == []
 
     def test_another_tool_never_writes_a_skill_row(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
         run_id = uuid.uuid4()
 
         callback.on_tool_start({"name": "read_file"}, "{}", run_id=run_id)
@@ -179,7 +199,7 @@ class TestLoadSkill:
         assert skill_rows(rows) == []
 
     def test_an_unknown_name_is_recorded_without_an_error(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, LOAD_SKILL_UNKNOWN.format(name="nope", available="pdf-report, tone"), skill="nope")
 
@@ -190,7 +210,7 @@ class TestLoadSkill:
         assert [r["is_error"] for r in rows] == [False, False]
 
     def test_an_unknown_name_falls_back_to_the_tool_message(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
         run_id = uuid.uuid4()
 
         callback.on_tool_start({"name": "load_skill"}, "nope", run_id=run_id)
@@ -199,8 +219,8 @@ class TestLoadSkill:
         assert [r["entity_name"] for r in skill_rows(rows)] == ["nope"]
 
     def test_every_skill_row_is_written_once_per_run_source_and_skill(self, rows):
-        first = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
-        second = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        first = RunCallbacks(AGENT_RUN, REGISTRY)
+        second = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(first, loaded("pdf-report", "x"))
         run_tool(second, loaded("pdf-report", "x"))
@@ -210,7 +230,7 @@ class TestLoadSkill:
         assert all("WHERE NOT EXISTS" in r["_sql"] for r in skill_rows(rows))
 
     def test_writers_of_one_key_take_its_lock_before_inserting(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, loaded("pdf-report", "x"))
 
@@ -227,8 +247,7 @@ class TestLoadSkill:
 
 class TestSubAgents:
     def test_an_in_process_sub_agent_load_is_name_only_with_its_parent(self, rows):
-        # The root registry is the root's; the sub-agent may attach another version
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, loaded("pdf-report", "x"), metadata={"parent_agent_name": "Researcher"})
 
@@ -243,7 +262,7 @@ class TestSubAgents:
                 {"skill_id": 55, "skill_version_id": 551, "name": "pdf-report", "instructions": "x"},
             ]}},
         }})
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY, subagents)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY, subagents)
 
         run_tool(callback, loaded("pdf-report", "x"), metadata={"parent_agent_name": "Researcher"})
 
@@ -261,7 +280,7 @@ class TestSubAgents:
                 {"skill_id": 56, "skill_version_id": 561, "name": "pdf-report"},
             ]}},
         }})
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY, subagents)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY, subagents)
 
         run_tool(callback, loaded("pdf-report", "x"), metadata={"parent_agent_name": "Researcher"})
 
@@ -283,7 +302,7 @@ class TestSubAgents:
 
     def test_a_parallel_child_resolves_its_own_registry_and_names_itself(self, rows):
         child = {**AGENT_RUN, "entity_id": 31, "entity_version_id": 310, "entity_name": "Child (base)"}
-        callback = callback_module.UsageToolCallback(child, [
+        callback = RunCallbacks(child, [
             {"skill_id": 55, "skill_version_id": 550, "name": "pdf-report", "instructions": "x"},
         ])
 
@@ -295,7 +314,7 @@ class TestSubAgents:
         assert json.loads(row["meta"])["parent_agent_name"] == "Child (base)"
 
     def test_the_root_agent_names_no_parent(self, rows):
-        callback = callback_module.UsageToolCallback(AGENT_RUN, REGISTRY)
+        callback = RunCallbacks(AGENT_RUN, REGISTRY)
 
         run_tool(callback, loaded("pdf-report", "x"))
 
@@ -309,28 +328,50 @@ MENTIONED = [
 
 
 class TestMentions:
-    def test_a_fresh_dispatch_writes_one_row_per_invoked_skill(self, rows):
-        events.record_skill_mentions(AGENT_RUN, {"invoked_skills": MENTIONED})
+    @staticmethod
+    def start_run(callback, parent_run_id=None):
+        callback.on_chain_start({}, {}, run_id=uuid.uuid4(), parent_run_id=parent_run_id)
+
+    def test_mentions_are_written_when_the_run_starts_not_when_built(self, rows):
+        callback = RunCallbacks(
+            AGENT_RUN, REGISTRY, mentioned_skills=skill_events.fresh_dispatch_mentions({"invoked_skills": MENTIONED}),
+        )
+        assert rows == []
+
+        self.start_run(callback)
 
         assert [(r["entity_id"], r["entity_version_id"]) for r in rows] == [(42, 420), (41, 410)]
         assert [json.loads(r["meta"])["source"] for r in rows] == ["mention", "mention"]
         assert {r["tool_name"] for r in rows} == {None}
         assert json.loads(rows[0]["meta"])["body_chars"] == len("Be kind.")
 
-    @pytest.mark.parametrize("flag", ["hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile"])
-    def test_a_resume_writes_no_mention_rows(self, rows, flag):
-        events.record_skill_mentions(AGENT_RUN, {"invoked_skills": MENTIONED, flag: True})
+    def test_later_chain_starts_write_nothing_more(self, rows):
+        callback = RunCallbacks(AGENT_RUN, REGISTRY, mentioned_skills=MENTIONED)
+        self.start_run(callback)
+        written = len(rows)
 
-        assert rows == []
+        self.start_run(callback, parent_run_id=uuid.uuid4())
+        self.start_run(callback)
+
+        assert len(rows) == written == 2
+
+    @pytest.mark.parametrize("flag", ["hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile"])
+    def test_a_resume_has_no_mentions_to_write(self, flag):
+        assert skill_events.fresh_dispatch_mentions({"invoked_skills": MENTIONED, flag: True}) == []
 
     def test_a_dispatch_without_mentions_writes_nothing(self, rows):
-        events.record_skill_mentions(AGENT_RUN, {"invoked_skills": []})
+        callback = RunCallbacks(
+            AGENT_RUN, REGISTRY, mentioned_skills=skill_events.fresh_dispatch_mentions({"invoked_skills": []}),
+        )
+
+        self.start_run(callback)
 
         assert rows == []
 
     def test_a_mention_and_a_load_of_one_skill_are_separate_rows(self, rows):
-        events.record_skill_mentions(AGENT_RUN, {"invoked_skills": MENTIONED[:1]})
-        run_tool(callback_module.UsageToolCallback(AGENT_RUN, REGISTRY), loaded("tone", "x"), skill="tone")
+        callback = RunCallbacks(AGENT_RUN, REGISTRY, mentioned_skills=MENTIONED[:1])
+        self.start_run(callback)
+        run_tool(callback, loaded("tone", "x"), skill="tone")
 
         assert sorted(r["idempotency_key"] for r in skill_rows(rows)) == [
             "skill:run-1:load_skill:42", "skill:run-1:mention:42",
@@ -344,10 +385,11 @@ class TestFailSafe:
 
         monkeypatch.setattr(events, "_get_engine", broken)
 
-        events.record_skill_event(AGENT_RUN, MENTIONED[0], events.SKILL_SOURCE_MENTION)
+        skill_events.record_skill_event(AGENT_RUN, MENTIONED[0], skill_events.SKILL_SOURCE_MENTION)
 
     def test_no_project_writes_nothing(self, rows):
-        events.record_skill_mentions({**AGENT_RUN, "project_id": None}, {"invoked_skills": MENTIONED})
+        callback = RunCallbacks({**AGENT_RUN, "project_id": None}, mentioned_skills=MENTIONED)
+        TestMentions.start_run(callback)
 
         assert rows == []
 

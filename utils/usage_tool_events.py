@@ -50,18 +50,7 @@ EVENT_TYPE_TOOL = "tool"
 ENTITY_TYPE_APPLICATION = "application"
 ENTITY_TYPE_EVALUATION = "evaluation"
 
-#: An agent activating a skill (#6926). Zero tokens and cost: the body's tokens are already in
-#: the agent's own llm rows. tool_name stays NULL so tool analytics never count it.
-EVENT_TYPE_SKILL = "skill"
-#: Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
-ENTITY_TYPE_SKILL = "skill"
-SKILL_SOURCE_LOAD = "load_skill"
-SKILL_SOURCE_MENTION = "mention"
-SKILL_OUTCOME_LOADED = "loaded"
-SKILL_OUTCOME_UNKNOWN = "unknown_skill"
-#: Informational only, never priced: the usual chars-per-token rule of thumb
-BODY_CHARS_PER_TOKEN = 4
-RESUME_DISPATCH_FLAGS = ("hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile")
+
 
 #: Root entity of the run, propagated to sub-agent children. Indexer-internal:
 #: the indexer builds the child payload and pylon_main replays it verbatim, so
@@ -114,17 +103,7 @@ INSERT INTO {_SCHEMA}.usage_event ({_COLUMNS}) VALUES ({_VALUES})
 ON CONFLICT (idempotency_key, ts) DO NOTHING
 """
 
-# The unique key includes ts, so ON CONFLICT cannot stop a second row written later for the
-# same activation. Parallel children can probe at the same moment, hence the advisory lock.
 _KEY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(:idempotency_key, 0))"
-_INSERT_ONCE_SQL = f"""
-INSERT INTO {_SCHEMA}.usage_event ({_COLUMNS})
-SELECT {_VALUES}
-WHERE NOT EXISTS (
-    SELECT 1 FROM {_SCHEMA}.usage_event WHERE idempotency_key = :idempotency_key
-)
-ON CONFLICT (idempotency_key, ts) DO NOTHING
-"""
 
 
 def normalize_mode(value):
@@ -314,7 +293,6 @@ def _row_params(attribution, idempotency_key, entity, **columns):
 
 
 def _write(statement, params, what, lock_key=False):
-    """Never raises: a usage write must not fail a user's run."""
     try:
         from sqlalchemy import text  # pylint: disable=C0415
 
@@ -356,52 +334,3 @@ def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, 
         log.warning("usage: failed to build tool usage event: %s", exc)
         return
     _write(_INSERT_SQL, params, "tool")
-
-
-def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED, body_chars=0,
-                       parent_agent_name=None):
-    """Never raises. An unknown_skill outcome is not an error: it must not fail the agent run."""
-    if not attribution or not attribution.get("project_id") or not isinstance(skill, dict):
-        return
-    try:
-        name = skill.get("name")
-        skill_key = skill.get("skill_id") or (name or "").strip().lower()
-        meta = {
-            "source": source,
-            "outcome": outcome,
-            "body_chars": body_chars,
-            "est_body_tokens": body_chars // BODY_CHARS_PER_TOKEN,
-        }
-        if parent_agent_name:
-            meta["parent_agent_name"] = parent_agent_name
-        params = _row_params(
-            attribution, f"skill:{_correlation(attribution)}:{source}:{skill_key}",
-            {
-                "entity_type": ENTITY_TYPE_SKILL,
-                "entity_id": skill.get("skill_id"),
-                "entity_version_id": skill.get("skill_version_id"),
-                "entity_name": name,
-            },
-            event_type=EVENT_TYPE_SKILL,
-            tool_name=None,
-            duration_ms=None,
-            is_error=False,
-            meta=json.dumps(meta),
-        )
-    except Exception as exc:  # pylint: disable=W0703
-        log.warning("usage: failed to build skill usage event: %s", exc)
-        return
-    _write(_INSERT_ONCE_SQL, params, "skill", lock_key=True)
-
-
-def record_skill_mentions(attribution, kwargs):
-    """A resume re-dispatches the same run with the same message: only a first dispatch counts."""
-    kwargs = kwargs or {}
-    if any(kwargs.get(flag) for flag in RESUME_DISPATCH_FLAGS):
-        return
-    for skill in kwargs.get("invoked_skills") or []:
-        if isinstance(skill, dict) and skill.get("name"):
-            record_skill_event(
-                attribution, skill, SKILL_SOURCE_MENTION,
-                body_chars=len(skill.get("instructions") or ""),
-            )
