@@ -61,8 +61,6 @@ SKILL_OUTCOME_LOADED = "loaded"
 SKILL_OUTCOME_UNKNOWN = "unknown_skill"
 #: Informational only, never priced: the usual chars-per-token rule of thumb
 BODY_CHARS_PER_TOKEN = 4
-#: Payload flags of a re-dispatch of a run that already started (HITL, MCP auth, continue,
-#: parallel sub-agent reconcile)
 RESUME_DISPATCH_FLAGS = ("hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile")
 
 #: Root entity of the run, propagated to sub-agent children. Indexer-internal:
@@ -116,12 +114,8 @@ INSERT INTO {_SCHEMA}.usage_event ({_COLUMNS}) VALUES ({_VALUES})
 ON CONFLICT (idempotency_key, ts) DO NOTHING
 """
 
-# The unique key includes ts, so ON CONFLICT alone cannot stop a second row for the same
-# activation: a resumed run or a parallel child writes it at a later ts. idempotency_key leads
-# that unique index, so the existence probe is an index lookup per partition.
-# Two parallel children can probe at the same moment, so writers of one key are serialised
-# with a transaction-scoped advisory lock taken first; the INSERT's fresh snapshot then sees
-# the committed row.
+# The unique key includes ts, so ON CONFLICT cannot stop a second row written later for the
+# same activation. Parallel children can probe at the same moment, hence the advisory lock.
 _KEY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended(:idempotency_key, 0))"
 _INSERT_ONCE_SQL = f"""
 INSERT INTO {_SCHEMA}.usage_event ({_COLUMNS})
@@ -298,7 +292,6 @@ def build_attribution(kwargs, task_meta, task_id):
 
 
 def _row_params(attribution, idempotency_key, entity, **columns):
-    """One usage_event row for the run in attribution, naming entity as the node that acted."""
     return {
         "idempotency_key": idempotency_key,
         "ts": datetime.now(tz=timezone.utc),
@@ -367,11 +360,7 @@ def record_tool_event(attribution, tool_name, duration_ms, is_error, lc_run_id, 
 
 def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED, body_chars=0,
                        parent_agent_name=None):
-    """Write one skill activation row per (run, source, skill). Never raises.
-
-    The root stays the agent that ran. An unknown_skill outcome has no skill id, only the name
-    the model asked for, and is not an error: it must not mark the agent run as failed.
-    """
+    """Never raises. An unknown_skill outcome is not an error: it must not fail the agent run."""
     if not attribution or not attribution.get("project_id") or not isinstance(skill, dict):
         return
     try:
@@ -406,10 +395,7 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
 
 
 def record_skill_mentions(attribution, kwargs):
-    """One mention row per distinct skill the message invoked with ~name.
-
-    Only on the run's first dispatch: a resume re-dispatches the same run with the same message.
-    """
+    """A resume re-dispatches the same run with the same message: only a first dispatch counts."""
     kwargs = kwargs or {}
     if any(kwargs.get(flag) for flag in RESUME_DISPATCH_FLAGS):
         return

@@ -56,7 +56,6 @@ class UsageToolCallback(BaseCallbackHandler):
 
     def __init__(self, attribution: dict, attached_skills=None, subagent_skills=None):
         self._attribution = attribution
-        # The run's own registry (a parallel child carries its own)
         self._skills_by_name = skill_identities(attached_skills)
         # An in-process sub-agent loads from its own registry, never the root's; it is known
         # only for the sub-agents core prefetched, otherwise the load stays name-only
@@ -162,7 +161,6 @@ class UsageToolCallback(BaseCallbackHandler):
 
 
 def skill_identities(skills):
-    """{skill name (lowercased): {'skill_id', 'skill_version_id'}} for a runtime skill registry."""
     return {
         s["name"].strip().lower(): {"skill_id": s.get("skill_id"), "skill_version_id": s.get("skill_version_id")}
         for s in skills or []
@@ -171,10 +169,8 @@ def skill_identities(skills):
 
 
 def subagent_skill_registries(application):
-    """{sub-agent name (lowercased): skill_identities} from the sub-agents core prefetched.
-
-    The SDK names a sub-agent's tool calls by the sub-agent's name only, so a name shared by
-    two prefetched sub-agents with different skills is left out rather than guessed.
+    """The SDK names a sub-agent's tool calls by its name only, so a name shared by two
+    prefetched sub-agents with different skills is left out rather than guessed.
     """
     registries = {}
     ambiguous = set()
