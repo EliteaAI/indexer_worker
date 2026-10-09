@@ -48,6 +48,7 @@ from ..utils.agent_execution_common import (
     create_node_interface,
     ensure_thread_id,
     create_callbacks,
+    create_usage_skill_callback,
     create_usage_tool_callback,
     create_langfuse_callback_with_metadata,
     create_suggestion_audit_callback,
@@ -427,6 +428,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             )
             if usage_tool_callback:
                 callbacks.append(usage_tool_callback)
+            usage_skill_callback = create_usage_skill_callback(
+                self.descriptor.config, kwargs, tasknode_task.meta, tasknode_task.id,
+            )
+            if usage_skill_callback:
+                callbacks.append(usage_skill_callback)
 
             # Resolve filepath: image URLs in current turn — single S3 read per image
             user_input, image_thumbnails = resolve_filepath_images(user_input, client)
