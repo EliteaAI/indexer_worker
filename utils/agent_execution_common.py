@@ -337,6 +337,7 @@ def create_elitea_client(client_args: Dict[str, Any], api_token: str, api_extra_
     dev_reload_sdk('elitea_sdk.runtime.toolkits')
     dev_reload_sdk('elitea_sdk.runtime.tools')
     from elitea_sdk.runtime.clients.client import EliteAClient
+    from .usage_tool_events import tool_spend_signer
 
     return EliteAClient(
         base_url=client_args.get("deployment", client_args.get("base_url", None)),
@@ -345,6 +346,7 @@ def create_elitea_client(client_args: Dict[str, Any], api_token: str, api_extra_
         api_extra_headers=api_extra_headers,
         auth_session=client_args.get("auth_session"),
         session_cookie_name=client_args.get("session_cookie_name"),
+        tool_spend_signer=tool_spend_signer(),
     )
 
 

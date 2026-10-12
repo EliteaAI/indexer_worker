@@ -53,6 +53,7 @@ from ..utils.usage_tool_events import (
     TRIGGER_SOURCE_KWARGS_KEY,
     attribution_header,
     attribution_signing_key,
+    tool_spend_signer,
 )
 
 INDEX_TOOL_NAME = 'index_data'
@@ -619,6 +620,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 auth_session=auth_session,
                 session_cookie_name=session_cookie_name,
                 api_extra_headers=api_extra_headers,
+                tool_spend_signer=tool_spend_signer(),
             )
             # Seems like not used
             # Generate persistent tool_run_id for this execution
