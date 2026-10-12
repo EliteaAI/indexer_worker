@@ -228,6 +228,14 @@ def attribution_signing_key():
     return hmac.new(str(base_key).encode("utf-8"), _SIGNING_CONTEXT, hashlib.sha256).digest()
 
 
+def tool_spend_signer(key=None):
+    """Signer the SDK calls for tool spend records (#6980); the SDK never holds the key itself."""
+    key = key or attribution_signing_key()
+    if not key:
+        return None
+    return lambda message: hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
 def sign_attribution(columns, project_id, key):
     """Hex HMAC over the billed project and the canonical JSON; the reader recomputes it."""
     canonical = json.dumps(columns, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
