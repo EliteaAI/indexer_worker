@@ -37,8 +37,30 @@ from elitea_sdk.runtime.utils.trace_limits import (
     cap_trace_text,
 )
 from elitea_sdk.tools.utils.serialization import to_json_primitive
+try:
+    from elitea_sdk.runtime.tool_outcome import ToolResultStatus, recorded_outcomes
+except ImportError:  # SDK without the sink reader: tool ends stay "stop", as before
+    recorded_outcomes = None
 from pydantic import BaseModel
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
+
+
+def tool_end_error(output) -> Optional[str]:
+    """Why a tool call that ended normally actually failed, or None (#6809).
+
+    The SDK middleware turns a tool exception into prose, so on_tool_end fires with a
+    success-shaped result and the eval trajectory scored the call ok. The signal is the
+    outcome the middleware recorded, or the message status - never the text.
+    """
+    if isinstance(output, BaseMessage) and getattr(output, "status", None) == "error":
+        content = output.content
+        return content if isinstance(content, str) and content else "Tool call failed"
+    if recorded_outcomes is None:
+        return None
+    for outcome in recorded_outcomes():
+        if outcome.status == ToolResultStatus.ERROR:
+            return outcome.message or "Tool call failed"
+    return None
 
 
 def indent_for_trace(value):
@@ -1184,6 +1206,10 @@ class EliteACallback(BaseCallbackHandler):
         hitl_deferred = isinstance(raw_output, dict) and bool(
             raw_output.get("__hitl_deferred__")
         )
+        tool_error = None if hitl_deferred else tool_end_error(raw_output)
+        finish_reason = "error" if tool_error else "stop"
+        if tool_error:
+            tool_error = cap_trace_text(tool_error)
         # LangChain wraps tool results in a ToolMessage (BaseMessage) when a
         # tool_call_id is provided (e.g. via LangGraph's ToolNode for published
         # agents with toolkits). Extract the actual content, otherwise the
@@ -1198,7 +1224,8 @@ class EliteACallback(BaseCallbackHandler):
             tool_output = cap_trace_text(indent_for_trace(raw_output))
         now = datetime.now(tz=timezone.utc).isoformat()
         if tool_run_id in self.tool_calls:
-            self.tool_calls[tool_run_id].finish_reason = "stop"
+            self.tool_calls[tool_run_id].finish_reason = finish_reason
+            self.tool_calls[tool_run_id].error = tool_error
             self.tool_calls[tool_run_id].tool_output = tool_output
             self.tool_calls[tool_run_id].timestamp_finish = now
             tool_call = self.tool_calls[tool_run_id]
@@ -1207,7 +1234,8 @@ class EliteACallback(BaseCallbackHandler):
                 tool_name=kwargs.get("name"),
                 tool_run_id=tool_run_id,
                 tool_output=tool_output,
-                finish_reason="stop",
+                finish_reason=finish_reason,
+                error=tool_error,
                 timestamp_start=now,
                 timestamp_finish=now,
                 run_id=str(run_id),
