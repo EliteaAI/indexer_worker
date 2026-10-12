@@ -616,6 +616,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 project_id=project_id,
                 auth_token=project_auth_token,
                 base_url=deployment_url,
+                public_url=kwargs.get("public_url"),
                 auth_session=auth_session,
                 session_cookie_name=session_cookie_name,
                 api_extra_headers=api_extra_headers,

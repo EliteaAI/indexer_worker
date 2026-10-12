@@ -340,6 +340,7 @@ def create_elitea_client(client_args: Dict[str, Any], api_token: str, api_extra_
 
     return EliteAClient(
         base_url=client_args.get("deployment", client_args.get("base_url", None)),
+        public_url=client_args.get("public_url"),
         project_id=client_args.get("project_id"),
         auth_token=api_token,
         api_extra_headers=api_extra_headers,
