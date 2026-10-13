@@ -24,9 +24,9 @@ imports nothing from the `tracing` plugin.
 
 Writing to the table directly (rather than an RPC) follows
 `tracing/utils/model_pricing.py`: pylon_indexer has no cross-pylon RPC
-transport and no `from tools import db`, so only the POSTGRES_* env vars are
-available. Unlike that module this one writes, hence the fork guard on the
-engine and the ON CONFLICT clause.
+transport and no `from tools import db`, so the URL comes from tools.config
+or the POSTGRES_* env vars. Unlike that module this one writes, hence the fork
+guard on the engine and the ON CONFLICT clause.
 """
 
 import base64
@@ -123,6 +123,36 @@ def enabled(plugin_config):
     return usage_mode(plugin_config) != MODE_OFF
 
 
+def _database_url():
+    """Prefer tools.config, fall back to POSTGRES_* env vars (same as runtime_engine_litellm)."""
+    try:
+        from tools import config as c  # pylint: disable=C0415,E0401
+        base_uri = c.DATABASE_URI
+    except (ImportError, RuntimeError, AttributeError):
+        base_uri = None
+    if base_uri:
+        return base_uri
+    #
+    from sqlalchemy.engine import URL  # pylint: disable=C0415
+    pg_user = os.environ.get("POSTGRES_USER")
+    pg_password = os.environ.get("POSTGRES_PASSWORD")
+    pg_host = os.environ.get("POSTGRES_HOST")
+    pg_db = os.environ.get("POSTGRES_DB")
+    if not all([pg_user, pg_password, pg_host, pg_db]):
+        raise RuntimeError(
+            "no DB connection: neither tools.config.DATABASE_URI "
+            "nor POSTGRES_* env vars are available"
+        )
+    return URL.create(
+        "postgresql",
+        username=pg_user,
+        password=pg_password,
+        host=pg_host,
+        port=int(os.environ.get("POSTGRES_PORT") or "5432"),
+        database=pg_db,
+    )
+
+
 def _get_engine():
     """Process-local write engine, rebuilt after a fork.
 
@@ -137,16 +167,7 @@ def _get_engine():
         if _engine is not None and _engine_pid == pid:
             return _engine
         from sqlalchemy import create_engine  # pylint: disable=C0415
-        from sqlalchemy.engine import URL  # pylint: disable=C0415
-        url = URL.create(
-            "postgresql",
-            username=os.environ["POSTGRES_USER"],
-            password=os.environ["POSTGRES_PASSWORD"],
-            host=os.environ["POSTGRES_HOST"],
-            port=int(os.environ.get("POSTGRES_PORT", "5432")),
-            database=os.environ["POSTGRES_DB"],
-        )
-        _engine = create_engine(url, pool_size=1, max_overflow=1, pool_pre_ping=True)
+        _engine = create_engine(_database_url(), pool_size=1, max_overflow=1, pool_pre_ping=True)
         _engine_pid = pid
         return _engine
 
