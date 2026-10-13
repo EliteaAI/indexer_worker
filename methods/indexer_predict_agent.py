@@ -541,7 +541,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     f'[PARALLEL] predict parent parked, dispatching '
                     f'{len(_parked["parallel_dispatch"])} child(ren) thread_id={thread_id}'
                 )
-                return build_parked_result(_parked, stream_id, message_id)
+                return build_parked_result(_parked, stream_id, message_id, elitea_callback=elitea_callback)
 
             # Extract and normalize response content using unified parsing
             response_content = extract_response_content(response, response_format='messages')
@@ -617,13 +617,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 ),
                 execution_start_time=execution_start_time,
                 budget_error_code=budget_code,
+                elitea_callback=elitea_callback,
             )
         except ValidationError:
             return execution_error(
                 node_interface, user_input, chat_history, f"ValidationError on user input: {user_input}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable="A validation error occurred while processing your request",
-                execution_start_time=execution_start_time
+                execution_start_time=execution_start_time,
+                elitea_callback=elitea_callback,
             )
         except McpAuthorizationRequired as e:
             pause_result = build_mcp_auth_pause_result(
@@ -637,13 +639,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 e,
                 tasknode_task.meta.get('chat_project_id'),
                 chat_history,
+                elitea_callback=elitea_callback,
             )
         except AssertionError:
             return execution_error(
                 node_interface, user_input, chat_history, f"AssertionError on user input: {user_input}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable="Assertion error occurred while processing your request",
-                execution_start_time=execution_start_time
+                execution_start_time=execution_start_time,
+                elitea_callback=elitea_callback,
             )
         except PipelineConfigurationError as e:
             return execution_error(
@@ -651,7 +655,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 f"PipelineConfigurationError: {e}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable=str(e),
-                execution_start_time=execution_start_time
+                execution_start_time=execution_start_time,
+                elitea_callback=elitea_callback,
             )
         except ValueError:
             return execution_error(
@@ -659,7 +664,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 f"Seems like your predict agent is missconfigured on user input: {user_input}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable="Seems like your agent is configured incorrectly",
-                execution_start_time=execution_start_time
+                execution_start_time=execution_start_time,
+                elitea_callback=elitea_callback,
             )
         except InternalServerError:
             return execution_error(
@@ -667,7 +673,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 f"OpenAI Responded with Internal Server Error on User Input: {user_input}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable="The AI service is currently experiencing issues",
-                execution_start_time=execution_start_time
+                execution_start_time=execution_start_time,
+                elitea_callback=elitea_callback,
             )
         except Exception as e:
             continuation_error = build_output_continuation_error(e)
@@ -679,6 +686,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     human_readable=continuation_error['user_message'],
                     execution_start_time=execution_start_time,
                     continuation_error=continuation_error,
+                    elitea_callback=elitea_callback,
                 )
             if is_mcp_authorization_required_error(e):
                 return build_mcp_auth_required_result(
@@ -686,6 +694,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     e,
                     tasknode_task.meta.get('chat_project_id'),
                     chat_history,
+                    elitea_callback=elitea_callback,
                 )
             # A budget rejection is an expected policy outcome, not a platform failure,
             # so it must not surface as a raw SDK error. Checked before the branches
@@ -699,6 +708,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     human_readable=BUDGET_EXCEEDED_MESSAGES[budget_code],
                     execution_start_time=execution_start_time,
                     budget_error_code=budget_code,
+                    elitea_callback=elitea_callback,
                 )
             # Check for LLM rate limit errors
             if LLM_RATE_LIMIT_ERRORS and isinstance(e, LLM_RATE_LIMIT_ERRORS):
@@ -707,7 +717,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     f"LLM RateLimitError on user input",
                     thread_id, message_id, tasknode_task.meta,
                     human_readable="The AI service rate limit was exceeded. Please try again in a moment.",
-                    execution_start_time=execution_start_time
+                    execution_start_time=execution_start_time,
+                    elitea_callback=elitea_callback,
                 )
             # Check for LLM authentication/authorization errors (model access denied, invalid keys, etc.)
             if LLM_AUTH_ERRORS and isinstance(e, LLM_AUTH_ERRORS):
@@ -730,13 +741,15 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     f"LLM AuthenticationError on user input",
                     thread_id, message_id, tasknode_task.meta,
                     human_readable=human_msg,
-                    execution_start_time=execution_start_time
+                    execution_start_time=execution_start_time,
+                    elitea_callback=elitea_callback,
                 )
             return execution_error(
                 node_interface, user_input, chat_history, f"Error on user input: {user_input}",
                 thread_id, message_id, tasknode_task.meta,
                 human_readable="An unexpected error occurred while processing your request",
-                execution_start_time=execution_start_time
+                execution_start_time=execution_start_time,
+                elitea_callback=elitea_callback,
             )
         finally:
             # Flush any buffered streamed text before tearing down the event node.

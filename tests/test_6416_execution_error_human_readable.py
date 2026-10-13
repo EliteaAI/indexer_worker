@@ -20,6 +20,7 @@ from uuid import uuid4
 def _load_execution_error():
     source = (pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'agent_common.py').read_text()
     body = source[source.index('def execution_error('):source.index('class ToolCallPayload')]
+    evidence = source[source.index('def envelope_token_source('):source.index('def build_mcp_auth_pause_result(')]
 
     class _NodeEvent:
         def __init__(self, **kwargs):
@@ -35,6 +36,8 @@ def _load_execution_error():
         'datetime': datetime,
         'timezone': timezone,
         'Optional': typing.Optional,
+        'Dict': typing.Dict,
+        'Any': typing.Any,
         'NodeEventInterface': object,
         'NodeEvent': _NodeEvent,
         'EventTypes': types.SimpleNamespace(
@@ -48,6 +51,7 @@ def _load_execution_error():
         'build_parallel_terminal_error': lambda **kwargs: kwargs,
         '_sanitize_input_for_event': lambda value: value,
     }
+    exec(compile(evidence, '<build_execution_evidence>', 'exec'), namespace)  # pylint: disable=W0122
     exec(compile(body, '<execution_error>', 'exec'), namespace)  # pylint: disable=W0122
     return namespace['execution_error']
 
@@ -97,4 +101,10 @@ def test_chat_history_and_error_are_still_returned():
     result = _run('anything')
 
     assert result['chat_history'] == [{'role': 'user', 'content': 'hi'}]
-    assert set(result) == {'chat_history', 'error', 'human_readable'}
+    # #6809/#6716: an error result also carries the run's trajectory and usage evidence.
+    assert set(result) == {
+        'chat_history', 'error', 'human_readable',
+        'thinking_steps', 'tool_calls', 'tool_calls_dict',
+        'chat_history_tokens_input', 'llm_response_tokens_output', 'token_source',
+    }
+    assert result['token_source'] == 'none'

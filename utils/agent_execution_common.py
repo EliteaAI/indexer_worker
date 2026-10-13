@@ -72,6 +72,7 @@ from .usage_tool_events import (
 )
 
 from ..methods.agent_common import (
+    build_execution_evidence,
     execution_error,
     EliteACallback,
     EliteACustomCallback,
@@ -1291,17 +1292,9 @@ def build_success_result(
     hitl_interrupt, hitl_interrupts = normalize_hitl_pause(
         hitl_interrupt, hitl_interrupts,
     )
-    sanitized_steps = json.loads(json.dumps(elitea_callback.thinking_steps, default=str))
     result = {
         'error': None,
-        'thinking_steps': sanitized_steps,
-        'tool_calls': [
-            i for i in sanitized_steps
-            if i.get('generation_info') and i['generation_info'].get('finish_reason') == 'tool_calls'
-        ],
-        'tool_calls_dict': {k: v.model_dump() for k, v in elitea_callback.tool_calls.items()},
-        'chat_history_tokens_input': tokens_in,
-        'llm_response_tokens_output': tokens_out,
+        **build_execution_evidence(elitea_callback, tokens_in, tokens_out),
     }
     if return_chat_history:
         result['chat_history'] = chat_history
@@ -1379,6 +1372,7 @@ def build_parked_result(
     parked: Dict[str, Any],
     stream_id: Optional[str] = None,
     message_id: Optional[str] = None,
+    elitea_callback: Optional[EliteACallback] = None,
 ) -> Dict[str, Any]:
     """Build the task-result payload for a parked parent.
 
@@ -1392,6 +1386,8 @@ def build_parked_result(
     ``stream_id``/``message_id`` are the parent's own — carried so pylon_main
     re-invokes the reconcile on the SAME stream/message and the final answer
     lands on the original user message.
+
+    ``elitea_callback`` carries the parent's pre-park steps and token usage.
     """
     return {
         'error': None,
@@ -1402,11 +1398,7 @@ def build_parked_result(
         'parent_stream_id': stream_id,
         'parent_message_id': message_id,
         'thread_id': parked.get('thread_id'),
-        'thinking_steps': [],
-        'tool_calls': [],
-        'tool_calls_dict': {},
-        'chat_history_tokens_input': 0,
-        'llm_response_tokens_output': 0,
+        **build_execution_evidence(elitea_callback),
     }
 
 
