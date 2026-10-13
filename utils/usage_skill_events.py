@@ -33,7 +33,7 @@ SKILL_OUTCOME_LOADED = "loaded"
 SKILL_OUTCOME_UNKNOWN = "unknown_skill"
 BODY_CHARS_PER_TOKEN = 4
 RESUME_DISPATCH_FLAGS = ("hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile")
-MAX_PROJECT_ID = 2**31 - 1
+MAX_PROJECT_ID = 999_999_999
 
 # The unique key includes ts, so ON CONFLICT cannot stop a later duplicate
 _INSERT_ONCE_SQL = f"""

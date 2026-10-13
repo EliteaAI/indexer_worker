@@ -56,7 +56,7 @@ def test_same_id_skills_from_two_projects_get_separate_rows(rows):  # noqa: F811
 
 
 
-@pytest.mark.parametrize("bad_project_id", ["abc", "1", 1.5, True, 0, -3, 2**31])
+@pytest.mark.parametrize("bad_project_id", ["abc", "1", 1.5, True, 0, -3, 1_000_000_000, 2**31 - 1])
 def test_a_project_id_that_is_not_a_project_is_not_recorded(rows, bad_project_id):  # noqa: F811
     registry = [{**REGISTRY[1], "skill_project_id": bad_project_id}]
 
@@ -65,3 +65,12 @@ def test_a_project_id_that_is_not_a_project_is_not_recorded(rows, bad_project_id
     [row] = skill_rows(rows)
     assert "skill_project_id" not in json.loads(row["meta"])
     assert row["idempotency_key"].endswith(":load_skill:10")
+
+
+def test_the_largest_project_id_analytics_can_read_is_recorded(rows):  # noqa: F811
+    registry = [{**REGISTRY[1], "skill_project_id": 999_999_999}]
+
+    run_tool(RunCallbacks(AGENT_RUN, registry), loaded("ui-review", "Review the screenshot."), skill="ui-review")
+
+    [row] = skill_rows(rows)
+    assert json.loads(row["meta"])["skill_project_id"] == 999_999_999
