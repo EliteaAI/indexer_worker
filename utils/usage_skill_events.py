@@ -33,6 +33,7 @@ SKILL_OUTCOME_LOADED = "loaded"
 SKILL_OUTCOME_UNKNOWN = "unknown_skill"
 BODY_CHARS_PER_TOKEN = 4
 RESUME_DISPATCH_FLAGS = ("hitl_resume", "mcp_auth_resume", "should_continue", "parallel_reconcile")
+MAX_PROJECT_ID = 2**31 - 1
 
 # The unique key includes ts, so ON CONFLICT cannot stop a later duplicate
 _INSERT_ONCE_SQL = f"""
@@ -44,6 +45,13 @@ WHERE NOT EXISTS (
 ON CONFLICT (idempotency_key, ts) DO NOTHING
 """
 
+def own_project_id(skill):
+    value = skill.get("skill_project_id")
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_PROJECT_ID:
+        return value
+    return None
+
+
 def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED, body_chars=0,
                        parent_agent_name=None):
     if not attribution or not attribution.get("project_id") or not isinstance(skill, dict):
@@ -51,6 +59,9 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
     try:
         name = skill.get("name")
         skill_key = skill.get("skill_id") or (name or "").strip().lower()
+        skill_project_id = own_project_id(skill)
+        if skill_project_id and skill.get("skill_id"):
+            skill_key = f"{skill_project_id}:{skill_key}"
         if outcome != SKILL_OUTCOME_LOADED:
             skill_key = f"{outcome}:{skill_key}"
         meta = {
@@ -61,6 +72,8 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
         }
         if parent_agent_name:
             meta["parent_agent_name"] = parent_agent_name
+        if skill_project_id:
+            meta["skill_project_id"] = skill_project_id
         params = _row_params(
             attribution, f"skill:{_correlation(attribution)}:{source}:{skill_key}",
             {

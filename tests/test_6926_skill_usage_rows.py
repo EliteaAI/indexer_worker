@@ -303,7 +303,7 @@ class TestSubAgents:
             "12:121": {"name": "Researcher", "version_details": same},
         }})
 
-        assert registries == {"researcher": {"pdf-report": {"skill_id": 55, "skill_version_id": 551}}}
+        assert registries == {"researcher": {"pdf-report": {"skill_id": 55, "skill_version_id": 551, "skill_project_id": None}}}
 
     def test_no_prefetch_means_no_sub_agent_registries(self):
         assert callback_module.subagent_skill_registries({"id": 7}) == {}
