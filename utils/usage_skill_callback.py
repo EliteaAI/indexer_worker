@@ -108,6 +108,7 @@ class UsageSkillCallback(BaseCallbackHandler):
                 {
                     "skill_id": registered.get("skill_id"),
                     "skill_version_id": registered.get("skill_version_id"),
+                    "skill_project_id": registered.get("skill_project_id"),
                     "name": name,
                 },
                 SKILL_SOURCE_LOAD,
@@ -134,7 +135,11 @@ class UsageSkillCallback(BaseCallbackHandler):
 
 def skill_identities(skills):
     return {
-        s["name"].strip().lower(): {"skill_id": s.get("skill_id"), "skill_version_id": s.get("skill_version_id")}
+        s["name"].strip().lower(): {
+            "skill_id": s.get("skill_id"),
+            "skill_version_id": s.get("skill_version_id"),
+            "skill_project_id": s.get("skill_project_id"),
+        }
         for s in skills or []
         if isinstance(s, dict) and s.get("name")
     }
