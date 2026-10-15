@@ -72,7 +72,11 @@ from ..utils.agent_execution_common import (
     apply_parallel_reconcile,
     maybe_emit_next_input_suggestion,
 )
-from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
+from ..utils.langfuse_callback import (
+    create_run_audit_callback,
+    flush_langfuse_callback,
+    langfuse_trace_context,
+)
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
@@ -436,6 +440,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             callbacks = [elitea_callback, elitea_custom_callback]
             if langfuse_callback:
                 callbacks.append(langfuse_callback)
+
+            # Audit trail does not depend on Langfuse (#6945).
+            run_audit_callback = create_run_audit_callback(tasknode_task.meta)
+            if run_audit_callback:
+                callbacks.append(run_audit_callback)
 
             # Tool usage rows (#6572): gated by usage.mode only, so they are written
             # with tracing disabled.
