@@ -123,6 +123,26 @@ def _get_audit_callback(user_id=None, user_email=None, project_id=None):
         return None
 
 
+def create_run_audit_callback(task_meta):
+    """Audit callback for an agent run, independent of Langfuse (#6945).
+
+    Callers attach this next to the Langfuse handler, so the audit trail does not
+    depend on Langfuse being configured, complete, or reachable. Returns None when
+    the tracing plugin or its audit trail is disabled.
+    """
+    task_meta = task_meta if isinstance(task_meta, dict) else {}
+    user_context = task_meta.get("user_context") or {}
+    project_id = task_meta.get("project_id") or task_meta.get("chat_project_id") or None
+    handler = _get_audit_callback(
+        user_id=user_context.get("user_id"),
+        user_email=user_context.get("user_email"),
+        project_id=project_id,
+    )
+    if handler:
+        log.info(f"Using AuditLangChainCallback (project_id={project_id})")
+    return handler
+
+
 def _build_langfuse_callback_handler_class(callback_handler_cls):
     """Create the Elitea Langfuse callback subclass without importing Langfuse at module load."""
     class EliteaLangfuseCallbackHandler(callback_handler_cls):
@@ -206,25 +226,13 @@ def create_langfuse_callback(
         environment: Langfuse environment for trace segregation (e.g., project-{id})
 
     Returns:
-        Tuple of (Langfuse client, CallbackHandler, trace_attrs) or (None, None, None)
+        Tuple of (Langfuse client, CallbackHandler, trace_attrs) or (None, None, None).
+        The audit callback is not part of this result; see create_run_audit_callback.
         trace_attrs is a dict with session_id, user_id, metadata, trace_name for use with propagate_attributes
     """
     if not langfuse_config:
-        log.debug("Langfuse config not provided, trying audit callback fallback")
-        # Extract project_id from metadata (it's stored as string for Langfuse)
-        project_id = None
-        if metadata:
-            raw_pid = metadata.get("project_id") or metadata.get("chat_project_id")
-            if raw_pid and raw_pid not in ("", "None"):
-                project_id = raw_pid
-        audit_handler = _get_audit_callback(
-            user_id=user_id,
-            user_email=metadata.get("user_email") if metadata else None,
-            project_id=project_id,
-        )
-        if audit_handler:
-            log.info(f"Using AuditLangChainCallback (user_id={user_id}, project_id={project_id})")
-            return None, audit_handler, None
+        # The audit callback is built separately (create_run_audit_callback), so a
+        # run without Langfuse still gets it. See #6945.
         return None, None, None
 
     base_url = langfuse_config.get('base_url')
