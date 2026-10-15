@@ -9,6 +9,7 @@ arrive by a path that never queried approvers.
 import threading
 import time
 
+from .security_metrics_client import SecurityCounter
 from .task_envelope import (
     CAPABILITY_ENVELOPE_V1, EnvelopeRejected, read_envelope,
 )
@@ -20,33 +21,10 @@ CAPABILITIES_REQUEST_EVENT = "task_node_capabilities_request"
 DEFAULT_HEARTBEAT_S = 30
 
 
-class _LabelledCounter:
-    """prometheus_client Counter when installed, always an in-process count as well."""
-
-    def __init__(self, name, documentation, label):
-        self._counts = {}
-        self._prom = None
-        try:
-            from prometheus_client import Counter  # pylint: disable=C0415,E0401
-            self._prom = Counter(name, documentation, [label])
-        except Exception:  # pylint: disable=W0718
-            pass
-
-    def inc(self, value):
-        self._counts[value] = self._counts.get(value, 0) + 1
-        if self._prom is not None:
-            self._prom.labels(value).inc()
-
-    def total(self, value=None):
-        if value is None:
-            return sum(self._counts.values())
-        return self._counts.get(value, 0)
-
-
-WORKER_CAPABILITY_REJECT = _LabelledCounter(
+WORKER_CAPABILITY_REJECT = SecurityCounter(
     "worker_capability_reject_total",
     "Tasks refused by this worker because its envelope could not be honoured",
-    "capability",
+    ("capability",),
 )
 
 
@@ -81,7 +59,7 @@ def enforce_envelope(kwargs):
         read_envelope(kwargs or {}, SUPPORTED_CAPABILITIES)
     except EnvelopeRejected as exc:
         for capability in exc.missing or ("-",):
-            WORKER_CAPABILITY_REJECT.inc(capability)
+            WORKER_CAPABILITY_REJECT.inc(capability=capability)
         raise
 
 
