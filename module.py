@@ -172,6 +172,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         #
         self.agent_event_node = None
         self.agent_task_node = None
+        self._capabilities_heartbeat_stop = None
         #
         self.index_event_node = None
         self.index_maintenance_task_node = None
@@ -313,6 +314,11 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             from elitea_sdk.runtime.clients.client import EliteAClient  # pylint: disable=C0415,E0401
             _ = EliteAClient
             _preload_llm_client_modules()
+            # Imported here, not at module scope: module.py is loaded standalone in tests.
+            from .utils.envelope_guard import (  # pylint: disable=C0415
+                CAPABILITIES_REQUEST_EVENT, DEFAULT_HEARTBEAT_S,
+                envelope_task_approver, start_capability_heartbeat,
+            )
             # Agent prereqs
             self.agent_event_node = worker_core.event_node.clone()
             self.agent_event_node.start()
@@ -320,6 +326,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             self.agent_task_node = arbiter.TaskNode(
                 self.agent_event_node,
                 pool="agents",
+                # Declines tasks whose envelope this worker cannot honour (C-1009, #6940)
+                task_approver=envelope_task_approver(),
                 task_limit=self.descriptor.config.get(
                     "agents_task_limit", None
                 ),
@@ -342,6 +350,14 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 ),
             )
             self.agent_task_node.start()
+            # Advertise capabilities: answer requests, and re-announce within Main's TTL
+            self.agent_event_node.subscribe(
+                CAPABILITIES_REQUEST_EVENT, self.task_node_capabilities_request
+            )
+            self._capabilities_heartbeat_stop = start_capability_heartbeat(
+                lambda: self.task_node_capabilities_request(None, None),
+                self.descriptor.config.get("task_capabilities_heartbeat_s", DEFAULT_HEARTBEAT_S),
+            )
             # Index prereqs
             self.index_event_node = worker_core.event_node.clone()
             self.index_event_node.start()
@@ -436,7 +452,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 self.indexer_configuration_validator, "indexer_configuration_validator"
             )
             worker_core.task_node_light.register_task(
-                self.indexer_configuration_check_connection, "indexer_configuration_check_connection"
+                self.indexer_configuration_check_connection, "indexer_configuration_check_connection",
+                envelope_task_approver(),
             )
             worker_core.task_node_light.register_task(
                 self.indexer_toolkit_available_tools, "indexer_toolkit_available_tools"
@@ -611,6 +628,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         """ De-init module """
         #
         if self.descriptor.config.get("worker_enabled", True):
+            if self._capabilities_heartbeat_stop is not None:
+                self._capabilities_heartbeat_stop()
             # Tasks: agent
             self.agent_task_node.unregister_task(
                 self.indexer_agent, "indexer_agent"

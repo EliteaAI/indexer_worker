@@ -48,6 +48,7 @@ from pylon.core.tools import log
 from tools import worker_core
 
 from .constants import DEFAULT_MEMORY_CONFIG
+from .task_envelope import ENVELOPE_KEY
 from .funcs import prepend_vision_system_message, prepend_attachment_system_message
 from .image_helpers import (
     strip_image_chunks_from_assistant_messages,
@@ -1506,6 +1507,9 @@ def build_child_launch_payloads(
         }
         if parent_kwargs.get(PREDICT_RUN_ID_KWARGS_KEY):
             child_payload[PREDICT_RUN_ID_KWARGS_KEY] = parent_kwargs[PREDICT_RUN_ID_KWARGS_KEY]
+        # Literal key: tests exec this function in a minimal namespace (== task_envelope.ENVELOPE_KEY)
+        if parent_kwargs.get('envelope'):
+            child_payload['envelope'] = parent_kwargs['envelope']
 
         # Usage attribution (#6572): the child's own 'application' above becomes its
         # entity_*, so root_* would be lost without an explicit carry. Falling back to
@@ -1561,6 +1565,8 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'applied_skills',
         PREDICT_RUN_ID_KWARGS_KEY,
         ROOT_ENTITY_KWARGS_KEY,
+        # Re-dispatch keeps the parent's envelope, never one re-derived from the current flag (#6940)
+        ENVELOPE_KEY,
     )
     payload = {k: parent_kwargs[k] for k in carry_keys if k in parent_kwargs}
     # context_settings is mutated in place at task entry to attach live

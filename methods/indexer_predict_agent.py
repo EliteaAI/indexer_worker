@@ -23,6 +23,7 @@ from langchain_core.messages import HumanMessage
 from pylon.core.tools import log
 from pylon.core.tools import web
 
+from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.node_interface import EventTypes
 
@@ -134,6 +135,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.debug(f'indexer_predict_agent start stream_id={stream_id}, message_id={message_id}')
         #
         try:
+            enforce_envelope(kwargs)
             # Extract client args - will be used to create EliteAClient after fork
             client_args = kwargs.get("llm", {}).get("kwargs", {})
             api_token = kwargs.get("api_token", client_args.get("api_key", None))
