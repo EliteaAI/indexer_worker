@@ -21,7 +21,9 @@ from pylon.core.tools import log  # pylint: disable=E0611,E0401
 from pylon.core.tools import web  # pylint: disable=E0611,E0401
 
 from pydantic import ValidationError
+from ..utils.envelope_guard import enforce_envelope, rejection_result
 from ..utils.funcs import normalize_mcp_auth_metadata_urls
+from ..utils.task_envelope import EnvelopeRejected
 
 class Method:
     """
@@ -35,6 +37,10 @@ class Method:
 
     @web.method()
     def indexer_configuration_check_connection(self, *args, configuration_type, settings, **kwargs):
+        try:
+            enforce_envelope(kwargs)
+        except EnvelopeRejected as exc:
+            return rejection_result(exc)
         log.debug(f"check_connection for {configuration_type}")
 
         from ..utils.funcs import dev_reload_sdk

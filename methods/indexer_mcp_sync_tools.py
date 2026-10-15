@@ -25,7 +25,9 @@ from pylon.core.tools import web
 
 from tools import worker_core
 
+from ..utils.envelope_guard import enforce_envelope, rejection_result
 from ..utils.funcs import normalize_mcp_auth_metadata_urls, normalize_mcp_server_url, backfill_mcp_auth_metadata
+from ..utils.task_envelope import EnvelopeRejected
 from ..utils.node_interface import NodeEventInterface, EventTypes, NodeEvent
 
 # Import shared components from the agent common module
@@ -117,6 +119,10 @@ class Method:
         Returns:
             Dictionary with tools list or authorization requirement
         """
+        try:
+            enforce_envelope(kwargs)
+        except EnvelopeRejected as exc:
+            return {**rejection_result(exc), 'server_url': url}
         import tasknode_task  # pylint: disable=E0401,C0415
         #
         normalized_url = normalize_mcp_server_url(url)
