@@ -1977,8 +1977,16 @@ class EliteACallback(BaseCallbackHandler):
             self.llm_error.budget_error_code = budget_code
         else:
             self.llm_error = InternalSDKError("Unknown LLM error occurred")
-        # exception = args[0]
-        # FIXME: should we emit an error here too?
+        # Emit agent_llm_end so the FE LLM chip is closed instead of spinning
+        # forever when the LLM errors out without producing a response (#7041).
+        self.node_interface.emit(
+            type=EventTypes.agent_llm_end,
+            response_metadata={
+                "tool_run_id": str(run_id),
+                "thinking_steps": [],
+                "llm_start_timestamp": self.llm_start_timestamp,
+            },
+        )
 
     #
     # Misc
