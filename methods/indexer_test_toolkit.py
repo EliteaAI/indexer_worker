@@ -371,7 +371,7 @@ def check_missing_index_data_status_event(
             'index_name': tool_params.get('index_name'),
             'state': 'failed',
             'error': error_message,
-            'toolkit_config': clean_for_json_serialization(
+            'toolkit_config': clean_toolkit_config_for_events(
                 toolkit_config,
                 "Could not serialize toolkit_config"
             ),
@@ -1172,7 +1172,7 @@ def mcp_connection_error(
         response_metadata={
             'project_id': tasknode_task_meta.get("project_id"),
             'chat_project_id': tasknode_task_meta.get("chat_project_id"),
-            'toolkit_config': toolkit_config,
+            'toolkit_config': mask_toolkit_config(toolkit_config),
             'is_error': True
         },
         content=error_message,
@@ -1188,7 +1188,7 @@ def mcp_connection_error(
     return {
         'success': False,
         'error': error_message,
-        'toolkit_config': toolkit_config,
+        'toolkit_config': mask_toolkit_config(toolkit_config),
         'tools': [],
         'tools_count': 0
     }
