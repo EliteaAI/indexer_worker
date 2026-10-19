@@ -126,6 +126,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     ):
         """ Run task target """
         self.indexer_enable_logging()
+        self.indexer_limit_task_memory()
         #
         log.debug(f'indexer_agent start stream_id={stream_id}, message_id={message_id}')
         #

@@ -485,6 +485,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
     ):
         """ Test a single toolkit tool """
         self.indexer_enable_logging()
+        self.indexer_limit_task_memory()
         #
         log.debug(f'indexer_test_toolkit_tool start stream_id={stream_id}, message_id={message_id}')
         #
