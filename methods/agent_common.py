@@ -139,7 +139,7 @@ from ..utils.node_interface import (
     NodeEvent,
     NodeEventInterface,
 )
-from ..utils.input_guardrail import emit_audit_spans, merge_verdict
+from ..utils.input_guardrail import _audit_key, emit_audit_spans, merge_verdict
 from ..utils.parallel_dispatch_contract import is_fanout_child
 from ..utils.mcp_auth_tools import backfill_mcp_provided_settings, backfill_mcp_provided_settings_dict
 
@@ -2317,6 +2317,8 @@ class EliteACustomCallback(BaseCallbackHandler):
         self.task_id: str = task_id
         self.toolkit_metadata: dict = toolkit_metadata or {}
         self.additional_response_meta = {}
+        # (action, segment_kind) pairs already written as input-guardrail audit rows (#6886)
+        self.input_guardrail_audited = set()
         self.modified_files = []  # List to store modified file information
         self.generated_image_filepaths = []  # Filepaths of tool-generated images for thumbnail resolution
         self.index_statuses = []  # List to store index operation statuses
@@ -2345,7 +2347,12 @@ class EliteACustomCallback(BaseCallbackHandler):
             self.additional_response_meta["input_guardrail"] = merge_verdict(
                 self.additional_response_meta.get("input_guardrail"), data,
             )
-            emit_audit_spans(data.get("audit") or [], user_id=self.user_id, project_id=self.project_id)
+            entries = [
+                e for e in data.get("audit") or []
+                if isinstance(e, dict) and _audit_key(e) not in self.input_guardrail_audited
+            ]
+            self.input_guardrail_audited.update(_audit_key(e) for e in entries)
+            emit_audit_spans(entries, user_id=self.user_id, project_id=self.project_id)
         except Exception as e:  # pylint: disable=W0718
             log.warning(f"[INPUT_GUARDRAIL] Failed to record verdict: {e}")
 

@@ -70,7 +70,7 @@ from ..utils.agent_execution_common import (
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
-from ..utils.input_guardrail import INSPECTED_CONFIG_KEY, inspected_segments
+from ..utils.input_guardrail import INSPECTED_CONFIG_KEY, audit_blocked, inspected_segments
 from ..utils.funcs import build_input_guardrail_error, build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils.usage_tool_events import (
@@ -317,6 +317,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.debug(f'adhoc_tools count={len(adhoc_tools)}, internal_tools "{internal_tools}"')
 
         elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
+        elitea_custom_callback = None
         try:
             client_args = kwargs.get("llm").get("kwargs", {})
             application_data = kwargs.get("application", {})
@@ -684,6 +685,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # and nothing in the error echoes the input it stopped
             input_guardrail = build_input_guardrail_error(e)
             if input_guardrail:
+                # A sub-agent's event may not reach this run's callback; audit from the block
+                audit_blocked(
+                    e,
+                    getattr(elitea_custom_callback, 'input_guardrail_audited', set()),
+                    user_id=tasknode_task.meta.get('user_context', {}).get('user_id'),
+                    project_id=tasknode_task.meta.get('project_id'),
+                )
                 return execution_error(
                     node_interface, user_input, chat_history,
                     "Input blocked by the input guardrail",

@@ -48,6 +48,26 @@ def merge_verdict(current: Optional[Dict[str, Any]], summary: Dict[str, Any]) ->
     return merged
 
 
+def audit_blocked(exc: Exception, recorded: set, user_id=None, project_id=None) -> int:
+    """Audit an SDK block from the exception's own summary (#6886).
+
+    A sub-agent's ``input_guardrail`` event can miss the parent callback (the child
+    runs with its own config), so the block itself is the reliable record. Entries
+    the callback already audited this run are skipped.
+    """
+    summary = getattr(exc, 'summary', None) or {}
+    entries = [
+        e for e in (summary.get('audit') or [])
+        if isinstance(e, dict) and e.get('action') and _audit_key(e) not in recorded
+    ]
+    recorded.update(_audit_key(e) for e in entries)
+    return emit_audit_spans(entries, user_id=user_id, project_id=project_id)
+
+
+def _audit_key(entry: Dict[str, Any]) -> tuple:
+    return str(entry.get('action')), str(entry.get('segment_kind'))
+
+
 def emit_audit_spans(
     entries: Iterable[Dict[str, Any]],
     user_id: Optional[int] = None,

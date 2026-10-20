@@ -290,8 +290,16 @@ def build_input_guardrail_error(exc: Exception) -> Optional[Dict[str, Any]]:
     if type(exc).__name__ != 'InputGuardrailBlocked':
         return None
     categories = [str(c) for c in (getattr(exc, 'categories', None) or [])]
-    if categories and categories != ['error']:
-        labels = [_INPUT_GUARDRAIL_CATEGORY_LABELS.get(c, c) for c in categories]
+    segments = [str(s) for s in (getattr(exc, 'segments', None) or [])]
+    labels = [_INPUT_GUARDRAIL_CATEGORY_LABELS.get(c, c) for c in categories]
+    if categories and categories != ['error'] and segments == ['instructions']:
+        # The user cannot fix this by editing their message; the agent owner can
+        message = (
+            f"This agent's instructions appear to contain {' and '.join(labels)}, so the turn was not sent "
+            "to the model. Ask the agent's owner to remove it or store it as a project secret."
+        )
+        message_key = "input_guardrail.blocked.instructions"
+    elif categories and categories != ['error']:
         message = (
             f"Your message appears to contain {' and '.join(labels)}. It was not sent to the model. "
             "Remove it, or store it as a project secret and reference it instead."
@@ -308,7 +316,7 @@ def build_input_guardrail_error(exc: Exception) -> Optional[Dict[str, Any]]:
         'message_key': message_key,
         'categories': categories,
         'rules': [str(r) for r in (getattr(exc, 'rules', None) or [])],
-        'segments': [str(s) for s in (getattr(exc, 'segments', None) or [])],
+        'segments': segments,
     }
 
 

@@ -46,7 +46,7 @@ funcs = _load('utils/funcs.py', [
 ], dict(_TYPING))
 guardrail = _load('utils/input_guardrail.py', [
     'INSPECTED_CONFIG_KEY', 'AUDIT_TRACER_NAME', 'AUDIT_OBSERVATION_TYPE', '_SEVERITY', '_META_KEYS',
-    'inspected_segments', 'merge_verdict', 'emit_audit_spans',
+    'inspected_segments', 'merge_verdict', 'emit_audit_spans', 'audit_blocked', '_audit_key',
 ], {**_TYPING, 'log': _LOG})
 
 
@@ -74,6 +74,15 @@ def test_block_maps_to_curated_error():
     assert 'a credential' in error['user_message']
     assert 'not sent to the model' in error['user_message']
     assert error['rules'] == ['credentials.github_token']
+
+
+def test_instructions_block_asks_the_agent_owner():
+    error = funcs['build_input_guardrail_error'](
+        InputGuardrailBlocked(['credentials'], ['credentials.github_token'], ['instructions']),
+    )
+
+    assert error['message_key'] == 'input_guardrail.blocked.instructions'
+    assert "agent's owner" in error['user_message']
 
 
 def test_fail_closed_error_has_its_own_message():
@@ -264,6 +273,38 @@ def test_audit_spans_carry_action_and_owner(monkeypatch):
     assert attrs['audit.observation.type'] == 'guardrail'
     assert attrs['user.id'] == 7 and attrs['project.id'] == 2
     assert attrs['audit.tool.name'] == 'user_input'
+
+
+def _capture_spans(monkeypatch):
+    spans = []
+    tracer = types.SimpleNamespace(
+        start_span=lambda name, attributes: spans.append(name) or types.SimpleNamespace(end=lambda: None),
+    )
+    trace = types.SimpleNamespace(get_tracer=lambda name: tracer)
+    monkeypatch.setitem(sys.modules, 'opentelemetry', types.SimpleNamespace(trace=trace))
+    monkeypatch.setitem(sys.modules, 'opentelemetry.trace', trace)
+    return spans
+
+
+def test_sub_agent_block_is_audited_from_the_exception(monkeypatch):
+    spans = _capture_spans(monkeypatch)
+    exc = _blocked()
+    exc.summary = {'audit': [{'action': 'input:credentials.github_token:block', 'segment_kind': 'subagent_task'}]}
+
+    assert guardrail['audit_blocked'](exc, set(), user_id=7, project_id=2) == 1
+    assert spans == ['input:credentials.github_token:block']
+
+
+def test_block_already_audited_by_the_callback_is_not_repeated(monkeypatch):
+    spans = _capture_spans(monkeypatch)
+    entry = {'action': 'input:credentials.github_token:block', 'segment_kind': 'current_turn'}
+    exc = _blocked()
+    exc.summary = {'audit': [entry]}
+    recorded = {guardrail['_audit_key'](entry)}
+
+    assert guardrail['audit_blocked'](exc, recorded) == 0
+    assert guardrail['audit_blocked'](RuntimeError('no summary'), recorded) == 0
+    assert spans == []
 
 
 def test_audit_spans_never_raise_without_opentelemetry(monkeypatch):
