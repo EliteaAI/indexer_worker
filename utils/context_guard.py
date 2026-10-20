@@ -28,6 +28,8 @@ REJECTION_MESSAGES = {
     "DENIED_RBAC": "Permission to use this credential was denied; the run was not started.",
     "MANDATE_INACTIVE": "The mandate for this run is not active; the run was not started.",
     "MANDATE_EXPIRED": "The mandate for this run has expired; the run was not started.",
+    # Autonomous runs (#6947): the mandate's runtime limit, enforced by Main's deadline sweep.
+    "RUNTIME_LIMIT_EXCEEDED": "The run exceeded the time its mandate allows and was stopped.",
     "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
     "AUDIT_UNAVAILABLE": "Auditing is unavailable; the run was not started.",
     "WORKER_CAPABILITY_UNAVAILABLE": "This worker cannot apply governed credentials; the run was not started.",
