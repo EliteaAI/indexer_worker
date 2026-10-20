@@ -301,6 +301,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         #
         # Configure toolkit security guardrails from config (live-reloadable via reconfig)
         self._apply_toolkit_security()
+        # Configure the input guardrail (#6886) from config (live-reloadable via reconfig)
+        self._apply_input_guardrail()
         # Configure tool-result bounds from config (live-reloadable via reconfig)
         self._apply_tool_result_limits()
         # Registered before the task nodes so every forked agent run inherits the backend
@@ -563,6 +565,27 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         except Exception:  # pylint: disable=W0718
             log.exception("Failed to configure sensitive tools")
 
+    def _apply_input_guardrail(self):
+        """Push the input guardrail policy (#6886) into the SDK's process globals.
+
+        Applied unconditionally so that switching it off takes effect. A config we
+        cannot read means the guardrail is off, never a stale policy (plan §6.3).
+        Never logs patterns or values: only whether it is on and the category actions.
+        """
+        try:
+            from elitea_sdk.runtime.toolkits.security import configure_input_guard  # pylint: disable=C0415,E0401
+            policy = self.descriptor.config.get("input_guardrail", {}) or {}
+            if not isinstance(policy, dict):
+                raise TypeError("input_guardrail must be an object")
+            configure_input_guard(policy)
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure the input guardrail - disabling it")
+            try:
+                from elitea_sdk.runtime.toolkits.security import configure_input_guard  # pylint: disable=C0415,E0401
+                configure_input_guard({"enabled": False})
+            except Exception:  # pylint: disable=W0718
+                log.exception("Failed to disable the input guardrail")
+
     def reconfig(self):
         """Re-apply live configuration after an admin save.
 
@@ -572,6 +595,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         guardrails and MCP definitions from this process.
         """
         self._apply_toolkit_security()
+        self._apply_input_guardrail()
         self._apply_tool_result_limits()
         self._reload_mcp_servers()
 
