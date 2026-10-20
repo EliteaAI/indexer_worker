@@ -88,6 +88,17 @@ from ..methods.agent_common import (
 # Summarization Callbacks
 # =============================================================================
 
+def _merge_usage_by_model(callbacks) -> Dict[str, dict]:
+    """Per-model token usage across the run's callbacks (#6898)."""
+    merged: Dict[str, dict] = {}
+    for cb in callbacks:
+        for model, usage in (getattr(cb, 'usage_by_model', None) or {}).items():
+            bucket = merged.setdefault(model, {})
+            for key, value in usage.items():
+                bucket[key] = bucket.get(key, 0) + (value or 0)
+    return merged
+
+
 def create_summarization_callbacks(node_interface: NodeEventInterface) -> dict:
     """Create callbacks for summarization middleware to emit progress events."""
     def on_started(data):
@@ -1033,6 +1044,8 @@ def emit_response_events(
             'index_statuses': elitea_custom_callback.index_statuses,
             'chat_history_tokens_input': total_tokens_in,
             'llm_response_tokens_output': total_tokens_out,
+            'usage_by_model': _merge_usage_by_model(elitea_callbacks),
+            'usage_run_id': getattr(elitea_callback, 'usage_run_id', None),
             'should_continue': should_continue,
             # Both mark a run resuming an existing turn, so the meta writer keeps the
             # earlier round's skills. build_parent_reconcile_payload forces the other
