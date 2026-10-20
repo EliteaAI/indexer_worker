@@ -23,6 +23,7 @@ from langchain_core.messages import HumanMessage
 from pylon.core.tools import log
 from pylon.core.tools import web
 
+from ..utils.context_guard import ContextRejected, enforce_execution_context, rejection_message
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.node_interface import EventTypes
@@ -236,6 +237,35 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Setup event node
         local_event_node = setup_event_node(tasknode_task.multiprocessing_context)
+
+        # #6756: a governed run is validated with Main before any LLM or tool work (legacy: no-op)
+        try:
+            enforce_execution_context(
+                kwargs, local_event_node, task_name="indexer_agent",
+                project_id=tasknode_task.meta.get("project_id"),
+            )
+        except ContextRejected as rejected:
+            # Readable {reason_code, message} to the user instead of a generic task failure
+            node_interface = None
+            try:
+                node_interface = create_node_interface(
+                    local_event_node, stream_id, message_id, tasknode_task.meta,
+                    execution_generation=kwargs.get('execution_generation'),
+                )
+                result = execution_error(
+                    node_interface, kwargs.get("user_input"), kwargs.get("chat_history", []),
+                    f"ContextRejected: {rejected.reason_code}",
+                    ensure_thread_id(kwargs.get("thread_id"), kwargs.get("conversation_id")),
+                    message_id, tasknode_task.meta,
+                    human_readable=rejection_message(rejected.reason_code),
+                )
+                result["reason_code"] = rejected.reason_code
+                return result
+            finally:
+                if node_interface is not None:
+                    node_interface.flush()
+                if tasknode_task.multiprocessing_context == "fork":
+                    local_event_node.stop()
 
         # Create EliteAClient AFTER fork
         client = create_elitea_client(client_args, api_token, api_extra_headers)
