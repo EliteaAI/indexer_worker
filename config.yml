@@ -8,6 +8,11 @@ nltk_data: /tmp/nltk_data
 # spacy_data: /data/cache/spacy
 tasknode_tmp: /tmp/tasknode
 
+# Data memory (MiB) each agent/index task process may allocate on top of what it inherits from
+# the worker, so one runaway task fails alone instead of OOM-killing the container (#7047).
+# Absent: half of the container memory limit (no cap when the container has none). 0 disables.
+# task_memory_limit_mb: 2048
+
 # Coalesce streamed agent_llm_chunk token-deltas into fewer, larger emits.
 # Reduces Redis/pickle/sio/UI work per streamed response. Set enabled: false
 # to revert to per-delta emits.
