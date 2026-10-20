@@ -9,6 +9,7 @@ arrive by a path that never queried approvers.
 import threading
 import time
 
+from .credential_slots_support import CAPABILITY_CREDENTIAL_SLOTS_V1, slots_supported
 from .task_envelope import (
     CAPABILITY_ENVELOPE_V1, EnvelopeRejected, read_envelope,
 )
@@ -43,6 +44,14 @@ class _LabelledCounter:
         return self._counts.get(value, 0)
 
 
+def supported_capabilities():
+    """The envelope capabilities this worker honours: the base set, plus governed credential slots
+    only when the SDK ships them and the sealed transport self-test passes (#6946)."""
+    if slots_supported():
+        return SUPPORTED_CAPABILITIES | {CAPABILITY_CREDENTIAL_SLOTS_V1}
+    return SUPPORTED_CAPABILITIES
+
+
 WORKER_CAPABILITY_REJECT = _LabelledCounter(
     "worker_capability_reject_total",
     "Tasks refused by this worker because its envelope could not be honoured",
@@ -50,19 +59,20 @@ WORKER_CAPABILITY_REJECT = _LabelledCounter(
 )
 
 
-def envelope_task_approver():
+def envelope_task_approver(extra=()):
     """Arbiter node-level approver: False when the envelope is not one this worker honours.
 
     Non-blocking and exception-safe by construction (it is called while Main holds its
     start lock); a payload without an envelope is approved, as before. Arbiter's
     ``task_start_query`` carries no kwargs, so the decision happens at ``task_start_request``;
     a declined request is not acknowledged and the requestor tries the next candidate.
+    ``extra`` adds capabilities that only this node has (the ``governed_ops`` pool).
     """
     def _approver(event_name, event_payload):
         _ = event_name
         kwargs = (event_payload or {}).get("kwargs") or {}
         try:
-            read_envelope(kwargs, SUPPORTED_CAPABILITIES)
+            read_envelope(kwargs, supported_capabilities() | frozenset(extra))
         except EnvelopeRejected as exc:
             try:
                 from pylon.core.tools import log  # pylint: disable=C0415,E0401
@@ -75,10 +85,10 @@ def envelope_task_approver():
     return _approver
 
 
-def enforce_envelope(kwargs):
+def enforce_envelope(kwargs, extra=()):
     """Entry-point guard: raise ``EnvelopeRejected`` (and count it) for a refused envelope."""
     try:
-        read_envelope(kwargs or {}, SUPPORTED_CAPABILITIES)
+        read_envelope(kwargs or {}, supported_capabilities() | frozenset(extra))
     except EnvelopeRejected as exc:
         for capability in exc.missing or ("-",):
             WORKER_CAPABILITY_REJECT.inc(capability)
@@ -95,11 +105,11 @@ def rejection_result(exc):
     }
 
 
-def capabilities_payload(ident, pool, now=None):
+def capabilities_payload(ident, pool, now=None, extra=()):
     return {
         "ident": ident,
         "pool": pool,
-        "capabilities": sorted(SUPPORTED_CAPABILITIES),
+        "capabilities": sorted(supported_capabilities() | frozenset(extra)),
         "ts": time.time() if now is None else now,
     }
 

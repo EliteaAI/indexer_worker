@@ -173,6 +173,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         self.agent_event_node = None
         self.agent_task_node = None
         self._capabilities_heartbeat_stop = None
+        self.governed_event_node = None
+        self.governed_task_node = None
         #
         self.index_event_node = None
         self.index_maintenance_task_node = None
@@ -350,6 +352,9 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
                 ),
             )
             self.agent_task_node.start()
+            # Governed credential probes (C-1009 WP-1D, #6946): own pool, off by default.
+            # Started before the first capability announce below so that one carries it.
+            self._init_governed_ops()
             # Advertise capabilities: answer requests, and re-announce within Main's TTL
             self.agent_event_node.subscribe(
                 CAPABILITIES_REQUEST_EVENT, self.task_node_capabilities_request
@@ -498,9 +503,34 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             self.agent_task_node.register_task(
                 self.indexer_mcp_sync_tools, "indexer_mcp_sync_tools"
             )
+            if self.governed_task_node is not None:
+                from .utils.governed_ops import GOVERNED_CHECK_CONNECTION_TASK  # pylint: disable=C0415
+                self.governed_task_node.register_task(
+                    self.indexer_governed_check_connection, GOVERNED_CHECK_CONNECTION_TASK
+                )
 
         else:
             log.debug("Worker not enabled")
+
+    def _init_governed_ops(self):
+        """Start the ``governed_ops`` pool when enabled and this worker can resolve credential slots."""
+        from .utils.envelope_guard import envelope_task_approver  # pylint: disable=C0415
+        from .utils.governed_ops import (  # pylint: disable=C0415
+            create_governed_task_node, governed_ops_capabilities, governed_ops_enabled,
+        )
+        config = self.descriptor.config
+        if not governed_ops_enabled(config):
+            if config.get("governed_ops_enabled", False):
+                log.warning("governed_ops_enabled is set but credential slots are unsupported here: pool not started")
+            return
+        self.governed_event_node = worker_core.event_node.clone()
+        self.governed_event_node.start()
+        self.governed_task_node = create_governed_task_node(
+            arbiter, self.governed_event_node, config, worker_core.tasknode_tmp,
+            envelope_task_approver(extra=governed_ops_capabilities()),
+        )
+        self.governed_task_node.start()
+        log.info("governed_ops pool started (task_limit=%s)", self.governed_task_node.task_limit)
 
     def _apply_tool_result_limits(self):
         """Push the tool-result bounds from config into the SDK (live-reloadable).
@@ -630,6 +660,11 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         if self.descriptor.config.get("worker_enabled", True):
             if self._capabilities_heartbeat_stop is not None:
                 self._capabilities_heartbeat_stop()
+            if self.governed_task_node is not None:
+                from .utils.governed_ops import GOVERNED_CHECK_CONNECTION_TASK  # pylint: disable=C0415
+                self.governed_task_node.unregister_task(
+                    self.indexer_governed_check_connection, GOVERNED_CHECK_CONNECTION_TASK
+                )
             # Tasks: agent
             self.agent_task_node.unregister_task(
                 self.indexer_agent, "indexer_agent"
@@ -679,6 +714,10 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             self.index_task_node.stop()
             self.index_maintenance_task_node.stop()
             self.index_event_node.stop()
+            # Governed ops prereqs
+            if self.governed_task_node is not None:
+                self.governed_task_node.stop()
+                self.governed_event_node.stop()
             # Agents prereqs
             self.agent_task_node.stop()
 

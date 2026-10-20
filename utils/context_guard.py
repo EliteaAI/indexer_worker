@@ -20,6 +20,23 @@ REJECTION_MESSAGES = {
     "DENIED_BINDING": "This agent is not approved to run in this context.",
     DEPENDENCY_UNAVAILABLE: "The run could not be authorized right now. Please try again shortly.",
     "UNKNOWN_SCHEMA_VERSION": "This run uses a security context version this worker does not support.",
+    # Governed credential release (#6946). Fixed per code: no titles, ids or field names.
+    "CREDENTIAL_REFERENCE_REQUIRED": "A governed credential reference is required; the run was not started.",
+    "CREDENTIAL_REFERENCE_INACTIVE": "The credential reference is not active; the run was not started.",
+    "CREDENTIAL_GENERATION_MISMATCH": "The credential changed since the run was approved; the run was not started.",
+    "DENIED_GRANT": "The credential grant is no longer in force; the run was not started.",
+    "DENIED_RBAC": "Permission to use this credential was denied; the run was not started.",
+    "MANDATE_INACTIVE": "The mandate for this run is not active; the run was not started.",
+    "MANDATE_EXPIRED": "The mandate for this run has expired; the run was not started.",
+    "RATE_LIMITED": "This run asked for its credentials too often and was stopped.",
+    "AUDIT_UNAVAILABLE": "Auditing is unavailable; the run was not started.",
+    "WORKER_CAPABILITY_UNAVAILABLE": "This worker cannot apply governed credentials; the run was not started.",
+    "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
+    **dict.fromkeys(
+        ("STORE_DENIED", "STORE_SEALED", "STORE_UNAVAILABLE", "STORE_TLS_INVALID", "STORE_NOT_FOUND",
+         "STORE_VERSION_CONFLICT"),
+        "The credential store is unavailable; the run was not started. Try again later.",
+    ),
 }
 DEFAULT_REJECTION_MESSAGE = "This run was not authorized."
 
