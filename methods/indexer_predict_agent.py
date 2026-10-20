@@ -24,6 +24,7 @@ from pylon.core.tools import log
 from pylon.core.tools import web
 
 from ..utils.context_guard import ContextRejected, enforce_execution_context, rejection_message
+from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.node_interface import EventTypes
@@ -244,7 +245,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # #6756: a governed run is validated with Main before any LLM or tool work (legacy: no-op)
         try:
-            enforce_execution_context(
+            context_view = enforce_execution_context(
                 kwargs, local_event_node, task_name="indexer_predict_agent",
                 project_id=tasknode_task.meta.get("project_id"),
             )
@@ -276,6 +277,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         install_routing_context_signer(client, local_event_node, kwargs.get("routing_principal"))
         # #6913: pre-expanded sub-agents from pylon_main; the SDK falls back to PATCH on a miss
         client.prefetched_version_details = (kwargs.get("application") or {}).get("subagent_version_details") or {}
+        # #6946: a governed run resolves its credential slots through Main; a legacy client is untouched
+        credential_resolver = attach_credential_resolver(
+            client, context_view, kwargs, local_event_node,
+            task_name="indexer_predict_agent", project_id=tasknode_task.meta.get("project_id"),
+        )
 
         should_continue = kwargs.get('should_continue', False)
         hitl_resume = kwargs.get('hitl_resume', False)
@@ -345,7 +351,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # Get tools and internal_tools - SDK handles internal_tools processing now
         adhoc_tools = kwargs.get("tools", [])
         # Resolve {{secret.xxx}} placeholders in MCP tool settings at indexer level
-        adhoc_tools = unsecret_mcp_tools(adhoc_tools, client)
+        if credential_resolver is None:  # governed: nothing to resolve here, refused upstream (#6946)
+            adhoc_tools = unsecret_mcp_tools(adhoc_tools, client)
         internal_tools = kwargs.get("internal_tools", [])
         lazy_tools_mode = 'lazy_tools_mode' in internal_tools
 
@@ -718,6 +725,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 elitea_callback=elitea_callback,
             )
         except Exception as e:
+            # #6946: a governed credential slot that could not be resolved ends the run readably
+            governed_code = governed_credential_code(e)
+            if governed_code:
+                result = execution_error(
+                    node_interface, user_input, chat_history,
+                    f"GovernedCredentialError: {governed_code}",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=rejection_message(governed_code),
+                    execution_start_time=execution_start_time,
+                    elitea_callback=elitea_callback,
+                )
+                result["reason_code"] = governed_code
+                return result
             continuation_error = build_output_continuation_error(e)
             if continuation_error:
                 return execution_error(
@@ -810,6 +830,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Flush Langfuse traces
             flush_langfuse_callback(langfuse_client, langfuse_callback)
+
+            if credential_resolver is not None:
+                credential_resolver.close()
 
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
