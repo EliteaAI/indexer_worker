@@ -74,7 +74,7 @@ from ..utils.input_guardrail import INSPECTED_CONFIG_KEY, audit_blocked, inspect
 from ..utils.funcs import build_input_guardrail_error, build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils.usage_tool_events import (
-    ATTRIBUTION_HEADER, attribution_header, attribution_signing_key,
+    ATTRIBUTION_HEADER, attribution_header, attribution_signing_key, entity_from_application,
 )
 from ..utils import parallel_hitl_router, predict_router
 
@@ -399,6 +399,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 tasknode_task.id,
                 debug=kwargs.get("debug", False)
             )
+            # Names the agent on the input-guardrail audit rows (#6886)
+            elitea_custom_callback.audit_entity = entity_from_application(kwargs.get('application'))
 
             # Stop and HITL pause end a run with no terminal event; partial saves
             # are the only chance to persist which skills applied.
@@ -691,6 +693,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     getattr(elitea_custom_callback, 'input_guardrail_audited', set()),
                     user_id=tasknode_task.meta.get('user_context', {}).get('user_id'),
                     project_id=tasknode_task.meta.get('project_id'),
+                    entity=entity_from_application(kwargs.get('application')),
                 )
                 return execution_error(
                     node_interface, user_input, chat_history,

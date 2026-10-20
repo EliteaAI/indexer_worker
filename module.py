@@ -580,11 +580,29 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             configure_input_guard(policy)
         except Exception:  # pylint: disable=W0718
             log.exception("Failed to configure the input guardrail - disabling it")
+            policy = {"enabled": False}
             try:
                 from elitea_sdk.runtime.toolkits.security import configure_input_guard  # pylint: disable=C0415,E0401
                 configure_input_guard({"enabled": False})
             except Exception:  # pylint: disable=W0718
                 log.exception("Failed to disable the input guardrail")
+        # Same policy for the tracing plugin's span payloads (this process runs its own)
+        try:
+            from .utils.input_guardrail import set_redaction_policy  # pylint: disable=C0415
+            set_redaction_policy(policy)
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure span redaction")
+
+    def ready(self):
+        """Plugins are initialized: the tracing plugin can take the span value redactor (#6886)."""
+        self._register_tracing_redactor()
+
+    def _register_tracing_redactor(self):
+        try:
+            from .utils.input_guardrail import register_tracing_redactor  # pylint: disable=C0415
+            self._tracing_redactor_registered = register_tracing_redactor()
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to register the tracing value redactor")
 
     def reconfig(self):
         """Re-apply live configuration after an admin save.
@@ -596,6 +614,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         """
         self._apply_toolkit_security()
         self._apply_input_guardrail()
+        if not getattr(self, "_tracing_redactor_registered", False):
+            self._register_tracing_redactor()
         self._apply_tool_result_limits()
         self._reload_mcp_servers()
 

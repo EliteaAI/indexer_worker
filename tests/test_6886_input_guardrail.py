@@ -8,6 +8,7 @@ Loaded by source so the suite runs without the pylon runtime.
 """
 
 import ast
+import importlib
 import json
 import pathlib
 import sys
@@ -47,6 +48,7 @@ funcs = _load('utils/funcs.py', [
 guardrail = _load('utils/input_guardrail.py', [
     'INSPECTED_CONFIG_KEY', 'AUDIT_TRACER_NAME', 'AUDIT_OBSERVATION_TYPE', '_SEVERITY', '_META_KEYS',
     'inspected_segments', 'merge_verdict', 'emit_audit_spans', 'audit_blocked', '_audit_key',
+    '_entity_attributes', '_redaction', 'set_redaction_policy', 'redact_span_text', 'register_tracing_redactor',
 ], {**_TYPING, 'log': _LOG})
 
 
@@ -373,3 +375,213 @@ def test_apply_disables_when_sdk_rejects_policy(monkeypatch):
     _load_apply({'input_guardrail': {'enabled': True}}, configure, monkeypatch)()
 
     assert applied == [{'enabled': False}]
+
+
+# --- audit rows name the agent ---------------------------------------------------------
+
+
+def _capture_attrs(monkeypatch):
+    spans = []
+    tracer = types.SimpleNamespace(
+        start_span=lambda name, attributes: spans.append(attributes) or types.SimpleNamespace(end=lambda: None),
+    )
+    trace = types.SimpleNamespace(get_tracer=lambda name: tracer)
+    monkeypatch.setitem(sys.modules, 'opentelemetry', types.SimpleNamespace(trace=trace))
+    monkeypatch.setitem(sys.modules, 'opentelemetry.trace', trace)
+    return spans
+
+
+def test_audit_spans_carry_the_agent_as_entity_attributes(monkeypatch):
+    spans = _capture_attrs(monkeypatch)
+    entity = {'type': 'application', 'id': 42, 'version_id': 9, 'name': 'Refund Desk', 'project_id': 2}
+
+    guardrail['emit_audit_spans']([{'action': 'input:credentials.github_token:block'}], entity=entity)
+
+    assert spans[0]['entity.type'] == 'application'
+    assert spans[0]['entity.id'] == '42'
+    assert spans[0]['entity.name'] == 'Refund Desk'
+
+
+def test_audit_spans_without_an_agent_have_no_entity_attributes(monkeypatch):
+    spans = _capture_attrs(monkeypatch)
+
+    guardrail['emit_audit_spans']([{'action': 'a'}])
+    guardrail['emit_audit_spans']([{'action': 'a'}], entity={'type': 'application', 'id': None})
+    guardrail['emit_audit_spans']([{'action': 'a'}], entity='nope')
+
+    assert spans and not any(k.startswith('entity.') for attrs in spans for k in attrs)
+
+
+def test_blocked_audit_forwards_the_agent(monkeypatch):
+    spans = _capture_attrs(monkeypatch)
+    exc = _blocked()
+    exc.summary = {'audit': [{'action': 'input:credentials.github_token:block', 'segment_kind': 'current_turn'}]}
+
+    guardrail['audit_blocked'](exc, set(), entity={'type': 'application', 'id': 5, 'name': 'A'})
+
+    assert spans[0]['entity.id'] == '5'
+
+
+def test_agent_tasks_hand_the_run_agent_to_the_audit_path():
+    for name in ('indexer_agent.py', 'indexer_predict_agent.py'):
+        source = (ROOT / 'methods' / name).read_text()
+        assert "elitea_custom_callback.audit_entity = entity_from_application(kwargs.get('application'))" in source
+        assert "entity=entity_from_application(kwargs.get('application'))" in source
+    assert 'entity=self.audit_entity' in (ROOT / 'methods' / 'agent_common.py').read_text()
+
+
+# --- tracing value redactor ------------------------------------------------------------
+
+
+def _install_fake_detector(monkeypatch, inspect_fn):
+    """A stand-in SDK detector so the contract is tested without the SDK version installed."""
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class Segment:
+        kind: str
+        index: int
+        text: str
+
+    @dataclass(frozen=True)
+    class Policy:
+        categories: dict
+        enabled: bool = True
+
+        @property
+        def active(self):
+            return self.enabled and any(a != 'off' for a in self.categories.values())
+
+    def policy_from_dict(raw):
+        return Policy(categories=dict(raw.get('categories') or {'credentials': 'block'}),
+                      enabled=bool(raw.get('enabled')))
+
+    detector = types.SimpleNamespace(Segment=Segment, inspect=inspect_fn, policy_from_dict=policy_from_dict)
+    for name in ('elitea_sdk', 'elitea_sdk.runtime', 'elitea_sdk.runtime.guardrails'):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.guardrails.input_detector', detector)
+    return detector
+
+
+def _result(redacted=None, error=None):
+    return types.SimpleNamespace(redacted=redacted or {}, error=error)
+
+
+def _reset_redaction():
+    guardrail['set_redaction_policy'](None)
+
+
+def test_redactor_is_inert_while_the_guardrail_is_off(monkeypatch):
+    calls = []
+    _install_fake_detector(monkeypatch, lambda *a, **k: calls.append(1))
+
+    assert guardrail['set_redaction_policy']({'enabled': False}) is False
+    assert guardrail['set_redaction_policy']({'enabled': True, 'categories': {'credentials': 'off'}}) is False
+    assert guardrail['set_redaction_policy']('not a mapping') is False
+    assert guardrail['redact_span_text']('some text long enough') == 'some text long enough'
+    assert calls == []
+
+
+def test_redactor_replaces_detected_values_with_every_action_forced_to_redact(monkeypatch):
+    seen = []
+
+    def fake_inspect(segments, policy):
+        seen.append(policy.categories)
+        text = segments[0].text
+        return _result({('span', 0): text.replace('SECRET', '[REDACTED:credentials]')})
+
+    _install_fake_detector(monkeypatch, fake_inspect)
+    try:
+        assert guardrail['set_redaction_policy']({'enabled': True, 'categories': {'credentials': 'record'}}) is True
+
+        assert guardrail['redact_span_text']('use SECRET now') == 'use [REDACTED:credentials] now'
+        assert guardrail['redact_span_text']('nothing here') == 'nothing here'
+        assert seen[0] == {'credentials': 'redact'}
+    finally:
+        _reset_redaction()
+
+
+def test_redactor_returns_none_when_inspection_failed(monkeypatch):
+    results = iter([_result(error='oversize'), _result(error='timeout'), RuntimeError('boom')])
+
+    def fake_inspect(segments, policy):
+        outcome = next(results)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    _install_fake_detector(monkeypatch, fake_inspect)
+    try:
+        guardrail['set_redaction_policy']({'enabled': True})
+
+        assert guardrail['redact_span_text']('x' * 20) is None
+        assert guardrail['redact_span_text']('x' * 20) is None
+        assert guardrail['redact_span_text']('x' * 20) is None
+    finally:
+        _reset_redaction()
+
+
+def test_switching_the_guardrail_off_clears_the_redactor(monkeypatch):
+    _install_fake_detector(monkeypatch, lambda segments, policy: _result({('span', 0): 'changed'}))
+    guardrail['set_redaction_policy']({'enabled': True})
+    assert guardrail['redact_span_text']('original text') == 'changed'
+
+    guardrail['set_redaction_policy']({'enabled': False})
+
+    assert guardrail['redact_span_text']('original text') == 'original text'
+
+
+def test_unavailable_sdk_detector_leaves_the_redactor_inactive(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.guardrails.input_detector', None)
+
+    assert guardrail['set_redaction_policy']({'enabled': True}) is False
+    assert guardrail['redact_span_text']('original text') == 'original text'
+
+
+def test_real_detector_redacts_a_credential_and_keeps_the_sentence():
+    try:
+        detector = importlib.util.find_spec('elitea_sdk.runtime.guardrails.input_detector')
+    except ImportError:
+        detector = None
+    if detector is None:
+        import pytest
+        pytest.skip('installed SDK has no input guardrail detector')
+    try:
+        assert guardrail['set_redaction_policy']({'enabled': True, 'categories': {'credentials': 'block'}}) is True
+
+        out = guardrail['redact_span_text'](f'deploy with {FAKE_SECRET} now')
+
+        assert FAKE_SECRET not in out
+        assert out == 'deploy with [REDACTED:credentials] now'
+        assert guardrail['redact_span_text']('plain sentence here') == 'plain sentence here'
+        assert guardrail['redact_span_text'](' '.join(['word'] * 100_000)) is None  # over max_inspect_chars
+    finally:
+        _reset_redaction()
+
+
+def test_register_hands_the_redactor_to_the_tracing_plugin(monkeypatch):
+    registered = []
+    tracing = types.SimpleNamespace(register_value_redactor=registered.append)
+    tools = types.SimpleNamespace(this=types.SimpleNamespace(
+        for_module=lambda name: types.SimpleNamespace(module=tracing) if name == 'tracing' else None,
+    ))
+    monkeypatch.setitem(sys.modules, 'tools', tools)
+
+    assert guardrail['register_tracing_redactor']() is True
+    assert registered == [guardrail['redact_span_text']]
+
+
+def test_register_survives_a_missing_tracing_plugin(monkeypatch):
+    def for_module(_name):
+        raise RuntimeError('no such module')
+
+    monkeypatch.setitem(sys.modules, 'tools', types.SimpleNamespace(this=types.SimpleNamespace(for_module=for_module)))
+
+    assert guardrail['register_tracing_redactor']() is False
+
+
+def test_module_registers_on_ready_and_retries_on_reconfig():
+    source = (ROOT / 'module.py').read_text()
+    assert 'def ready(self):' in source
+    assert 'self._register_tracing_redactor()' in source
+    assert 'set_redaction_policy(policy)' in source

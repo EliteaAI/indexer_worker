@@ -2319,6 +2319,8 @@ class EliteACustomCallback(BaseCallbackHandler):
         self.additional_response_meta = {}
         # (action, segment_kind) pairs already written as input-guardrail audit rows (#6886)
         self.input_guardrail_audited = set()
+        # The run's agent ({'type','id','name'}); set by the agent task once the payload is known
+        self.audit_entity: Optional[dict] = None
         self.modified_files = []  # List to store modified file information
         self.generated_image_filepaths = []  # Filepaths of tool-generated images for thumbnail resolution
         self.index_statuses = []  # List to store index operation statuses
@@ -2352,7 +2354,9 @@ class EliteACustomCallback(BaseCallbackHandler):
                 if isinstance(e, dict) and _audit_key(e) not in self.input_guardrail_audited
             ]
             self.input_guardrail_audited.update(_audit_key(e) for e in entries)
-            emit_audit_spans(entries, user_id=self.user_id, project_id=self.project_id)
+            emit_audit_spans(
+                entries, user_id=self.user_id, project_id=self.project_id, entity=self.audit_entity,
+            )
         except Exception as e:  # pylint: disable=W0718
             log.warning(f"[INPUT_GUARDRAIL] Failed to record verdict: {e}")
 
