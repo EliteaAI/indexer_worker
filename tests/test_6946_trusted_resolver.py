@@ -541,7 +541,7 @@ def test_credential_slots_capability_is_announced_only_when_supported(monkeypatc
     assert envelope_guard.capabilities_payload("a", "agents", now=1)["capabilities"] == ["task_envelope.v1"]
     monkeypatch.setattr(envelope_guard, "slots_supported", lambda: True)
     assert envelope_guard.capabilities_payload("a", "agents", now=1)["capabilities"] == [
-        "credential_slots.v1", "credential_slots_batch.v1", "task_envelope.v1"]
+        "credential_slots.v1", "credential_slots_batch.v1", "credential_slots_run.v1", "task_envelope.v1"]
 
 
 def test_governed_ops_capability_rides_only_on_the_pool_announce(monkeypatch):
@@ -551,7 +551,8 @@ def test_governed_ops_capability_rides_only_on_the_pool_announce(monkeypatch):
         "governed_ops_1", "governed_ops", now=1, extra=governed_ops.governed_ops_capabilities())
     assert "governed_ops_pool.v1" not in agents["capabilities"]
     assert pool["capabilities"] == [
-        "credential_slots.v1", "credential_slots_batch.v1", "governed_ops_pool.v1", "task_envelope.v1"]
+        "credential_slots.v1", "credential_slots_batch.v1", "credential_slots_run.v1", "governed_ops_pool.v1",
+        "task_envelope.v1"]
 
 
 def _requires(*capabilities):
@@ -568,9 +569,11 @@ def test_approver_and_guard_honour_slots_only_when_supported(monkeypatch):
         envelope_guard.enforce_envelope(_requires("credential_slots.v1")["kwargs"])
     assert "credential_slots.v1" in err.value.missing
     assert approve("q", _requires("credential_slots_batch.v1")) is False
+    assert approve("q", _requires("credential_slots_run.v1")) is False
     monkeypatch.setattr(envelope_guard, "slots_supported", lambda: True)
     assert approve("q", _requires("credential_slots.v1")) is True
     assert approve("q", _requires("credential_slots_batch.v1")) is True
+    assert approve("q", _requires("credential_slots_run.v1")) is True
     envelope_guard.enforce_envelope(_requires("credential_slots.v1", "credential_slots_batch.v1")["kwargs"])
 
 
@@ -1319,6 +1322,190 @@ def test_a_probe_batch_carries_its_one_ticket(batch_bus, sdk_slots):
     assert len(batch_bus.batch_requests) == 1
 
 
+# --- run-level release: every toolkit of a run in one call (perf PR 5: resolve_all) -------------------------------------------
+
+def _run_items(n, per_toolkit=1, **extra):
+    """n toolkits x per_toolkit slots, each as ``{toolkit_instance_id, field, slot}``."""
+    return [{"toolkit_instance_id": f"tk-{t}", "field": f"configuration_{f}",
+             "slot": _slot(decision_id=f"decision-{t}-{f}", **extra)}
+            for t in range(n) for f in range(per_toolkit)]
+
+
+def _all(resolver, items):
+    return resolver.resolve_all(items=items)
+
+
+def test_a_run_of_six_toolkits_is_one_release_call_and_two_bus_calls(batch_bus, sdk_slots, keypairs):
+    kwargs = _kwargs()
+    run_rpc = context_guard.RunRpcNode("node")
+    view = context_guard.enforce_execution_context(kwargs, "node", task_name="indexer_agent", project_id=7, rpc=run_rpc)
+    resolver = credential_resolver.attach_credential_resolver(
+        types.SimpleNamespace(), view, kwargs, "node", task_name="indexer_agent", project_id=7, rpc=run_rpc)
+    items = _run_items(6)
+    result = _all(resolver, items)
+    assert list(result) == [(i["toolkit_instance_id"], i["field"]) for i in items]
+    assert all(e.fields["access_token"].get_secret_value() == VALUE for e in result.values())
+    assert len(batch_bus.validate_requests) + len(batch_bus.batch_requests) == 2 and batch_bus.requests == []
+    (request,) = batch_bus.batch_requests
+    assert request["slots"] == [{k: i[k] for k in ("toolkit_instance_id", "field", "slot")} for i in items]
+    assert len(batch_bus.nodes) == 1 and len(keypairs) == 1
+    assert batch_bus.nodes[0].timeouts == [context_guard.DEFAULT_TIMEOUT_S, 18.0]
+    run_rpc.close()
+
+
+def test_the_same_field_name_in_two_toolkits_is_two_slots(batch_bus, sdk_slots):
+    items = [{"toolkit_instance_id": tk, "field": "github_configuration", "slot": _slot(decision_id=f"d-{tk}")}
+             for tk in ("a", "b")]
+    assert list(_all(_bresolver(), items)) == [("a", "github_configuration"), ("b", "github_configuration")]
+    assert len(batch_bus.batch_requests) == 1
+
+
+def test_a_run_over_the_batch_limit_is_chunked_in_order(batch_bus, sdk_slots, keypairs):
+    limit = credential_resolver.MAX_BATCH_SLOTS
+    items = _run_items(limit + 1)
+    result = _all(_bresolver(), items)
+    assert list(result) == [(i["toolkit_instance_id"], i["field"]) for i in items]
+    first, second = batch_bus.batch_requests
+    assert [s["toolkit_instance_id"] for s in first["slots"]] == [i["toolkit_instance_id"] for i in items[:limit]]
+    assert [s["toolkit_instance_id"] for s in second["slots"]] == [items[limit]["toolkit_instance_id"]]
+    assert batch_bus.requests == [] and len(batch_bus.nodes) == 1
+    assert len({r["recipient_key"] for r in batch_bus.batch_requests}) == 2 == len(keypairs)  # a keypair per call
+    assert batch_bus.nodes[0].timeouts == [credential_resolver.batch_timeout(15, limit),
+                                           credential_resolver.batch_timeout(15, 1)]
+
+
+def test_a_refused_slot_is_named_in_the_log_only_and_stops_the_run(batch_bus, sdk_slots, logs):
+    batch_bus.override = {"ok": False, "reason_code": "DENIED_GRANT", "message": "must not matter",
+                          "toolkit_instance_id": "tk-3", "field": "configuration_0"}
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_bresolver(), _run_items(6))
+    assert _code(err) == "DENIED_GRANT"
+    assert "tk-3" not in str(err.value) and "configuration_0" not in str(err.value) and "must not matter" not in str(err.value)
+    assert any("DENIED_GRANT" in line and "tk-3" in line and "configuration_0" in line for line in logs)
+    assert len(batch_bus.batch_requests) == 1 and batch_bus.requests == []
+
+
+def test_a_refusal_without_a_named_slot_logs_no_names_and_keeps_its_code(batch_bus, sdk_slots, logs):
+    batch_bus.override = {"ok": False, "reason_code": "RATE_LIMITED", "toolkit_instance_id": {"x": 1}, "field": ""}
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_bresolver(), _run_items(2))
+    assert _code(err) == "RATE_LIMITED" and not any("credential_slot_refusal" in line for line in logs)
+
+
+def test_a_later_chunk_refusal_aborts_the_run_with_its_code(batch_bus, sdk_slots):
+    real = batch_bus.release_many
+
+    def second_fails(**request):
+        if not batch_bus.batch_requests:  # the first chunk is served
+            return real(**request)
+        batch_bus.batch_requests.append(request)
+        return {"ok": False, "reason_code": "STORE_UNAVAILABLE", "toolkit_instance_id": "tk-64", "field": "configuration_0"}
+
+    batch_bus.release_many = second_fails
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_bresolver(), _run_items(credential_resolver.MAX_BATCH_SLOTS + 1))
+    assert _code(err) == "STORE_UNAVAILABLE" and len(batch_bus.batch_requests) == 2
+
+
+@pytest.mark.parametrize("tamper", ["swapped_toolkit", "missing", "duplicate_key"])
+def test_the_run_reply_must_match_the_requested_toolkit_and_field_pairs(batch_bus, sdk_slots, tamper):
+    real = batch_bus.release_many
+
+    def release_many(**request):
+        reply = real(**request)
+        releases = reply["releases"]
+        if tamper == "swapped_toolkit":
+            releases[0]["toolkit_instance_id"] = releases[1]["toolkit_instance_id"]
+        elif tamper == "missing":
+            releases.pop()
+        else:
+            releases[1] = {**releases[0], "release_id": "rel-other"}
+        return reply
+
+    batch_bus.release_many = release_many
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_bresolver(), _run_items(3))
+    assert _code(err) == "DEPENDENCY_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("items", [
+    "x", None, [None], [{}], [{"field": "a", "slot": _slot()}],
+    [{"toolkit_instance_id": "", "field": "a", "slot": _slot()}],
+    [{"toolkit_instance_id": 12, "field": "a", "slot": _slot()}],
+    [{"toolkit_instance_id": "t", "slot": _slot()}],
+    [{"toolkit_instance_id": "t", "field": "", "slot": _slot()}],
+    [{"toolkit_instance_id": "t", "field": "a", "slot": "nope"}],
+    [{"toolkit_instance_id": "t", "field": "a", "slot": _slot()}] * 2,  # (toolkit, field) at most once
+])
+def test_run_items_with_a_bad_shape_or_a_repeated_pair_are_refused_before_any_call(batch_bus, sdk_slots, items):
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_bresolver(), items)
+    assert _code(err) == "STALE_CONTEXT"
+    assert batch_bus.batch_requests == [] and batch_bus.requests == [] and batch_bus.nodes == []
+
+
+def test_an_empty_run_makes_no_call_and_no_node(batch_bus, sdk_slots):
+    assert _all(_bresolver(), []) == {} and batch_bus.nodes == [] and batch_bus.batch_requests == []
+
+
+def test_without_the_batch_flag_the_run_falls_back_to_one_resolve_many_per_toolkit(bus, sdk_slots, keypairs):
+    items = _run_items(3, per_toolkit=2)
+    result = _all(_resolver(batch_release=False), items)
+    assert list(result) == [(i["toolkit_instance_id"], i["field"]) for i in items]
+    assert bus.batch_requests == [] and len(bus.requests) == 6 == len(keypairs)
+    assert [(r["toolkit_instance_id"], r["field"]) for r in bus.requests] == list(result)
+    assert len(bus.nodes) == 1
+
+
+def test_the_fallback_groups_interleaved_items_by_toolkit(bus, sdk_slots, monkeypatch):
+    calls = []
+    resolver = _resolver()
+    real = resolver.resolve_many
+
+    def spy(*, toolkit_instance_id, items):
+        calls.append((toolkit_instance_id, [i["field"] for i in items]))
+        return real(toolkit_instance_id=toolkit_instance_id, items=items)
+
+    monkeypatch.setattr(resolver, "resolve_many", spy)
+    slot = _slot()
+    items = [{"toolkit_instance_id": tk, "field": f, "slot": slot} for tk, f in (("a", "x"), ("b", "x"), ("a", "y"))]
+    result = _all(resolver, items)
+    assert calls == [("a", ["x", "y"]), ("b", ["x"])] and set(result) == {("a", "x"), ("a", "y"), ("b", "x")}
+
+
+def test_a_refusal_in_the_fallback_keeps_its_code_and_stops_at_the_first(bus, sdk_slots):
+    bus.override = {"ok": False, "reason_code": "DENIED_GRANT"}
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_resolver(), _run_items(3))
+    assert _code(err) == "DENIED_GRANT" and len(bus.requests) == 1
+
+
+def test_a_bus_failure_of_the_run_call_is_a_dependency_failure_and_never_a_fallback(batch_bus, sdk_slots):
+    batch_bus.override = queue.Empty()
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _all(_bresolver(), _run_items(3))
+    assert _code(err) == "DEPENDENCY_UNAVAILABLE" and batch_bus.requests == []
+
+
+@pytest.mark.parametrize("batch_release", [True, False])
+def test_a_probe_run_is_exactly_one_slot_and_refuses_more_before_any_call(batch_bus, sdk_slots, batch_release):
+    resolver = _resolver(context_ref=None, run_id=None, task_name="indexer_governed_check_connection",
+                         batch_release=batch_release)
+    for count in (2, credential_resolver.MAX_BATCH_SLOTS + 1):
+        with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+            _all(resolver, _run_items(count, probe_ref=PROBE_REF))
+        assert _code(err) == "STALE_CONTEXT"
+    assert batch_bus.batch_requests == [] and batch_bus.requests == [] and batch_bus.nodes == []
+    assert len(_all(resolver, _run_items(1, probe_ref=PROBE_REF))) == 1
+
+
+def test_run_release_logs_and_metrics_carry_no_material(batch_bus, sdk_slots, logs):
+    before = credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("ok", "OK")
+    _all(_bresolver(), _run_items(4))
+    assert credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("ok", "OK") == before + 4
+    assert logs and all(VALUE not in line for line in logs)
+
+
 # --- S9 / L7: one node per governed run; a legacy run has none -------------------------------------------------------------
 
 def test_validate_and_release_share_one_rpcnode(batch_bus, sdk_slots):
@@ -1491,3 +1678,16 @@ def test_old_sdk_slot_by_slot_calls_still_resolve_through_the_real_apply(batch_b
     batch_bus.batch_requests.clear()
     real_sdk_slots.apply_credential_slots(settings, "12", _resolver())  # a run whose Main did not say batch
     assert batch_bus.batch_requests == [] and len(batch_bus.requests) == 1
+
+
+def test_the_real_sdk_run_level_helpers_release_six_toolkits_in_one_bus_call(batch_bus, real_sdk_slots):
+    if not hasattr(real_sdk_slots, "resolve_run_slots"):
+        pytest.skip("installed SDK has no run-level slot release")
+    resolver = _bresolver()
+    settings = {f"tk-{n}": {"github_configuration": {"credential_slot": _slot(decision_id=f"d-{n}")}} for n in range(6)}
+    items = [i for tk, s in settings.items() for i in real_sdk_slots.collect_slot_items(s, tk)]
+    released = real_sdk_slots.resolve_run_slots(resolver, items)
+    assert len(batch_bus.batch_requests) == 1 and batch_bus.requests == []
+    for tk, s in settings.items():
+        applied, values = real_sdk_slots.apply_credential_slots(s, tk, None, released=released[tk])
+        assert applied["github_configuration"]["access_token"] == VALUE and values == frozenset({VALUE})
