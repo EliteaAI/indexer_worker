@@ -86,8 +86,10 @@ def real_sdk_slots(sdk_slots):
 @pytest.fixture(autouse=True)
 def fresh_support_cache():
     credential_slots_support.slots_supported.cache_clear()
+    credential_resolver.reset_batch_support()
     yield
     credential_slots_support.slots_supported.cache_clear()
+    credential_resolver.reset_batch_support()
 
 
 NO_OVERRIDE = object()
@@ -97,7 +99,10 @@ class FakeBus:
     """Stands in for the worker bus with Main's release handler behind it."""
 
     def __init__(self):
-        self.requests = []
+        self.requests = []        # single-slot releases (restricted_release_credential)
+        self.batch_requests = []  # batch releases (restricted_release_credentials)
+        self.batch_supported = True
+        self.validate_requests = []  # restricted_validate_execution_context
         self.nodes = []
         self.fields = {"access_token": VALUE}
         self.generation = 1
@@ -105,13 +110,8 @@ class FakeBus:
         self.override = NO_OVERRIDE   # any reply or exception to return/raise instead of a real sealed reply
         self.seal_decision_id = None  # seal with a different decision id (a Main that disagrees)
 
-    def release(self, **request):
-        self.requests.append(request)
-        if isinstance(self.override, BaseException):
-            raise self.override
-        if self.override is not NO_OVERRIDE:
-            return self.override
-        release_id = f"rel-{len(self.requests)}"
+    def _entry(self, request, release_id):
+        """One sealed release for ``request`` (project_id, context_ref/probe_ref, toolkit_instance_id, field, slot, recipient_key)."""
         decision = self.seal_decision_id if self.seal_decision_id is not None else request["slot"].get("decision_id") or ""
         aad = "|".join((
             "v1", str(request["project_id"]), request["context_ref"] or request["probe_ref"],
@@ -121,20 +121,49 @@ class FakeBus:
         expires_at = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
         body = json.dumps({"fields": self.fields, "generation": self.generation, "expires_at": expires_at})
         return {
-            "ok": True, "release_id": release_id, "fields": list(self.fields), "expires_at": expires_at,
+            "release_id": release_id, "fields": list(self.fields), "expires_at": expires_at,
             "sealed": transport.seal(body.encode(), request["recipient_key"], aad),
         }
 
+    def validate(self, **request):
+        self.validate_requests.append(request)
+        return {"ok": True, "context": {"run_id": "run-1", "attempt": 1}}
 
-@pytest.fixture
-def bus(monkeypatch):
-    bus = FakeBus()
+    def release(self, **request):
+        self.requests.append(request)
+        if isinstance(self.override, BaseException):
+            raise self.override
+        if self.override is not NO_OVERRIDE:
+            return self.override
+        return {"ok": True, **self._entry(request, f"rel-{len(self.requests)}")}
 
+    def release_many(self, **request):
+        self.batch_requests.append(request)
+        if not self.batch_supported:
+            raise NotImplementedError("restricted_release_credentials")
+        if isinstance(self.override, BaseException):
+            raise self.override
+        if self.override is not NO_OVERRIDE:
+            return self.override
+        releases = []
+        for i, item in enumerate(request["slots"]):
+            single = {**item, **{k: request[k] for k in ("project_id", "context_ref", "probe_ref", "recipient_key")}}
+            releases.append({"toolkit_instance_id": item["toolkit_instance_id"], "field": item["field"],
+                             **self._entry(single, f"rel-{len(self.batch_requests)}-{i}")})
+        return {"ok": True, "releases": releases}
+
+
+def _install_bus(monkeypatch, bus):
     class FakeRpc:
         def __init__(self, event_node, id_prefix=None, proxy_timeout=None):
             self.args = (event_node, id_prefix, proxy_timeout)
             self.started = self.stopped = False
-            self.proxy = types.SimpleNamespace(restricted_release_credential=bus.release)
+            self.timeouts = []
+            self.proxy = types.SimpleNamespace(
+                restricted_release_credential=lambda **r: bus.release(**r),
+                restricted_release_credentials=lambda **r: bus.release_many(**r),
+                restricted_validate_execution_context=lambda **r: bus.validate(**r),
+            )
             bus.nodes.append(self)
 
         def start(self):
@@ -143,6 +172,10 @@ def bus(monkeypatch):
         def stop(self):
             self.stopped = True
 
+        def timeout(self, seconds):
+            self.timeouts.append(seconds)
+            return self.proxy
+
     arbiter = types.ModuleType("arbiter")
     rpcnode = types.ModuleType("arbiter.rpcnode")
     rpcnode.RpcNode = FakeRpc
@@ -150,6 +183,21 @@ def bus(monkeypatch):
     monkeypatch.setitem(sys.modules, "arbiter", arbiter)
     monkeypatch.setitem(sys.modules, "arbiter.rpcnode", rpcnode)
     return bus
+
+
+@pytest.fixture
+def bus(monkeypatch):
+    """A Main that serves only the single-slot release (the pre-batch Main), already known as such: these tests pin the
+    single-slot request/reply contract. ``batch_bus`` is the Main with the batch handler."""
+    bus = FakeBus()
+    bus.batch_supported = False
+    credential_resolver._BatchSupport.unsupported = True
+    return _install_bus(monkeypatch, bus)
+
+
+@pytest.fixture
+def batch_bus(monkeypatch):
+    return _install_bus(monkeypatch, FakeBus())
 
 
 @pytest.fixture
@@ -489,7 +537,7 @@ def test_credential_slots_capability_is_announced_only_when_supported(monkeypatc
     assert envelope_guard.capabilities_payload("a", "agents", now=1)["capabilities"] == ["task_envelope.v1"]
     monkeypatch.setattr(envelope_guard, "slots_supported", lambda: True)
     assert envelope_guard.capabilities_payload("a", "agents", now=1)["capabilities"] == [
-        "credential_slots.v1", "task_envelope.v1"]
+        "credential_slots.v1", "credential_slots_batch.v1", "task_envelope.v1"]
 
 
 def test_governed_ops_capability_rides_only_on_the_pool_announce(monkeypatch):
@@ -498,7 +546,8 @@ def test_governed_ops_capability_rides_only_on_the_pool_announce(monkeypatch):
     pool = envelope_guard.capabilities_payload(
         "governed_ops_1", "governed_ops", now=1, extra=governed_ops.governed_ops_capabilities())
     assert "governed_ops_pool.v1" not in agents["capabilities"]
-    assert pool["capabilities"] == ["credential_slots.v1", "governed_ops_pool.v1", "task_envelope.v1"]
+    assert pool["capabilities"] == [
+        "credential_slots.v1", "credential_slots_batch.v1", "governed_ops_pool.v1", "task_envelope.v1"]
 
 
 def _requires(*capabilities):
@@ -514,9 +563,11 @@ def test_approver_and_guard_honour_slots_only_when_supported(monkeypatch):
     with pytest.raises(Exception) as err:
         envelope_guard.enforce_envelope(_requires("credential_slots.v1")["kwargs"])
     assert "credential_slots.v1" in err.value.missing
+    assert approve("q", _requires("credential_slots_batch.v1")) is False
     monkeypatch.setattr(envelope_guard, "slots_supported", lambda: True)
     assert approve("q", _requires("credential_slots.v1")) is True
-    envelope_guard.enforce_envelope(_requires("credential_slots.v1")["kwargs"])
+    assert approve("q", _requires("credential_slots_batch.v1")) is True
+    envelope_guard.enforce_envelope(_requires("credential_slots.v1", "credential_slots_batch.v1")["kwargs"])
 
 
 def test_pool_capability_is_honoured_only_by_the_pool_approver(monkeypatch):
@@ -874,3 +925,307 @@ def test_probe_without_a_project_is_stale(probe, bus):
 
 def test_probe_unknown_type_is_reported_as_the_ungoverned_task_does(probe):
     assert probe.run(configuration_type="nope") == "Not supported toolkit type: nope"
+
+
+# --- batch release: one bus call per toolkit build (perf PR 4: M1 worker side, S9, L7) ---------------------------------
+
+def _items(n, **extra):
+    return [{"field": f"configuration_{i}", "slot": _slot(decision_id=f"decision-{i}", **extra)} for i in range(n)]
+
+
+def _many(resolver, items, toolkit="12"):
+    return resolver.resolve_many(toolkit_instance_id=toolkit, items=items)
+
+
+@pytest.fixture
+def keypairs(monkeypatch):
+    made = []
+    real = transport.generate_recipient_keypair
+
+    def spy():
+        pair = real()
+        made.append(pair[1])
+        return pair
+
+    monkeypatch.setattr(transport, "generate_recipient_keypair", spy)
+    return made
+
+
+def test_a_governed_run_with_six_slots_makes_two_bus_calls_on_one_node(batch_bus, sdk_slots, keypairs):
+    """validate (1) + one release batch (1) == 2 bus calls, one RpcNode, one keypair; the single-slot handler is idle."""
+    kwargs = _kwargs()
+    run_rpc = context_guard.RunRpcNode("node")
+    view = context_guard.enforce_execution_context(kwargs, "node", task_name="indexer_agent", project_id=7, rpc=run_rpc)
+    resolver = credential_resolver.attach_credential_resolver(
+        types.SimpleNamespace(), view, kwargs, "node", task_name="indexer_agent", project_id=7, rpc=run_rpc)
+    result = _many(resolver, _items(6))
+    assert set(result) == {f"configuration_{i}" for i in range(6)}
+    assert all(e.fields["access_token"].get_secret_value() == VALUE and e.generation == 1 for e in result.values())
+    assert len(batch_bus.validate_requests) + len(batch_bus.batch_requests) == 2
+    assert len(batch_bus.validate_requests) == 1 and len(batch_bus.batch_requests) == 1
+    assert batch_bus.requests == []
+    assert len(batch_bus.nodes) == 1 and len(keypairs) == 1
+    node = batch_bus.nodes[0]
+    assert node.started and node.timeouts == [context_guard.DEFAULT_TIMEOUT_S, credential_resolver.DEFAULT_TIMEOUT_S]
+    resolver.close()
+    assert not node.stopped  # the run owns the shared node
+    run_rpc.close()
+    run_rpc.close()  # idempotent
+    assert node.stopped
+
+
+def test_batch_request_shape_and_one_slot_per_item(batch_bus, sdk_slots):
+    items = _items(3)
+    _many(_resolver("the-node"), items, toolkit="12")
+    (request,) = batch_bus.batch_requests
+    assert set(request) == {"project_id", "context_ref", "probe_ref", "caller", "recipient_key", "slots"}
+    assert request["project_id"] == 7 and request["context_ref"] == CONTEXT_REF and request["probe_ref"] is None
+    assert request["caller"] == {"kind": "indexer_worker", "task_name": "indexer_agent", "run_id": "run-1"}
+    assert len(__import__("base64").b64decode(request["recipient_key"])) == 32
+    assert request["slots"] == [{"toolkit_instance_id": "12", "field": i["field"], "slot": i["slot"]} for i in items]
+
+
+def test_every_item_is_opened_with_its_own_aad(batch_bus, sdk_slots):
+    """A reply item sealed for another decision id does not open, even though the batch shares one key."""
+    result = _many(_resolver(), _items(3))
+    assert len(result) == 3
+    real = batch_bus.release_many
+
+    def swapped(**request):
+        reply = real(**request)
+        first, second = reply["releases"][:2]
+        first["sealed"], second["sealed"] = second["sealed"], first["sealed"]
+        return reply
+
+    batch_bus.release_many = swapped
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(3))
+    assert _code(err) == "DEPENDENCY_UNAVAILABLE"
+
+
+def test_the_one_slot_call_is_a_one_item_batch(batch_bus, sdk_slots, keypairs):
+    envelope = _call(_resolver())
+    assert envelope.fields["access_token"].get_secret_value() == VALUE
+    (request,) = batch_bus.batch_requests
+    assert [s["field"] for s in request["slots"]] == ["github_configuration"] and batch_bus.requests == []
+    assert len(keypairs) == 1
+
+
+def test_private_key_of_the_batch_is_dropped_after_all_items_open(batch_bus, sdk_slots, monkeypatch):
+    keys = []
+    real = transport.generate_recipient_keypair
+
+    def spy():
+        private, public = real()
+        keys.append(private)
+        return private, public
+
+    monkeypatch.setattr(transport, "generate_recipient_keypair", spy)
+    resolver = _resolver()
+    _many(resolver, _items(4))
+    gc.collect()
+    untouched = [real()[0]]
+    assert len(keys) == 1 and sys.getrefcount(keys[0]) == sys.getrefcount(untouched[0])
+    assert not any(isinstance(v, transport.X25519PrivateKey) for v in vars(resolver).values())
+
+
+@pytest.mark.parametrize("code", ["DENIED_GRANT", "RATE_LIMITED", "STORE_UNAVAILABLE", "CREDENTIAL_REFERENCE_INACTIVE"])
+def test_a_batch_refusal_maps_to_its_reason_code(batch_bus, sdk_slots, code):
+    batch_bus.override = {"ok": False, "reason_code": code, "message": "must not matter",
+                          "toolkit_instance_id": "12", "field": "configuration_1"}
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(3))
+    assert _code(err) == code and "must not matter" not in str(err.value)
+    assert credential_resolver._BatchSupport.unsupported is False
+
+
+@pytest.mark.parametrize("reply", [None, "nope", {"ok": False}, {"ok": True}, {"ok": True, "releases": None},
+                                   {"ok": True, "releases": "x"}, {"ok": True, "releases": [None]}])
+def test_malformed_batch_replies_are_a_dependency_failure(batch_bus, sdk_slots, reply):
+    batch_bus.override = reply
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(2))
+    assert _code(err) == "DEPENDENCY_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("tamper", ["missing", "extra", "duplicate", "foreign_toolkit", "unknown_field"])
+def test_the_released_set_must_be_exactly_the_requested_set(batch_bus, sdk_slots, tamper):
+    real = batch_bus.release_many
+
+    def release_many(**request):
+        reply = real(**request)
+        releases = reply["releases"]
+        if tamper == "missing":
+            releases.pop()
+        elif tamper == "extra":
+            releases.append({**releases[0], "field": "another"})
+        elif tamper == "duplicate":
+            releases[1] = dict(releases[0])
+        elif tamper == "foreign_toolkit":
+            releases[0]["toolkit_instance_id"] = "99"
+        else:
+            releases[0]["field"] = "not_requested"
+        return reply
+
+    batch_bus.release_many = release_many
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(3))
+    assert _code(err) == "DEPENDENCY_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("failure", [queue.Empty(), ConnectionError(VALUE), RuntimeError("boom")])
+def test_batch_bus_failures_are_a_dependency_failure_and_do_not_mean_unsupported(batch_bus, sdk_slots, failure):
+    batch_bus.override = failure
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(2))
+    assert _code(err) == "DEPENDENCY_UNAVAILABLE" and VALUE not in str(err.value)
+    assert err.value.__cause__ is None and err.value.__suppress_context__ is True
+    assert credential_resolver._BatchSupport.unsupported is False and batch_bus.requests == []
+
+
+def test_an_expired_item_refuses_the_batch(batch_bus, sdk_slots):
+    batch_bus.expires_in = -5
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(2))
+    assert _code(err) == "STALE_CONTEXT"
+
+
+def test_batch_logs_and_metrics_carry_no_material(batch_bus, sdk_slots, logs):
+    resolver = _resolver()
+    before = credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("ok", "OK")
+    _many(resolver, _items(3))
+    assert credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("ok", "OK") == before + 3  # one per released slot
+    assert logs and all(VALUE not in line for line in logs) and VALUE not in repr(resolver)
+
+
+# --- older Main: no batch handler -> slot by slot, remembered per process --------------------------------------------
+
+def test_without_the_batch_handler_the_slots_are_released_one_by_one_and_remembered(batch_bus, sdk_slots, keypairs):
+    batch_bus.batch_supported = False
+    resolver = _resolver()
+    result = _many(resolver, _items(6))
+    assert len(result) == 6
+    assert len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 6  # one probe of the batch, then N singles
+    assert len({r["recipient_key"] for r in batch_bus.requests}) == 6  # a keypair per single call, as before
+    assert [r["field"] for r in batch_bus.requests] == [i["field"] for i in _items(6)]
+    _many(resolver, _items(2))
+    assert len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 8  # remembered: no further probe
+    assert credential_resolver._BatchSupport.unsupported is True
+
+
+def test_a_not_implemented_reply_also_means_unsupported(batch_bus, sdk_slots):
+    batch_bus.override = {"ok": False, "reason_code": "NOT_IMPLEMENTED", "message": "x"}
+    real_single = batch_bus.release
+    batch_bus.release = lambda **r: (setattr(batch_bus, "override", NO_OVERRIDE), real_single(**r))[1]
+    result = _many(_resolver(), _items(2))
+    assert len(result) == 2 and len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 2
+    assert credential_resolver._BatchSupport.unsupported is True
+
+
+def test_a_refusal_in_the_fallback_path_keeps_its_code(batch_bus, sdk_slots):
+    batch_bus.batch_supported = False
+    batch_bus.override = {"ok": False, "reason_code": "DENIED_RBAC"}
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(3))
+    assert _code(err) == "DENIED_RBAC" and len(batch_bus.requests) == 1  # stops at the first refusal
+
+
+# --- the items themselves ------------------------------------------------------------------------------------------------
+
+def test_no_items_means_no_call_and_no_node(batch_bus, sdk_slots):
+    assert _many(_resolver(), []) == {}
+    assert batch_bus.batch_requests == [] and batch_bus.requests == [] and batch_bus.nodes == []
+
+
+@pytest.mark.parametrize("items", [
+    "x", [None], [{"field": "a"}], [{"slot": _slot()}], [{"field": "", "slot": _slot()}],
+    [{"field": "a", "slot": "nope"}], [{"field": "a", "slot": _slot()}, {"field": "a", "slot": _slot()}],
+])
+def test_malformed_items_are_refused_before_any_call(batch_bus, sdk_slots, items):
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), items)
+    assert _code(err) == "STALE_CONTEXT" and batch_bus.batch_requests == [] and batch_bus.nodes == []
+
+
+def test_the_batch_is_bounded_at_the_run_limit(batch_bus, sdk_slots):
+    assert len(_many(_resolver(), _items(credential_resolver.MAX_BATCH_SLOTS))) == credential_resolver.MAX_BATCH_SLOTS
+    batch_bus.batch_requests.clear()
+    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+        _many(_resolver(), _items(credential_resolver.MAX_BATCH_SLOTS + 1))
+    assert _code(err) == "CREDENTIAL_REFERENCE_REQUIRED" and batch_bus.batch_requests == []
+
+
+def test_a_probe_batch_carries_its_one_ticket(batch_bus, sdk_slots):
+    resolver = _resolver(context_ref=None, run_id=None, task_name="indexer_governed_check_connection")
+    _many(resolver, _items(2, probe_ref=PROBE_REF), toolkit="probe")
+    (request,) = batch_bus.batch_requests
+    assert request["context_ref"] is None and request["probe_ref"] == PROBE_REF
+    for items in (_items(2), [_items(1, probe_ref=PROBE_REF)[0], {**_items(2, probe_ref="other-ticket")[1]}]):
+        with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+            _many(resolver, items, toolkit="probe")
+        assert _code(err) == "STALE_CONTEXT"
+    assert len(batch_bus.batch_requests) == 1
+
+
+# --- S9 / L7: one node per governed run; a legacy run has none -------------------------------------------------------------
+
+def test_validate_and_release_share_one_rpcnode(batch_bus, sdk_slots):
+    run_rpc = context_guard.RunRpcNode("node")
+    context_guard.enforce_execution_context(_kwargs(), "node", task_name="indexer_agent", rpc=run_rpc)
+    assert len(batch_bus.nodes) == 1 and not batch_bus.nodes[0].stopped  # no longer stopped after validate
+    _many(_resolver(rpc=run_rpc), _items(2))
+    assert len(batch_bus.nodes) == 1
+    run_rpc.close()
+    assert batch_bus.nodes[0].stopped
+
+
+def test_a_governed_run_without_slots_creates_one_node_for_validation_only(batch_bus, sdk_slots):
+    run_rpc = context_guard.RunRpcNode("node")
+    kwargs = _kwargs()
+    view = context_guard.enforce_execution_context(kwargs, "node", task_name="indexer_agent", rpc=run_rpc)
+    credential_resolver.attach_credential_resolver(
+        types.SimpleNamespace(), view, kwargs, "node", task_name="indexer_agent", project_id=7, rpc=run_rpc)
+    assert len(batch_bus.nodes) == 1 and len(batch_bus.validate_requests) == 1
+    assert batch_bus.batch_requests == [] and batch_bus.requests == []
+    run_rpc.close()
+
+
+def test_legacy_run_makes_no_bus_call_and_creates_no_rpcnode(batch_bus, sdk_slots):
+    kwargs = attach_envelope({"project_id": 7}, "legacy")
+    run_rpc = context_guard.RunRpcNode("node")
+    client = types.SimpleNamespace()
+    view = context_guard.enforce_execution_context(kwargs, "node", task_name="indexer_agent", rpc=run_rpc)
+    assert credential_resolver.attach_credential_resolver(
+        client, view, kwargs, "node", task_name="indexer_agent", project_id=7, rpc=run_rpc) is None
+    run_rpc.close()
+    assert vars(client) == {}
+    assert batch_bus.validate_requests == [] and batch_bus.batch_requests == [] and batch_bus.requests == []
+    assert batch_bus.nodes == []
+
+
+def test_a_resolver_without_a_shared_node_owns_and_closes_its_own(batch_bus, sdk_slots):
+    resolver = _resolver()
+    _many(resolver, _items(2))
+    (node,) = batch_bus.nodes
+    assert node.started and not node.stopped
+    resolver.close()
+    assert node.stopped
+
+
+@pytest.mark.parametrize("name", ["indexer_agent", "indexer_predict_agent"])
+def test_agent_entry_points_share_one_node_and_close_it(name):
+    source = (PLUGIN_ROOT / "methods" / f"{name}.py").read_text()
+    assert source.count("run_rpc = RunRpcNode(local_event_node)") == 1
+    assert source.index("run_rpc = RunRpcNode(") < source.index("enforce_execution_context(")
+    assert "rpc=run_rpc" in source[source.index("enforce_execution_context("):source.index("except ContextRejected")]
+    assert "rpc=run_rpc" in source[source.index("attach_credential_resolver("):source.index("should_continue = ")]
+    # closed on the refusal path and in the task's finally, before the event node stops
+    assert source.count("run_rpc.close()") == 2
+    assert source.index("credential_resolver.close()") < source.rindex("run_rpc.close()")
+
+
+def test_old_sdk_slot_by_slot_calls_still_resolve_through_the_real_apply(batch_bus, real_sdk_slots):
+    settings = {"base_url": "x", "github_configuration": {"credential_slot": _slot()}}
+    applied, released = real_sdk_slots.apply_credential_slots(settings, "12", _resolver())
+    assert applied["github_configuration"]["access_token"] == VALUE and released == frozenset({VALUE})
+    assert len(batch_bus.batch_requests) == 1 and batch_bus.requests == []

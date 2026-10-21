@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage
 from pylon.core.tools import log
 from pylon.core.tools import web
 
-from ..utils.context_guard import ContextRejected, enforce_execution_context, rejection_message
+from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution_context, rejection_message
 from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
@@ -242,12 +242,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Setup event node
         local_event_node = setup_event_node(tasknode_task.multiprocessing_context)
+        # One bus node per governed run, shared by validate and release; created on first use (a legacy run makes none)
+        run_rpc = RunRpcNode(local_event_node)
 
         # #6756: a governed run is validated with Main before any LLM or tool work (legacy: no-op)
         try:
             context_view = enforce_execution_context(
                 kwargs, local_event_node, task_name="indexer_predict_agent",
-                project_id=tasknode_task.meta.get("project_id"),
+                project_id=tasknode_task.meta.get("project_id"), rpc=run_rpc,
             )
         except ContextRejected as rejected:
             # Readable {reason_code, message} to the user instead of a generic task failure
@@ -269,6 +271,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             finally:
                 if node_interface is not None:
                     node_interface.flush()
+                run_rpc.close()
                 if tasknode_task.multiprocessing_context == "fork":
                     local_event_node.stop()
 
@@ -281,6 +284,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         credential_resolver = attach_credential_resolver(
             client, context_view, kwargs, local_event_node,
             task_name="indexer_predict_agent", project_id=tasknode_task.meta.get("project_id"),
+            rpc=run_rpc,
         )
 
         should_continue = kwargs.get('should_continue', False)
@@ -833,6 +837,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             if credential_resolver is not None:
                 credential_resolver.close()
+            run_rpc.close()
 
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
