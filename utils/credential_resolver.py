@@ -144,12 +144,17 @@ class TrustedCredentialResolver:
         """Release every ``{toolkit_instance_id, field, slot}`` item of a run; ``{(toolkit_instance_id, field): envelope}``.
 
         One bus call per ``MAX_BATCH_SLOTS`` items when Main serves batches, else one ``resolve_many`` per toolkit.
-        The set is validated before any call; all or nothing: the first refusal raises its typed ``GovernedCredentialError``.
+        The set is validated before any call; the first refusal raises its typed ``GovernedCredentialError`` and
+        nothing is returned. A refusal of chunk 2 after chunk 1 was released is only reachable above Main's 64-slot
+        run cap. A probe is exactly one slot (its ticket is single-use). The SDK gates on
+        ``callable(resolver.resolve_all)``; ``credential_slots_run.v1`` tells Main the worker offers it.
         """
         envelope_type, error_type = _sdk_types()
         entries = self._run_entries(items, error_type)
         if not entries:
             return {}
+        if self._context_ref is None and len(entries) != 1:
+            raise self._refusal(error_type, STALE_CONTEXT)
         if not self._batch_release:
             by_toolkit = {}
             for toolkit_instance_id, field, slot in entries:
@@ -160,8 +165,6 @@ class TrustedCredentialResolver:
                 for field, envelope in self.resolve_many(
                     toolkit_instance_id=toolkit_instance_id, items=toolkit_items).items()
             }
-        if self._context_ref is None:  # one ticket for the whole set, checked before the first call
-            self._single_probe_ref(entries, error_type)
         released = {}
         for start in range(0, len(entries), MAX_BATCH_SLOTS):
             released.update(self._release_batch(entries[start:start + MAX_BATCH_SLOTS], envelope_type, error_type))

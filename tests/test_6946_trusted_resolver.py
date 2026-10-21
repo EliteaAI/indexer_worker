@@ -1487,14 +1487,16 @@ def test_a_bus_failure_of_the_run_call_is_a_dependency_failure_and_never_a_fallb
     assert _code(err) == "DEPENDENCY_UNAVAILABLE" and batch_bus.requests == []
 
 
-def test_a_probe_run_needs_one_ticket_across_all_chunks_before_any_call(batch_bus, sdk_slots):
-    resolver = _bresolver(context_ref=None, run_id=None, task_name="indexer_governed_check_connection")
-    items = _run_items(credential_resolver.MAX_BATCH_SLOTS + 1, probe_ref=PROBE_REF)
-    items[-1]["slot"]["probe_ref"] = "other-ticket"
-    with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _all(resolver, items)
-    assert _code(err) == "STALE_CONTEXT" and batch_bus.batch_requests == [] and batch_bus.nodes == []
-    assert len(_all(resolver, _run_items(2, probe_ref=PROBE_REF))) == 2
+@pytest.mark.parametrize("batch_release", [True, False])
+def test_a_probe_run_is_exactly_one_slot_and_refuses_more_before_any_call(batch_bus, sdk_slots, batch_release):
+    resolver = _resolver(context_ref=None, run_id=None, task_name="indexer_governed_check_connection",
+                         batch_release=batch_release)
+    for count in (2, credential_resolver.MAX_BATCH_SLOTS + 1):
+        with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+            _all(resolver, _run_items(count, probe_ref=PROBE_REF))
+        assert _code(err) == "STALE_CONTEXT"
+    assert batch_bus.batch_requests == [] and batch_bus.requests == [] and batch_bus.nodes == []
+    assert len(_all(resolver, _run_items(1, probe_ref=PROBE_REF))) == 1
 
 
 def test_run_release_logs_and_metrics_carry_no_material(batch_bus, sdk_slots, logs):
