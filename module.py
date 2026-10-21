@@ -304,6 +304,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         #
         # Configure toolkit security guardrails from config (live-reloadable via reconfig)
         self._apply_toolkit_security()
+        # Configure the input guardrail (#6886) from config (live-reloadable via reconfig)
+        self._apply_input_guardrail()
         # Configure tool-result bounds from config (live-reloadable via reconfig)
         self._apply_tool_result_limits()
         # Registered before the task nodes so every forked agent run inherits the backend
@@ -610,6 +612,47 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         except Exception:  # pylint: disable=W0718
             log.exception("Failed to configure sensitive tools")
 
+    def _apply_input_guardrail(self):
+        """Push the input guardrail policy (#6886) into the SDK's process globals.
+
+        Applied unconditionally so that switching it off takes effect. A config we
+        cannot read keeps the last policy that applied, so a broken reconfig cannot
+        switch the guardrail off; with none applied yet it is off.
+        Never logs patterns or values: only whether it is on and the category actions.
+        """
+        try:
+            from elitea_sdk.runtime.toolkits.security import configure_input_guard  # pylint: disable=C0415,E0401
+            policy = self.descriptor.config.get("input_guardrail", {}) or {}
+            if not isinstance(policy, dict):
+                raise TypeError("input_guardrail must be an object")
+            configure_input_guard(policy)
+            self._input_guardrail_policy = policy
+        except Exception:  # pylint: disable=W0718
+            policy = getattr(self, "_input_guardrail_policy", None) or {"enabled": False}
+            log.exception("Failed to configure the input guardrail - keeping the last policy")
+            try:
+                from elitea_sdk.runtime.toolkits.security import configure_input_guard  # pylint: disable=C0415,E0401
+                configure_input_guard(policy)
+            except Exception:  # pylint: disable=W0718
+                log.exception("Failed to re-apply the input guardrail")
+        # Same policy for the tracing plugin's span payloads (this process runs its own)
+        try:
+            from .utils.input_guardrail import set_redaction_policy  # pylint: disable=C0415
+            set_redaction_policy(policy)
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to configure span redaction")
+
+    def ready(self):
+        """Plugins are initialized: the tracing plugin can take the span value redactor (#6886)."""
+        self._register_tracing_redactor()
+
+    def _register_tracing_redactor(self):
+        try:
+            from .utils.input_guardrail import register_tracing_redactor  # pylint: disable=C0415
+            self._tracing_redactor_registered = register_tracing_redactor()
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to register the tracing value redactor")
+
     def reconfig(self):
         """Re-apply live configuration after an admin save.
 
@@ -619,6 +662,9 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         guardrails and MCP definitions from this process.
         """
         self._apply_toolkit_security()
+        self._apply_input_guardrail()
+        if not getattr(self, "_tracing_redactor_registered", False):
+            self._register_tracing_redactor()
         self._apply_tool_result_limits()
         self._reload_mcp_servers()
 
