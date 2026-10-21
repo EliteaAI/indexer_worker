@@ -91,7 +91,8 @@ def test_rejection_result_is_a_typed_failure_without_payload_echo():
 
 # --- capability advertisement ---------------------------------------------------------------
 
-def test_capabilities_payload_shape():
+def test_capabilities_payload_shape(monkeypatch):
+    monkeypatch.setattr(envelope_guard, "slots_supported", lambda: False)  # credential_slots.v1: see test_6946
     payload = envelope_guard.capabilities_payload("agents_1", "agents", now=12.5)
     assert payload == {
         "ident": "agents_1", "pool": "agents",

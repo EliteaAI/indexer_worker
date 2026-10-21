@@ -195,6 +195,29 @@ def clean_for_json_serialization(data: Any, fallback_message: str = "Could not s
         return fallback_message
 
 
+_SECRET_KEY_PARTS = ('token', 'password', 'secret', 'api_key', 'apikey', 'private_key', 'connection_string',
+                     'access_key', 'credential', 'authorization', 'cookie')
+
+
+def mask_toolkit_config(data: Any) -> Any:
+    """Copy safe for the browser: expanded credentials collapse to their reference, secret-named keys masked."""
+    if isinstance(data, dict):
+        if 'configuration_uuid' in data or 'configuration_type' in data:
+            return {k: data[k] for k in ('elitea_title', 'configuration_type', 'configuration_uuid') if k in data}
+        return {
+            k: ('***' if isinstance(k, str) and v and any(p in k.lower() for p in _SECRET_KEY_PARTS)
+                and not isinstance(v, (dict, list, bool)) else mask_toolkit_config(v))
+            for k, v in data.items()
+        }
+    if isinstance(data, list):
+        return [mask_toolkit_config(item) for item in data]
+    return data
+
+
+def clean_toolkit_config_for_events(toolkit_config: Any, fallback_message: str) -> Any:
+    return mask_toolkit_config(clean_for_json_serialization(toolkit_config, fallback_message))
+
+
 def test_error(
         node_interface: NodeEventInterface, toolkit_config: dict, tool_name: str,
         error_message: str, message_id: str, tasknode_task_meta: dict,
@@ -210,7 +233,7 @@ def test_error(
     error = str(traceback.format_exc())
 
     # Clean toolkit_config to ensure JSON serializability
-    clean_toolkit_config = clean_for_json_serialization(
+    clean_toolkit_config = clean_toolkit_config_for_events(
         toolkit_config,
         "Could not serialize toolkit_config"
     )
@@ -349,7 +372,7 @@ def check_missing_index_data_status_event(
             'index_name': tool_params.get('index_name'),
             'state': 'failed',
             'error': error_message,
-            'toolkit_config': clean_for_json_serialization(
+            'toolkit_config': clean_toolkit_config_for_events(
                 toolkit_config,
                 "Could not serialize toolkit_config"
             ),
@@ -557,7 +580,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         mcp_tokens = kwargs.get("mcp_tokens")
 
         # Clean toolkit_config to ensure JSON serializability
-        clean_toolkit_config = clean_for_json_serialization(
+        clean_toolkit_config = clean_toolkit_config_for_events(
             toolkit_config,
             "Could not serialize toolkit_config"
         )
@@ -592,7 +615,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         from ..utils.funcs import resolve_mcp_credentials
         toolkit_config = resolve_mcp_credentials(toolkit_config)
         # Update clean_toolkit_config after credential resolution
-        clean_toolkit_config = clean_for_json_serialization(
+        clean_toolkit_config = clean_toolkit_config_for_events(
             toolkit_config,
             "Could not serialize toolkit_config after credential resolution"
         )
@@ -965,7 +988,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         mcp_tokens = kwargs.get("mcp_tokens")
 
         # Clean toolkit_config to ensure JSON serializability
-        clean_toolkit_config = clean_for_json_serialization(
+        clean_toolkit_config = clean_toolkit_config_for_events(
             toolkit_config,
             "Could not serialize toolkit_config"
         )
@@ -992,7 +1015,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         from ..utils.funcs import resolve_mcp_credentials
         toolkit_config = resolve_mcp_credentials(toolkit_config)
         # Update clean_toolkit_config after credential resolution
-        clean_toolkit_config = clean_for_json_serialization(
+        clean_toolkit_config = clean_toolkit_config_for_events(
             toolkit_config,
             "Could not serialize toolkit_config after credential resolution"
         )
@@ -1152,7 +1175,7 @@ def mcp_connection_error(
         response_metadata={
             'project_id': tasknode_task_meta.get("project_id"),
             'chat_project_id': tasknode_task_meta.get("chat_project_id"),
-            'toolkit_config': toolkit_config,
+            'toolkit_config': mask_toolkit_config(toolkit_config),
             'is_error': True
         },
         content=error_message,
@@ -1168,7 +1191,7 @@ def mcp_connection_error(
     return {
         'success': False,
         'error': error_message,
-        'toolkit_config': toolkit_config,
+        'toolkit_config': mask_toolkit_config(toolkit_config),
         'tools': [],
         'tools_count': 0
     }

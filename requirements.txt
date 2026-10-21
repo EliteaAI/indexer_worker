@@ -7,3 +7,5 @@ langfuse>=3.0.0
 # Pylon 1.2.25 preloads typing-extensions 4.15.0. AnyIO 4.15+ requires
 # typing-extensions 4.16 and fails before isolated plugin paths can override it.
 anyio==4.14.2
+# C-1009 WP-1D (#6946): sealed credential transport (X25519 / HKDF / AES-GCM); already present via azure-identity, declared explicitly
+cryptography>=42.0.0

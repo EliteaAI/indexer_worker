@@ -139,6 +139,7 @@ from ..utils.node_interface import (
     NodeEvent,
     NodeEventInterface,
 )
+from ..utils.input_guardrail import _audit_key, emit_audit_spans, merge_verdict
 from ..utils.parallel_dispatch_contract import is_fanout_child
 from ..utils.mcp_auth_tools import backfill_mcp_provided_settings, backfill_mcp_provided_settings_dict
 
@@ -596,6 +597,7 @@ def execution_error(
     budget_error_code: Optional[str] = None,
     continuation_error: Optional[dict] = None,
     elitea_callback: Optional["EliteACallback"] = None,
+    input_guardrail: Optional[dict] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -613,6 +615,7 @@ def execution_error(
         budget_error_code: Budget scope that blocked the call, for the UI to link to usage (optional)
         continuation_error: Structured output-continuation failure details (optional)
         elitea_callback: Callback with the steps and token usage gathered before the error (optional)
+        input_guardrail: Input-guardrail block details (#6886); rule ids only, never the value (optional)
 
     Returns:
         Dict containing chat_history and error information
@@ -627,24 +630,27 @@ def execution_error(
             execution_end_time - execution_start_time
         ).total_seconds()
 
-    node_interface.emit(
-        type=EventTypes.agent_tool_start,
-        response_metadata={
-            "tool_name": "Agent Exception Stacktrace",
-            "tool_run_id": exception_uid,
-            "tool_meta": _sanitize_input_for_event(user_input),
-            "tool_inputs": "",
-        },
-    )
-    node_interface.emit(
-        type=EventTypes.agent_tool_end,
-        response_metadata={
-            "tool_name": "Agent Exception Stacktrace",
-            "tool_run_id": exception_uid,
-            "finish_reason": "stop",
-        },
-        content=error,
-    )
+    # A guardrail block is a policy outcome, not a crash, and the stacktrace pin
+    # carries the raw user input - which here is the value that was just blocked
+    if not input_guardrail:
+        node_interface.emit(
+            type=EventTypes.agent_tool_start,
+            response_metadata={
+                "tool_name": "Agent Exception Stacktrace",
+                "tool_run_id": exception_uid,
+                "tool_meta": _sanitize_input_for_event(user_input),
+                "tool_inputs": "",
+            },
+        )
+        node_interface.emit(
+            type=EventTypes.agent_tool_end,
+            response_metadata={
+                "tool_name": "Agent Exception Stacktrace",
+                "tool_run_id": exception_uid,
+                "finish_reason": "stop",
+            },
+            content=error,
+        )
 
     # Carry the user-facing text and budget scope on the exception event too. Surfaces
     # that consume the stream directly (skill test panel) never see full_message, which
@@ -660,6 +666,9 @@ def execution_error(
     #
     if continuation_error:
         exception_meta["continuation_error"] = continuation_error
+    #
+    if input_guardrail:
+        exception_meta["input_guardrail"] = input_guardrail
     #
     node_interface.emit(
         type=EventTypes.agent_exception,
@@ -689,6 +698,8 @@ def execution_error(
         additional_response_meta["budget_error_code"] = budget_error_code
     if continuation_error:
         additional_response_meta["continuation_error"] = continuation_error
+    if input_guardrail:
+        additional_response_meta["input_guardrail"] = input_guardrail
     if additional_response_meta:
         response_metadata["additional_response_meta"] = additional_response_meta
 
@@ -717,8 +728,36 @@ def execution_error(
             human_readable=human_readable,
             budget_error_code=budget_error_code,
             continuation_error=continuation_error,
+            input_guardrail=input_guardrail,
         )
     return result
+
+
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
+
+
+def add_model_usage(usage_by_model: dict, model_name, response, pending, token_usage) -> None:
+    """Add one LLM call to the per-model rollup (#6898): provider usage, else the tiktoken estimate.
+
+    ``model_name`` is ``ls_model_name``: the SDK sends the configured Elitea model name as ``model`` to the
+    LLM gateway, so it is the same name the costs catalog prices by.
+    """
+    cache_read = cache_creation = 0
+    for generation_list in getattr(response, "generations", None) or []:
+        for gen in generation_list:
+            usage = getattr(getattr(gen, "message", None), "usage_metadata", None) or {}
+            details = usage.get("input_token_details") or {}
+            cache_read += details.get("cache_read") or 0
+            cache_creation += details.get("cache_creation") or 0
+    if token_usage:
+        tokens_in, tokens_out = token_usage.get("prompt_tokens", 0), token_usage.get("completion_tokens", 0)
+    else:
+        tokens_in, tokens_out = (pending or {}).get("tokens_in", 0), (pending or {}).get("tokens_out", 0)
+    bucket = usage_by_model.setdefault(model_name or "unknown", dict.fromkeys(USAGE_FIELDS, 0))
+    bucket["input_tokens"] += tokens_in or 0
+    bucket["output_tokens"] += tokens_out or 0
+    bucket["cache_read_tokens"] += cache_read
+    bucket["cache_creation_tokens"] += cache_creation
 
 
 class ToolCallPayload(BaseModel):
@@ -787,6 +826,9 @@ class EliteACallback(BaseCallbackHandler):
         self.tokens_out = 0
         # Per-call token provenance: 'provider' (API usage) or 'estimate' (tiktoken).
         self.token_source_counts = {"provider": 0, "estimate": 0}
+        # Per-model usage of every LLM call in this run, for per-chat usage & cost (#6898)
+        self.usage_by_model: Dict[str, dict] = {}
+        self.usage_run_id = uuid4().hex
         self.pending_llm_requests = defaultdict(
             lambda: {"tokens_in": 0, "tokens_out": 0}
         )
@@ -1613,6 +1655,7 @@ class EliteACallback(BaseCallbackHandler):
 
             self.pending_llm_requests[run_id]["tokens_in"] += tokens_in
             self.pending_llm_requests[run_id]["timestamp_start"] = now
+            self.pending_llm_requests[run_id]["model_name"] = self.current_model_name
             # Store langgraph_node and parent_agent_name for use in on_llm_end
             if metadata and metadata.get("langgraph_node"):
                 self.pending_llm_requests[run_id]["langgraph_node"] = metadata.get(
@@ -1958,6 +2001,7 @@ class EliteACallback(BaseCallbackHandler):
         self.tokens_out += pending.get("tokens_out", 0)
         if pending:
             self.token_source_counts["estimate"] += 1
+            add_model_usage(self.usage_by_model, pending.get("model_name"), None, pending, None)
         self.pending_llm_requests.pop(run_id, None)
         #
         if args:
@@ -1977,8 +2021,16 @@ class EliteACallback(BaseCallbackHandler):
             self.llm_error.budget_error_code = budget_code
         else:
             self.llm_error = InternalSDKError("Unknown LLM error occurred")
-        # exception = args[0]
-        # FIXME: should we emit an error here too?
+        # Emit agent_llm_end so the FE LLM chip is closed instead of spinning
+        # forever when the LLM errors out without producing a response (#7041).
+        self.node_interface.emit(
+            type=EventTypes.agent_llm_end,
+            response_metadata={
+                "tool_run_id": str(run_id),
+                "thinking_steps": [],
+                "llm_start_timestamp": self.llm_start_timestamp,
+            },
+        )
 
     #
     # Misc
@@ -1988,6 +2040,9 @@ class EliteACallback(BaseCallbackHandler):
         """Callback"""
         if self.debug:
             log.debug("on_text(%s, %s)", args, kwargs)
+
+    def _add_model_usage(self, model_name, response, pending, token_usage) -> None:
+        add_model_usage(self.usage_by_model, model_name, response, pending, token_usage)
 
     def on_llm_end(self, response: LLMResult, run_id: UUID, **kwargs) -> None:
         if self._is_mcp_auth_paused():
@@ -2051,6 +2106,9 @@ class EliteACallback(BaseCallbackHandler):
             )
 
         self.token_source_counts[token_source] += 1
+        self._add_model_usage(
+            pending.get("model_name") or self.current_model_name, response, pending, token_usage,
+        )
 
         # Get the timestamp_start, langgraph_node, and parent_agent_name before popping
         llm_timestamp_start = pending.get("timestamp_start")
@@ -2297,6 +2355,10 @@ class EliteACustomCallback(BaseCallbackHandler):
         self.task_id: str = task_id
         self.toolkit_metadata: dict = toolkit_metadata or {}
         self.additional_response_meta = {}
+        # (action, segment_kind) pairs already written as input-guardrail audit rows (#6886)
+        self.input_guardrail_audited = set()
+        # The run's agent ({'type','id','name'}); set by the agent task once the payload is known
+        self.audit_entity: Optional[dict] = None
         self.modified_files = []  # List to store modified file information
         self.generated_image_filepaths = []  # Filepaths of tool-generated images for thumbnail resolution
         self.index_statuses = []  # List to store index operation statuses
@@ -2314,6 +2376,27 @@ class EliteACustomCallback(BaseCallbackHandler):
         # self.stream_id = node_interface.stream_id
 
         super().__init__()
+
+    def _record_input_guardrail(self, data: dict) -> None:
+        """Keep the turn's input-guardrail verdict on the message meta and audit it (#6886).
+
+        The live event itself goes out through the mapper below; this keeps the verdict
+        for a reload (warn/redact notices) and writes one audit row per detection.
+        """
+        try:
+            self.additional_response_meta["input_guardrail"] = merge_verdict(
+                self.additional_response_meta.get("input_guardrail"), data,
+            )
+            entries = [
+                e for e in data.get("audit") or []
+                if isinstance(e, dict) and _audit_key(e) not in self.input_guardrail_audited
+            ]
+            self.input_guardrail_audited.update(_audit_key(e) for e in entries)
+            emit_audit_spans(
+                entries, user_id=self.user_id, project_id=self.project_id, entity=self.audit_entity,
+            )
+        except Exception as e:  # pylint: disable=W0718
+            log.warning(f"[INPUT_GUARDRAIL] Failed to record verdict: {e}")
 
     def _persist_injection_marker(self, payload: dict) -> None:
         """Persist a consumed injection as a trace-step delta on the partial_message channel.
@@ -2538,6 +2621,9 @@ class EliteACustomCallback(BaseCallbackHandler):
         if name == "mcp_auth_decision" and isinstance(data, dict):
             self._persist_mcp_auth_decision(data, metadata)
             return
+
+        if name == "input_guardrail" and isinstance(data, dict):
+            self._record_input_guardrail(data)
 
         event_key = f"agent_{name}"
         fields = ELITEA_SDK_CUSTOM_EVENTS_MAPPER.get(event_key, set())
