@@ -5,11 +5,11 @@ attached to the run's Elitea client (``client.credential_resolver``) while it bu
 the resolver asks Main for a release over the worker bus and opens the reply, which Main
 sealed to a key generated for that one call (``credential_transport``).
 
-``resolve_many`` releases every slot of a toolkit build in one bus call (one keypair, one reply,
-each item sealed under its own AAD); ``__call__`` is the one-slot form for SDKs that resolve slot
-by slot. Main decides: the batch call is used only when its validate reply said ``batch_release``
-(``ContextView.batch_release``); otherwise, and for probes, every slot is its own call. A bus failure
-of either call is ``DEPENDENCY_UNAVAILABLE``, never a reason to try the other form.
+``resolve_all`` releases the slots of every toolkit of a run (at most ``MAX_BATCH_SLOTS`` per bus call, one
+keypair and one reply per call, each item sealed under its own AAD); ``resolve_many`` is the one-toolkit form
+and ``__call__`` the one-slot form for SDKs that resolve slot by slot. Main decides: the batch call is used only
+when its validate reply said ``batch_release`` (``ContextView.batch_release``); otherwise, and for probes, every
+slot is its own call. A bus failure of either call is ``DEPENDENCY_UNAVAILABLE``, never a reason to try the other form.
 
 Nothing here keeps material: one X25519 keypair per call whose private half is dropped as
 soon as the reply is opened, no cache, no logging of values, no ids or reasons in user-facing
@@ -25,6 +25,7 @@ from .task_envelope import read_envelope
 AAD_VERSION = "v1"
 DEFAULT_TIMEOUT_S = 15
 MAX_BATCH_SLOTS = 64  # Main's MAX_GOVERNED_CREDENTIALS_PER_RUN
+MAX_LOGGED_NAME_CHARS = 128
 BATCH_TIMEOUT_PER_SLOT_S = 0.5
 MAX_BATCH_TIMEOUT_S = 60
 RELEASE_REPLY_KEYS = frozenset({"ok", "releases"})
@@ -73,7 +74,8 @@ def _parse_expires_at(value):
 
 
 class TrustedCredentialResolver:
-    """``resolver.resolve_many(*, toolkit_instance_id, items) -> {field: CredentialEnvelope}`` for one task, and
+    """``resolver.resolve_all(*, items) -> {(toolkit_instance_id, field): CredentialEnvelope}`` for a whole run,
+    ``resolver.resolve_many(*, toolkit_instance_id, items) -> {field: CredentialEnvelope}`` for one toolkit, and
     the one-slot form ``resolver(*, toolkit_instance_id, field, slot) -> CredentialEnvelope``.
 
     ``context_ref`` set: a governed agent run. Unset: a probe, whose ticket is the ``probe_ref``
@@ -130,11 +132,55 @@ class TrustedCredentialResolver:
         if not entries:
             return {}
         if self._batch_release:
-            return self._release_batch(toolkit_instance_id, entries, envelope_type, error_type)
+            released = self._release_batch(
+                [(toolkit_instance_id, field, slot) for field, slot in entries], envelope_type, error_type)
+            return {field: released[(toolkit_instance_id, field)] for field, _slot in entries}
         return {
             field: self._release_one(toolkit_instance_id, field, slot, envelope_type, error_type)
             for field, slot in entries
         }
+
+    def resolve_all(self, *, items):
+        """Release every ``{toolkit_instance_id, field, slot}`` item of a run; ``{(toolkit_instance_id, field): envelope}``.
+
+        One bus call per ``MAX_BATCH_SLOTS`` items when Main serves batches, else one ``resolve_many`` per toolkit.
+        The set is validated before any call; all or nothing: the first refusal raises its typed ``GovernedCredentialError``.
+        """
+        envelope_type, error_type = _sdk_types()
+        entries = self._run_entries(items, error_type)
+        if not entries:
+            return {}
+        if not self._batch_release:
+            by_toolkit = {}
+            for toolkit_instance_id, field, slot in entries:
+                by_toolkit.setdefault(toolkit_instance_id, []).append({"field": field, "slot": slot})
+            return {
+                (toolkit_instance_id, field): envelope
+                for toolkit_instance_id, toolkit_items in by_toolkit.items()
+                for field, envelope in self.resolve_many(
+                    toolkit_instance_id=toolkit_instance_id, items=toolkit_items).items()
+            }
+        if self._context_ref is None:  # one ticket for the whole set, checked before the first call
+            self._single_probe_ref(entries, error_type)
+        released = {}
+        for start in range(0, len(entries), MAX_BATCH_SLOTS):
+            released.update(self._release_batch(entries[start:start + MAX_BATCH_SLOTS], envelope_type, error_type))
+        return released
+
+    def _run_entries(self, items, error_type):
+        if not isinstance(items, (list, tuple)):
+            raise self._refusal(error_type, STALE_CONTEXT)
+        entries, seen = [], set()
+        for item in items:
+            item = item if isinstance(item, dict) else {}
+            toolkit_instance_id, field, slot = item.get("toolkit_instance_id"), item.get("field"), item.get("slot")
+            key = (toolkit_instance_id, field)
+            if (not isinstance(toolkit_instance_id, str) or not toolkit_instance_id or not isinstance(field, str)
+                    or not field or key in seen or not isinstance(slot, dict)):
+                raise self._refusal(error_type, STALE_CONTEXT)
+            seen.add(key)
+            entries.append((toolkit_instance_id, field, slot))
+        return entries
 
     def _entries(self, items, error_type):
         if not isinstance(items, (list, tuple)):
@@ -157,14 +203,17 @@ class TrustedCredentialResolver:
             raise self._refusal(error_type, STALE_CONTEXT)
         return probe_ref
 
-    def _release_batch(self, toolkit_instance_id, entries, envelope_type, error_type):
+    def _single_probe_ref(self, entries, error_type):
+        refs = {self._probe_ref(slot, error_type) for *_ids, slot in entries}
+        if len(refs) != 1:  # one ticket per batch
+            raise self._refusal(error_type, STALE_CONTEXT)
+        (probe_ref,) = refs
+        return probe_ref
+
+    def _release_batch(self, entries, envelope_type, error_type):
+        """One bus call for ``[(toolkit_instance_id, field, slot)]``; ``{(toolkit_instance_id, field): envelope}``."""
         context_ref = self._context_ref
-        probe_ref = None
-        if context_ref is None:
-            refs = {self._probe_ref(slot, error_type) for _field, slot in entries}
-            if len(refs) != 1:  # one ticket per batch
-                raise self._refusal(error_type, STALE_CONTEXT)
-            (probe_ref,) = refs
+        probe_ref = self._single_probe_ref(entries, error_type) if context_ref is None else None
         from .credential_transport import generate_recipient_keypair  # pylint: disable=C0415
         private_key, recipient_key = generate_recipient_keypair()  # one keypair for the batch
         try:
@@ -176,7 +225,7 @@ class TrustedCredentialResolver:
                     caller={"kind": "indexer_worker", "task_name": self._task_name, "run_id": self._run_id},
                     recipient_key=recipient_key,
                     slots=[{"toolkit_instance_id": toolkit_instance_id, "field": field, "slot": slot}
-                           for field, slot in entries],
+                           for toolkit_instance_id, field, slot in entries],
                 )
             except Exception:  # pylint: disable=W0718  # includes queue.Empty (proxy timeout): never a fallback
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE) from None
@@ -184,15 +233,17 @@ class TrustedCredentialResolver:
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
             if reply.get("ok") is not True:
                 code = reply.get("reason_code")
+                self._log_refused_slot(reply)
                 raise self._refusal(error_type, code if isinstance(code, str) and code else DEPENDENCY_UNAVAILABLE)
             if not set(reply) <= RELEASE_REPLY_KEYS:
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
-            releases = self._releases_by_field(reply.get("releases"), toolkit_instance_id, entries, error_type)
+            releases = self._releases_by_key(reply.get("releases"), entries, error_type)
             ref = context_ref or probe_ref
             result = {
-                field: self._open(releases[field], private_key, envelope_type, error_type, ref,
-                                  toolkit_instance_id, field, slot)
-                for field, slot in entries
+                (toolkit_instance_id, field): self._open(
+                    releases[(toolkit_instance_id, field)], private_key, envelope_type, error_type, ref,
+                    toolkit_instance_id, field, slot)
+                for toolkit_instance_id, field, slot in entries
             }
         finally:
             del private_key
@@ -200,24 +251,33 @@ class TrustedCredentialResolver:
             _record("ok", "OK")
         return result
 
-    def _releases_by_field(self, releases, toolkit_instance_id, entries, error_type):
-        """The reply's releases keyed by field: exactly the requested set, each for this toolkit, known keys only,
-        no repeated field or release id."""
+    @staticmethod
+    def _log_refused_slot(reply):
+        """Name the slot Main refused in the log only (ids, never values); the raised error stays reason-code-only."""
+        named = {k: reply.get(k) for k in ("toolkit_instance_id", "field")}
+        if all(isinstance(v, str) and 0 < len(v) <= MAX_LOGGED_NAME_CHARS for v in named.values()):
+            _log_info(f"security_metric name=credential_slot_refusal reason_code={reply.get('reason_code')!r} "
+                      f"toolkit_instance_id={named['toolkit_instance_id']!r} field={named['field']!r}")
+
+    def _releases_by_key(self, releases, entries, error_type):
+        """The reply's releases keyed by (toolkit_instance_id, field): exactly the requested set, known keys only,
+        no repeated key or release id."""
         if not isinstance(releases, list) or len(releases) != len(entries):
             raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
-        by_field, release_ids = {}, set()
+        by_key, release_ids = {}, set()
         for release in releases:
             if not isinstance(release, dict) or not set(release) <= RELEASE_ITEM_KEYS:
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
-            field, release_id = release.get("field"), release.get("release_id")
-            if (not isinstance(field, str) or field in by_field or release.get("toolkit_instance_id") != toolkit_instance_id
+            key = (release.get("toolkit_instance_id"), release.get("field"))
+            release_id = release.get("release_id")
+            if (not all(isinstance(part, str) for part in key) or key in by_key
                     or not isinstance(release_id, str) or release_id in release_ids):
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
-            by_field[field] = release
+            by_key[key] = release
             release_ids.add(release_id)
-        if set(by_field) != {field for field, _slot in entries}:
+        if set(by_key) != {(toolkit_instance_id, field) for toolkit_instance_id, field, _slot in entries}:
             raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
-        return by_field
+        return by_key
 
     def _release_one(self, toolkit_instance_id, field, slot, envelope_type, error_type):
         """Single-slot release (``restricted_release_credential``): a Main without the batch handler."""
