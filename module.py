@@ -569,7 +569,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         """Push the input guardrail policy (#6886) into the SDK's process globals.
 
         Applied unconditionally so that switching it off takes effect. A config we
-        cannot read means the guardrail is off, never a stale policy (plan §6.3).
+        cannot read keeps the last policy that applied, so a broken reconfig cannot
+        switch the guardrail off; with none applied yet it is off.
         Never logs patterns or values: only whether it is on and the category actions.
         """
         try:
@@ -578,14 +579,15 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             if not isinstance(policy, dict):
                 raise TypeError("input_guardrail must be an object")
             configure_input_guard(policy)
+            self._input_guardrail_policy = policy
         except Exception:  # pylint: disable=W0718
-            log.exception("Failed to configure the input guardrail - disabling it")
-            policy = {"enabled": False}
+            policy = getattr(self, "_input_guardrail_policy", None) or {"enabled": False}
+            log.exception("Failed to configure the input guardrail - keeping the last policy")
             try:
                 from elitea_sdk.runtime.toolkits.security import configure_input_guard  # pylint: disable=C0415,E0401
-                configure_input_guard({"enabled": False})
+                configure_input_guard(policy)
             except Exception:  # pylint: disable=W0718
-                log.exception("Failed to disable the input guardrail")
+                log.exception("Failed to re-apply the input guardrail")
         # Same policy for the tracing plugin's span payloads (this process runs its own)
         try:
             from .utils.input_guardrail import set_redaction_policy  # pylint: disable=C0415

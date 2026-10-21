@@ -46,8 +46,9 @@ funcs = _load('utils/funcs.py', [
     'build_input_guardrail_error', 'build_parallel_terminal_error',
 ], dict(_TYPING))
 guardrail = _load('utils/input_guardrail.py', [
-    'INSPECTED_CONFIG_KEY', 'AUDIT_TRACER_NAME', 'AUDIT_OBSERVATION_TYPE', '_SEVERITY', '_META_KEYS',
-    'inspected_segments', 'merge_verdict', 'emit_audit_spans', 'audit_blocked', '_audit_key',
+    'INSPECTED_CONFIG_KEY', 'AUDIT_TRACER_NAME', 'AUDIT_OBSERVATION_TYPE', '_SEVERITY',
+    '_MAX_NOT_INSPECTED', '_MAX_BLOCK_TYPE_CHARS', '_META_KEYS',
+    'inspected_segments', '_bounded_types', 'merge_verdict', 'emit_audit_spans', 'audit_blocked', '_audit_key',
     '_entity_attributes', '_redaction', 'set_redaction_policy', 'redact_span_text', 'register_tracing_redactor',
 ], {**_TYPING, 'log': _LOG})
 
@@ -239,6 +240,15 @@ def test_merge_drops_transport_only_keys():
     assert set(verdict) == set(guardrail['_META_KEYS'])
 
 
+def test_merge_bounds_not_inspected():
+    merge = guardrail['merge_verdict']
+    verdict = merge(None, _summary('none', [], not_inspected=[f'type-{i}-' + 'x' * 100 for i in range(100)]))
+    merged = merge(verdict, _summary('none', [], not_inspected=[f'other-{i}' for i in range(100)]))
+
+    for listed in (verdict['not_inspected'], merged['not_inspected']):
+        assert len(listed) == 20 and all(len(t) <= 32 for t in listed)
+
+
 def test_inspected_segments_only_accepts_a_list_of_hashes():
     inspected = guardrail['inspected_segments']
 
@@ -337,7 +347,7 @@ def test_custom_event_handler_records_the_verdict():
     assert 'self._record_input_guardrail(data)' in source
 
 
-def _load_apply(config, configure, monkeypatch):
+def _load_apply(config, configure, monkeypatch, owner=None):
     # module.py imports pylon at top level, so only the method is loaded
     source = (ROOT / 'module.py').read_text()
     cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == 'Module')
@@ -346,11 +356,12 @@ def _load_apply(config, configure, monkeypatch):
     exec(compile(ast.Module([method], []), '<_apply_input_guardrail>', 'exec'), namespace)  # pylint: disable=W0122
     security = types.SimpleNamespace(configure_input_guard=configure)
     monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.toolkits.security', security)
-    owner = types.SimpleNamespace(descriptor=types.SimpleNamespace(config=config))
+    owner = owner or types.SimpleNamespace()
+    owner.descriptor = types.SimpleNamespace(config=config)
     return lambda: namespace['_apply_input_guardrail'](owner)
 
 
-def test_apply_pushes_policy_and_disables_on_bad_config(monkeypatch):
+def test_apply_pushes_policy_and_disables_on_bad_first_config(monkeypatch):
     for name in ('elitea_sdk', 'elitea_sdk.runtime', 'elitea_sdk.runtime.toolkits'):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     applied = []
@@ -362,7 +373,21 @@ def test_apply_pushes_policy_and_disables_on_bad_config(monkeypatch):
     assert applied == [{'enabled': True}, {'enabled': False}, {}]
 
 
-def test_apply_disables_when_sdk_rejects_policy(monkeypatch):
+def test_unreadable_reconfig_keeps_the_last_policy(monkeypatch):
+    for name in ('elitea_sdk', 'elitea_sdk.runtime', 'elitea_sdk.runtime.toolkits'):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    applied = []
+    owner = types.SimpleNamespace()
+    good = {'enabled': True, 'on_error': 'fail_closed'}
+
+    _load_apply({'input_guardrail': good}, applied.append, monkeypatch, owner)()
+    _load_apply({'input_guardrail': 'yes'}, applied.append, monkeypatch, owner)()
+    _load_apply({}, applied.append, monkeypatch, owner)()
+
+    assert applied == [good, good, {}]
+
+
+def test_apply_disables_when_sdk_rejects_the_first_policy(monkeypatch):
     for name in ('elitea_sdk', 'elitea_sdk.runtime', 'elitea_sdk.runtime.toolkits'):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     applied = []

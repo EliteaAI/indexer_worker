@@ -17,6 +17,9 @@ AUDIT_OBSERVATION_TYPE = 'guardrail'
 
 _SEVERITY = {'none': 0, 'off': 0, 'record': 1, 'warn': 2, 'redact': 3, 'block': 4}
 # Keys of the SDK summary that may reach the persisted message and the UI
+# not_inspected holds client-chosen block types: bound what a verdict carries
+_MAX_NOT_INSPECTED = 20
+_MAX_BLOCK_TYPE_CHARS = 32
 _META_KEYS = ('action', 'categories', 'rules', 'segments', 'detection_count', 'not_inspected', 'error')
 
 
@@ -99,6 +102,10 @@ def inspected_segments(kwargs: Dict[str, Any]) -> List[str]:
     return [str(h) for h in value if isinstance(h, str)] if isinstance(value, list) else []
 
 
+def _bounded_types(values) -> List[str]:
+    return sorted({str(v)[:_MAX_BLOCK_TYPE_CHARS] for v in values or []})[:_MAX_NOT_INSPECTED]
+
+
 def merge_verdict(current: Optional[Dict[str, Any]], summary: Dict[str, Any]) -> Dict[str, Any]:
     """Fold one model call's summary into the turn's verdict. The most severe action wins."""
     incoming = {key: summary.get(key) for key in _META_KEYS}
@@ -108,14 +115,15 @@ def merge_verdict(current: Optional[Dict[str, Any]], summary: Dict[str, Any]) ->
             'categories': sorted(set(incoming['categories'] or [])),
             'rules': sorted(set(incoming['rules'] or [])),
             'segments': sorted(set(incoming['segments'] or [])),
-            'not_inspected': sorted(set(incoming['not_inspected'] or [])),
+            'not_inspected': _bounded_types(incoming['not_inspected']),
             'detection_count': int(incoming['detection_count'] or 0),
         }
     merged = dict(current)
     if _SEVERITY.get(incoming['action'] or 'none', 0) > _SEVERITY.get(current.get('action') or 'none', 0):
         merged['action'] = incoming['action']
-    for key in ('categories', 'rules', 'segments', 'not_inspected'):
+    for key in ('categories', 'rules', 'segments'):
         merged[key] = sorted(set(current.get(key) or []) | set(incoming[key] or []))
+    merged['not_inspected'] = _bounded_types(set(current.get('not_inspected') or []) | set(incoming['not_inspected'] or []))
     merged['detection_count'] = int(current.get('detection_count') or 0) + int(incoming['detection_count'] or 0)
     merged['error'] = current.get('error') or incoming['error']
     return merged
