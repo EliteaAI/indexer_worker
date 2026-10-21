@@ -5,6 +5,8 @@ tool work the worker validates that reference with Main over the worker bus and 
 on any failure. A legacy envelope makes no call at all.
 """
 
+import threading
+
 from elitea_sdk.runtime.utils.utils import PREDICT_RUN_ID_KWARGS_KEY  # pylint: disable=E0401
 
 from .task_envelope import PROFILE_GOVERNED, EnvelopeRejected, read_envelope
@@ -105,9 +107,72 @@ def _reject(reason_code, ref=None):
     raise ContextRejected(reason_code)
 
 
-def _validate_with_main(local_event_node, timeout_s, **payload):
-    # A forked task has no running RPC response listener of its own: start one over the
-    # already-started Worker/Main transport, as agent_execution_common does for signing.
+class RunRpcNode:
+    """The one ``RpcNode`` of a governed run, shared by context validation and credential release (S9).
+
+    The saving is one node start/stop and one set of event subscriptions per run instead of one per
+    call; service discovery still happens per request. The node is created and started on first
+    use, so a legacy run (which never calls Main) creates none. Whoever creates the object closes it
+    on every exit of the task (``close()`` is idempotent; ``proxy()`` raises afterwards). A forked
+    task has no running RPC response listener of its own: the node starts one over the
+    already-started Worker/Main transport, as ``agent_execution_common`` does for signing.
+    """
+
+    def __init__(self, local_event_node=None, *, id_prefix="indexer_run_"):
+        self._event_node = local_event_node
+        self._id_prefix = id_prefix
+        self._node = None
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def bind(self, local_event_node):
+        """Set the event node the task created (the owner builds this object before the task has one)."""
+        self._event_node = local_event_node
+
+    def proxy(self, timeout_s):
+        """RPC proxy of the shared node with this call's own timeout."""
+        with self._lock:
+            if self._closed or self._event_node is None:
+                raise RuntimeError("run RPC node is not available")
+            if self._node is None:
+                from arbiter.rpcnode import RpcNode  # pylint: disable=C0415,E0401
+                node = RpcNode(self._event_node, id_prefix=self._id_prefix)
+                try:
+                    node.start()
+                except BaseException:
+                    try:
+                        node.stop()  # leave nothing subscribed
+                    except Exception:  # pylint: disable=W0718
+                        pass
+                    raise
+                self._node = node
+            node = self._node
+        return node.timeout(timeout_s)
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            node, self._node = self._node, None
+        if node is not None:
+            try:
+                node.stop()
+            except Exception:  # pylint: disable=W0718
+                pass
+
+
+class ContextView(dict):
+    """Main's context view of a governed run. ``batch_release`` is what Main's validate reply says about the
+    batch release handler: only an explicit ``true`` counts (absent or anything else = an older Main)."""
+
+    def __init__(self, context, *, batch_release=False):
+        super().__init__(context)
+        self.batch_release = batch_release is True
+
+
+def _validate_with_main(local_event_node, timeout_s, rpc=None, **payload):
+    if rpc is not None:
+        return rpc.proxy(timeout_s).restricted_validate_execution_context(**payload)
+    # No shared node: one for this call only.
     from arbiter.rpcnode import RpcNode  # pylint: disable=C0415,E0401
     node = RpcNode(local_event_node, id_prefix="indexer_ctx_", proxy_timeout=timeout_s)
     node.start()
@@ -117,10 +182,14 @@ def _validate_with_main(local_event_node, timeout_s, **payload):
         node.stop()
 
 
-def enforce_execution_context(kwargs, local_event_node, *, task_name, timeout_s=DEFAULT_TIMEOUT_S, project_id=None):
-    """Return Main's context view for a governed run, ``None`` for a legacy one; raise ``ContextRejected``.
+def enforce_execution_context(kwargs, local_event_node, *, task_name, timeout_s=DEFAULT_TIMEOUT_S, project_id=None,
+                              rpc=None):
+    """Return Main's ``ContextView`` for a governed run, ``None`` for a legacy one; raise ``ContextRejected``.
+
+    ``view.batch_release`` is true when Main's validate reply carries ``"batch_release": true``.
 
     ``project_id`` is the run project Main stamped in the task meta; the payload's own is the fallback.
+    ``rpc`` is the run's shared ``RunRpcNode`` (the caller closes it); without one the call uses a node of its own.
     """
     envelope = read_envelope(kwargs)
     if envelope.security_profile != PROFILE_GOVERNED:
@@ -131,7 +200,7 @@ def enforce_execution_context(kwargs, local_event_node, *, task_name, timeout_s=
         _reject(STALE_CONTEXT)
     try:
         response = _validate_with_main(
-            local_event_node, timeout_s,
+            local_event_node, timeout_s, rpc,
             project_id=project_id,
             context_ref=ref,
             caller={
@@ -144,7 +213,7 @@ def enforce_execution_context(kwargs, local_event_node, *, task_name, timeout_s=
         _reject(DEPENDENCY_UNAVAILABLE, ref)
     if isinstance(response, dict) and response.get("ok") is True and isinstance(response.get("context"), dict):
         _record("ok", "OK")
-        return response["context"]
+        return ContextView(response["context"], batch_release=response.get("batch_release"))
     code = response.get("reason_code") if isinstance(response, dict) else None
     _reject(code if isinstance(code, str) and code else STALE_CONTEXT, ref)
 

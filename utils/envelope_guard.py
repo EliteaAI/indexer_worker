@@ -9,7 +9,9 @@ arrive by a path that never queried approvers.
 import threading
 import time
 
-from .credential_slots_support import CAPABILITY_CREDENTIAL_SLOTS_V1, slots_supported
+from .credential_slots_support import (
+    CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1, CAPABILITY_CREDENTIAL_SLOTS_V1, slots_supported,
+)
 from .task_envelope import (
     CAPABILITY_ENVELOPE_V1, EnvelopeRejected, read_envelope,
 )
@@ -46,9 +48,9 @@ class _LabelledCounter:
 
 def supported_capabilities():
     """The envelope capabilities this worker honours: the base set, plus governed credential slots
-    only when the SDK ships them and the sealed transport self-test passes (#6946)."""
+    (and their one-call batch form) only when the SDK ships them and the sealed transport self-test passes (#6946)."""
     if slots_supported():
-        return SUPPORTED_CAPABILITIES | {CAPABILITY_CREDENTIAL_SLOTS_V1}
+        return SUPPORTED_CAPABILITIES | {CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1}
     return SUPPORTED_CAPABILITIES
 
 
