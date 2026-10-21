@@ -18,6 +18,7 @@ import pickle
 import queue
 import sys
 import types
+import unittest.mock
 
 import pytest
 
@@ -86,10 +87,8 @@ def real_sdk_slots(sdk_slots):
 @pytest.fixture(autouse=True)
 def fresh_support_cache():
     credential_slots_support.slots_supported.cache_clear()
-    credential_resolver.reset_batch_support()
     yield
     credential_slots_support.slots_supported.cache_clear()
-    credential_resolver.reset_batch_support()
 
 
 NO_OVERRIDE = object()
@@ -101,7 +100,7 @@ class FakeBus:
     def __init__(self):
         self.requests = []        # single-slot releases (restricted_release_credential)
         self.batch_requests = []  # batch releases (restricted_release_credentials)
-        self.batch_supported = True
+        self.batch_release = None    # what Main's validate reply says: True / False / None (key absent = older Main)
         self.validate_requests = []  # restricted_validate_execution_context
         self.nodes = []
         self.fields = {"access_token": VALUE}
@@ -127,7 +126,10 @@ class FakeBus:
 
     def validate(self, **request):
         self.validate_requests.append(request)
-        return {"ok": True, "context": {"run_id": "run-1", "attempt": 1}}
+        reply = {"ok": True, "context": {"run_id": "run-1", "attempt": 1}}
+        if self.batch_release is not None:
+            reply["batch_release"] = self.batch_release
+        return reply
 
     def release(self, **request):
         self.requests.append(request)
@@ -139,8 +141,6 @@ class FakeBus:
 
     def release_many(self, **request):
         self.batch_requests.append(request)
-        if not self.batch_supported:
-            raise NotImplementedError("restricted_release_credentials")
         if isinstance(self.override, BaseException):
             raise self.override
         if self.override is not NO_OVERRIDE:
@@ -187,17 +187,16 @@ def _install_bus(monkeypatch, bus):
 
 @pytest.fixture
 def bus(monkeypatch):
-    """A Main that serves only the single-slot release (the pre-batch Main), already known as such: these tests pin the
-    single-slot request/reply contract. ``batch_bus`` is the Main with the batch handler."""
-    bus = FakeBus()
-    bus.batch_supported = False
-    credential_resolver._BatchSupport.unsupported = True
-    return _install_bus(monkeypatch, bus)
+    """A Main without the batch handler (its validate reply carries no ``batch_release``): these tests pin the
+    single-slot request/reply contract. ``batch_bus`` is the Main that serves batches and says so."""
+    return _install_bus(monkeypatch, FakeBus())
 
 
 @pytest.fixture
 def batch_bus(monkeypatch):
-    return _install_bus(monkeypatch, FakeBus())
+    bus = FakeBus()
+    bus.batch_release = True
+    return _install_bus(monkeypatch, bus)
 
 
 @pytest.fixture
@@ -216,6 +215,11 @@ def _resolver(node="node", **overrides):
     params = {"project_id": 7, "task_name": "indexer_agent", "context_ref": CONTEXT_REF, "run_id": "run-1"}
     params.update(overrides)
     return credential_resolver.TrustedCredentialResolver(node, **params)
+
+
+def _bresolver(node="node", **overrides):
+    """A resolver whose run's validate reply said Main serves batches."""
+    return _resolver(node, batch_release=True, **overrides)
 
 
 def _call(resolver, slot=None, toolkit="12", field="github_configuration"):
@@ -268,7 +272,7 @@ def test_one_keypair_per_call_and_one_rpcnode_per_run(bus, sdk_slots):
     assert len(bus.nodes) == 1
     node = bus.nodes[0]
     assert node.started and not node.stopped
-    assert node.args[0] == "the-node" and node.args[2] == credential_resolver.DEFAULT_TIMEOUT_S
+    assert node.args[0] == "the-node" and node.timeouts == [credential_resolver.DEFAULT_TIMEOUT_S] * 3
     resolver.close()
     resolver.close()  # idempotent
     assert node.stopped
@@ -966,7 +970,9 @@ def test_a_governed_run_with_six_slots_makes_two_bus_calls_on_one_node(batch_bus
     assert batch_bus.requests == []
     assert len(batch_bus.nodes) == 1 and len(keypairs) == 1
     node = batch_bus.nodes[0]
-    assert node.started and node.timeouts == [context_guard.DEFAULT_TIMEOUT_S, credential_resolver.DEFAULT_TIMEOUT_S]
+    # validate: its own 5 s; the batch: 15 s + 0.5 s per slot
+    assert node.started and node.timeouts == [context_guard.DEFAULT_TIMEOUT_S, 18.0]
+    assert view.batch_release is True
     resolver.close()
     assert not node.stopped  # the run owns the shared node
     run_rpc.close()
@@ -976,7 +982,7 @@ def test_a_governed_run_with_six_slots_makes_two_bus_calls_on_one_node(batch_bus
 
 def test_batch_request_shape_and_one_slot_per_item(batch_bus, sdk_slots):
     items = _items(3)
-    _many(_resolver("the-node"), items, toolkit="12")
+    _many(_bresolver("the-node"), items, toolkit="12")
     (request,) = batch_bus.batch_requests
     assert set(request) == {"project_id", "context_ref", "probe_ref", "caller", "recipient_key", "slots"}
     assert request["project_id"] == 7 and request["context_ref"] == CONTEXT_REF and request["probe_ref"] is None
@@ -987,7 +993,7 @@ def test_batch_request_shape_and_one_slot_per_item(batch_bus, sdk_slots):
 
 def test_every_item_is_opened_with_its_own_aad(batch_bus, sdk_slots):
     """A reply item sealed for another decision id does not open, even though the batch shares one key."""
-    result = _many(_resolver(), _items(3))
+    result = _many(_bresolver(), _items(3))
     assert len(result) == 3
     real = batch_bus.release_many
 
@@ -999,12 +1005,12 @@ def test_every_item_is_opened_with_its_own_aad(batch_bus, sdk_slots):
 
     batch_bus.release_many = swapped
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(3))
+        _many(_bresolver(), _items(3))
     assert _code(err) == "DEPENDENCY_UNAVAILABLE"
 
 
 def test_the_one_slot_call_is_a_one_item_batch(batch_bus, sdk_slots, keypairs):
-    envelope = _call(_resolver())
+    envelope = _call(_bresolver())
     assert envelope.fields["access_token"].get_secret_value() == VALUE
     (request,) = batch_bus.batch_requests
     assert [s["field"] for s in request["slots"]] == ["github_configuration"] and batch_bus.requests == []
@@ -1021,7 +1027,7 @@ def test_private_key_of_the_batch_is_dropped_after_all_items_open(batch_bus, sdk
         return private, public
 
     monkeypatch.setattr(transport, "generate_recipient_keypair", spy)
-    resolver = _resolver()
+    resolver = _bresolver()
     _many(resolver, _items(4))
     gc.collect()
     untouched = [real()[0]]
@@ -1034,21 +1040,23 @@ def test_a_batch_refusal_maps_to_its_reason_code(batch_bus, sdk_slots, code):
     batch_bus.override = {"ok": False, "reason_code": code, "message": "must not matter",
                           "toolkit_instance_id": "12", "field": "configuration_1"}
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(3))
+        _many(_bresolver(), _items(3))
     assert _code(err) == code and "must not matter" not in str(err.value)
-    assert credential_resolver._BatchSupport.unsupported is False
+    assert batch_bus.requests == []
 
 
 @pytest.mark.parametrize("reply", [None, "nope", {"ok": False}, {"ok": True}, {"ok": True, "releases": None},
-                                   {"ok": True, "releases": "x"}, {"ok": True, "releases": [None]}])
+                                   {"ok": True, "releases": "x"}, {"ok": True, "releases": [None]},
+                                   {"ok": True, "releases": [], "extra": 1}])
 def test_malformed_batch_replies_are_a_dependency_failure(batch_bus, sdk_slots, reply):
     batch_bus.override = reply
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(2))
+        _many(_bresolver(), _items(2))
     assert _code(err) == "DEPENDENCY_UNAVAILABLE"
 
 
-@pytest.mark.parametrize("tamper", ["missing", "extra", "duplicate", "foreign_toolkit", "unknown_field"])
+@pytest.mark.parametrize("tamper", ["missing", "extra", "duplicate", "foreign_toolkit", "unknown_field",
+                                    "duplicate_release_id", "unknown_item_key", "unknown_reply_key"])
 def test_the_released_set_must_be_exactly_the_requested_set(batch_bus, sdk_slots, tamper):
     real = batch_bus.release_many
 
@@ -1063,77 +1071,221 @@ def test_the_released_set_must_be_exactly_the_requested_set(batch_bus, sdk_slots
             releases[1] = dict(releases[0])
         elif tamper == "foreign_toolkit":
             releases[0]["toolkit_instance_id"] = "99"
+        elif tamper == "duplicate_release_id":
+            releases[1]["release_id"] = releases[0]["release_id"]
+        elif tamper == "unknown_item_key":
+            releases[0]["note"] = "x"
+        elif tamper == "unknown_reply_key":
+            reply["note"] = "x"
         else:
             releases[0]["field"] = "not_requested"
         return reply
 
     batch_bus.release_many = release_many
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(3))
+        _many(_bresolver(), _items(3))
     assert _code(err) == "DEPENDENCY_UNAVAILABLE"
 
 
-@pytest.mark.parametrize("failure", [queue.Empty(), ConnectionError(VALUE), RuntimeError("boom")])
-def test_batch_bus_failures_are_a_dependency_failure_and_do_not_mean_unsupported(batch_bus, sdk_slots, failure):
+@pytest.mark.parametrize("failure", [queue.Empty(), ConnectionError(VALUE), RuntimeError("boom"), NotImplementedError("x")])
+def test_batch_bus_failures_are_a_dependency_failure_and_never_a_fallback(batch_bus, sdk_slots, failure):
     batch_bus.override = failure
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(2))
+        _many(_bresolver(), _items(2))
     assert _code(err) == "DEPENDENCY_UNAVAILABLE" and VALUE not in str(err.value)
     assert err.value.__cause__ is None and err.value.__suppress_context__ is True
-    assert credential_resolver._BatchSupport.unsupported is False and batch_bus.requests == []
+    assert batch_bus.requests == []  # no single-slot retry
 
 
 def test_an_expired_item_refuses_the_batch(batch_bus, sdk_slots):
     batch_bus.expires_in = -5
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(2))
+        _many(_bresolver(), _items(2))
     assert _code(err) == "STALE_CONTEXT"
 
 
 def test_batch_logs_and_metrics_carry_no_material(batch_bus, sdk_slots, logs):
-    resolver = _resolver()
+    resolver = _bresolver()
     before = credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("ok", "OK")
     _many(resolver, _items(3))
     assert credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("ok", "OK") == before + 3  # one per released slot
     assert logs and all(VALUE not in line for line in logs) and VALUE not in repr(resolver)
 
 
-# --- older Main: no batch handler -> slot by slot, remembered per process --------------------------------------------
+# --- Main decides: the validate reply's batch_release flag ------------------------------------------------------------------
 
-def test_without_the_batch_handler_the_slots_are_released_one_by_one_and_remembered(batch_bus, sdk_slots, keypairs):
-    batch_bus.batch_supported = False
-    resolver = _resolver()
-    result = _many(resolver, _items(6))
-    assert len(result) == 6
-    assert len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 6  # one probe of the batch, then N singles
-    assert len({r["recipient_key"] for r in batch_bus.requests}) == 6  # a keypair per single call, as before
-    assert [r["field"] for r in batch_bus.requests] == [i["field"] for i in _items(6)]
-    _many(resolver, _items(2))
-    assert len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 8  # remembered: no further probe
-    assert credential_resolver._BatchSupport.unsupported is True
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False), (None, False)])
+def test_the_view_carries_the_flag_from_the_validate_reply(batch_bus, sdk_slots, value, expected):
+    batch_bus.batch_release = value  # None: the key is absent (an older Main)
+    view = context_guard.enforce_execution_context(_kwargs(), "node", task_name="indexer_agent")
+    assert view.batch_release is expected and view == {"run_id": "run-1", "attempt": 1}
 
 
-def test_a_not_implemented_reply_also_means_unsupported(batch_bus, sdk_slots):
-    batch_bus.override = {"ok": False, "reason_code": "NOT_IMPLEMENTED", "message": "x"}
-    real_single = batch_bus.release
-    batch_bus.release = lambda **r: (setattr(batch_bus, "override", NO_OVERRIDE), real_single(**r))[1]
-    result = _many(_resolver(), _items(2))
-    assert len(result) == 2 and len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 2
-    assert credential_resolver._BatchSupport.unsupported is True
+@pytest.mark.parametrize("junk", ["true", 1, "yes", [True], {}])
+def test_only_an_explicit_true_counts(batch_bus, sdk_slots, junk):
+    batch_bus.batch_release = junk
+    assert context_guard.enforce_execution_context(_kwargs(), "node", task_name="indexer_agent").batch_release is False
 
 
-def test_a_refusal_in_the_fallback_path_keeps_its_code(batch_bus, sdk_slots):
-    batch_bus.batch_supported = False
-    batch_bus.override = {"ok": False, "reason_code": "DENIED_RBAC"}
+def test_attach_passes_the_flag_on_and_a_plain_view_means_no_batch(bus, sdk_slots):
+    for view, expected in ((context_guard.ContextView({}, batch_release=True), True),
+                           (context_guard.ContextView({}), False), ({"run_id": "r"}, False)):
+        resolver = credential_resolver.attach_credential_resolver(
+            types.SimpleNamespace(), view, _kwargs(), "node", task_name="indexer_agent", project_id=7)
+        assert resolver._batch_release is expected
+
+
+def test_flag_true_releases_a_toolkit_build_in_one_call(batch_bus, sdk_slots):
+    _many(_resolver(batch_release=True), _items(6))
+    assert len(batch_bus.batch_requests) == 1 and batch_bus.requests == []
+
+
+def test_flag_false_releases_slot_by_slot_without_ever_calling_the_batch_handler(bus, sdk_slots, keypairs):
+    result = _many(_resolver(batch_release=False), _items(6))
+    assert len(result) == 6 and bus.batch_requests == [] and len(bus.requests) == 6
+    assert len({r["recipient_key"] for r in bus.requests}) == 6 == len(keypairs)  # a keypair per single call
+    assert [r["field"] for r in bus.requests] == [i["field"] for i in _items(6)]
+    assert len(bus.nodes) == 1
+
+
+def test_the_flag_also_decides_the_one_slot_call(batch_bus, sdk_slots):
+    _call(_resolver(batch_release=False))
+    assert len(batch_bus.requests) == 1 and batch_bus.batch_requests == []
+    _call(_resolver(batch_release=True))
+    assert len(batch_bus.batch_requests) == 1 and len(batch_bus.requests) == 1
+
+
+def test_a_refusal_slot_by_slot_keeps_its_code_and_stops_at_the_first(bus, sdk_slots):
+    bus.override = {"ok": False, "reason_code": "DENIED_RBAC"}
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(3))
-    assert _code(err) == "DENIED_RBAC" and len(batch_bus.requests) == 1  # stops at the first refusal
+        _many(_resolver(batch_release=False), _items(3))
+    assert _code(err) == "DENIED_RBAC" and len(bus.requests) == 1
+
+
+def test_the_batch_timeout_scales_with_the_slots(batch_bus, sdk_slots):
+    for n, expected in ((1, 15.5), (2, 16.0), (6, 18.0), (64, 47.0)):
+        batch_bus.nodes.clear()
+        _many(_resolver(batch_release=True), _items(n))
+        assert batch_bus.nodes[0].timeouts == [expected]
+    assert credential_resolver.batch_timeout(15, 90) == 60 == credential_resolver.batch_timeout(15, 500)
+    assert credential_resolver.batch_timeout(15, 89) == 59.5
+
+
+# --- the real bus (arbiter RpcNode over the mock event node) -------------------------------------------------------------------
+
+def _arbiter_root():
+    candidates = [os.environ.get("ELITEA_ARBITER_PATH")]
+    candidates += [str(parent / "arbiter" / "arbiter") for parent in pathlib.Path(__file__).resolve().parents]
+    for candidate in candidates:
+        if candidate and (pathlib.Path(candidate) / "rpcnode" / "rpcnode.py").is_file():
+            return candidate
+    return None
+
+
+@pytest.fixture
+def real_bus(monkeypatch):
+    """arbiter's own RpcNode and MockEventNode, loaded without the package's heavy ``__init__`` (broker clients)."""
+    root = _arbiter_root()
+    if root is None:
+        pytest.skip("arbiter sources not found (set ELITEA_ARBITER_PATH to the directory holding rpcnode/)")
+    import logging
+    saved = {k: v for k, v in sys.modules.items() if k == "arbiter" or k.startswith("arbiter.")}
+    for key in saved:
+        del sys.modules[key]
+    package, eventnode = types.ModuleType("arbiter"), types.ModuleType("arbiter.eventnode")
+    package.__path__, eventnode.__path__ = [root], [os.path.join(root, "eventnode")]
+    package.log = logging.getLogger("arbiter-test")
+    sys.modules["arbiter"], sys.modules["arbiter.eventnode"] = package, eventnode
+    from arbiter.eventnode.mock import MockEventNode  # pylint: disable=E0401,C0415
+    from arbiter.rpcnode import RpcNode  # pylint: disable=E0401,C0415
+    event_node = MockEventNode()
+    event_node.start()
+    try:
+        yield types.SimpleNamespace(event_node=event_node, RpcNode=RpcNode)
+    finally:
+        event_node.stop()
+        for key in [k for k in sys.modules if k == "arbiter" or k.startswith("arbiter.")]:
+            del sys.modules[key]
+        sys.modules.update(saved)
+
+
+def _subscriptions(event_node):
+    return sum(len(callbacks) for callbacks in event_node.event_callbacks.values())
+
+
+def _provider(real_bus, **handlers):
+    node = real_bus.RpcNode(real_bus.event_node, id_prefix="main_")
+    node.start()
+    for name, handler in handlers.items():
+        node.register(handler, name)
+    return node
+
+
+def test_no_provider_times_out_to_dependency_unavailable_with_no_single_slot_retry(real_bus, sdk_slots, monkeypatch):
+    singles = []
+    provider = _provider(real_bus, restricted_release_credential=lambda **r: singles.append(r))  # an old Main
+    monkeypatch.setattr(credential_resolver, "BATCH_TIMEOUT_PER_SLOT_S", 0)
+    run_rpc = context_guard.RunRpcNode(real_bus.event_node)
+    try:
+        resolver = credential_resolver.TrustedCredentialResolver(
+            real_bus.event_node, project_id=7, task_name="indexer_agent", context_ref=CONTEXT_REF, run_id="run-1",
+            timeout_s=0.2, rpc=run_rpc, batch_release=True)  # a Main that said batch, but has no handler registered
+        with pytest.raises(sdk_slots.GovernedCredentialError) as err:
+            _many(resolver, _items(3))
+        assert _code(err) == "DEPENDENCY_UNAVAILABLE" and err.value.__cause__ is None
+        assert singles == []
+    finally:
+        run_rpc.close()
+        provider.stop()
+
+
+def test_the_real_bus_serves_a_batch_end_to_end_and_close_leaves_no_subscriptions(real_bus, sdk_slots, keypairs):
+    fake = FakeBus()
+    provider = _provider(real_bus, restricted_release_credentials=fake.release_many,
+                         restricted_release_credential=fake.release,
+                         restricted_validate_execution_context=lambda **r: {**fake.validate(**r), "batch_release": True})
+    baseline = _subscriptions(real_bus.event_node)  # the provider's own four
+    run_rpc = context_guard.RunRpcNode(real_bus.event_node)
+    try:
+        kwargs = _kwargs()
+        view = context_guard.enforce_execution_context(kwargs, real_bus.event_node, task_name="indexer_agent",
+                                                       project_id=7, rpc=run_rpc)
+        resolver = credential_resolver.attach_credential_resolver(
+            types.SimpleNamespace(), view, kwargs, real_bus.event_node, task_name="indexer_agent", project_id=7,
+            rpc=run_rpc)
+        result = _many(resolver, _items(6))
+        assert len(result) == 6 and len(fake.batch_requests) == 1 and fake.requests == [] and len(keypairs) == 1
+        assert len(fake.validate_requests) == 1
+        assert _subscriptions(real_bus.event_node) == baseline + 4  # one shared node, validate and release
+    finally:
+        run_rpc.close()
+    assert _subscriptions(real_bus.event_node) == baseline
+    with pytest.raises(RuntimeError):
+        run_rpc.proxy(1)
+    provider.stop()
+
+
+def test_a_start_failure_leaves_nothing_subscribed(real_bus, sdk_slots, monkeypatch):
+    baseline = _subscriptions(real_bus.event_node)
+    real_subscribe = real_bus.event_node.subscribe
+
+    def failing(event_name, callback):
+        if event_name == "service_request":
+            raise RuntimeError("subscribe failed")
+        return real_subscribe(event_name, callback)
+
+    monkeypatch.setattr(real_bus.event_node, "subscribe", failing)
+    run_rpc = context_guard.RunRpcNode(real_bus.event_node)
+    with pytest.raises(RuntimeError):
+        run_rpc.proxy(1)
+    assert _subscriptions(real_bus.event_node) == baseline
+    run_rpc.close()
 
 
 # --- the items themselves ------------------------------------------------------------------------------------------------
 
 def test_no_items_means_no_call_and_no_node(batch_bus, sdk_slots):
-    assert _many(_resolver(), []) == {}
+    assert _many(_bresolver(), []) == {}
     assert batch_bus.batch_requests == [] and batch_bus.requests == [] and batch_bus.nodes == []
 
 
@@ -1143,20 +1295,20 @@ def test_no_items_means_no_call_and_no_node(batch_bus, sdk_slots):
 ])
 def test_malformed_items_are_refused_before_any_call(batch_bus, sdk_slots, items):
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), items)
+        _many(_bresolver(), items)
     assert _code(err) == "STALE_CONTEXT" and batch_bus.batch_requests == [] and batch_bus.nodes == []
 
 
 def test_the_batch_is_bounded_at_the_run_limit(batch_bus, sdk_slots):
-    assert len(_many(_resolver(), _items(credential_resolver.MAX_BATCH_SLOTS))) == credential_resolver.MAX_BATCH_SLOTS
+    assert len(_many(_bresolver(), _items(credential_resolver.MAX_BATCH_SLOTS))) == credential_resolver.MAX_BATCH_SLOTS
     batch_bus.batch_requests.clear()
     with pytest.raises(sdk_slots.GovernedCredentialError) as err:
-        _many(_resolver(), _items(credential_resolver.MAX_BATCH_SLOTS + 1))
-    assert _code(err) == "CREDENTIAL_REFERENCE_REQUIRED" and batch_bus.batch_requests == []
+        _many(_bresolver(), _items(credential_resolver.MAX_BATCH_SLOTS + 1))
+    assert _code(err) == "STALE_CONTEXT" and batch_bus.batch_requests == []
 
 
 def test_a_probe_batch_carries_its_one_ticket(batch_bus, sdk_slots):
-    resolver = _resolver(context_ref=None, run_id=None, task_name="indexer_governed_check_connection")
+    resolver = _bresolver(context_ref=None, run_id=None, task_name="indexer_governed_check_connection")
     _many(resolver, _items(2, probe_ref=PROBE_REF), toolkit="probe")
     (request,) = batch_bus.batch_requests
     assert request["context_ref"] is None and request["probe_ref"] == PROBE_REF
@@ -1173,7 +1325,7 @@ def test_validate_and_release_share_one_rpcnode(batch_bus, sdk_slots):
     run_rpc = context_guard.RunRpcNode("node")
     context_guard.enforce_execution_context(_kwargs(), "node", task_name="indexer_agent", rpc=run_rpc)
     assert len(batch_bus.nodes) == 1 and not batch_bus.nodes[0].stopped  # no longer stopped after validate
-    _many(_resolver(rpc=run_rpc), _items(2))
+    _many(_bresolver(rpc=run_rpc), _items(2))
     assert len(batch_bus.nodes) == 1
     run_rpc.close()
     assert batch_bus.nodes[0].stopped
@@ -1204,7 +1356,7 @@ def test_legacy_run_makes_no_bus_call_and_creates_no_rpcnode(batch_bus, sdk_slot
 
 
 def test_a_resolver_without_a_shared_node_owns_and_closes_its_own(batch_bus, sdk_slots):
-    resolver = _resolver()
+    resolver = _bresolver()
     _many(resolver, _items(2))
     (node,) = batch_bus.nodes
     assert node.started and not node.stopped
@@ -1212,20 +1364,130 @@ def test_a_resolver_without_a_shared_node_owns_and_closes_its_own(batch_bus, sdk
     assert node.stopped
 
 
-@pytest.mark.parametrize("name", ["indexer_agent", "indexer_predict_agent"])
-def test_agent_entry_points_share_one_node_and_close_it(name):
+class _StubModule(types.ModuleType):
+    """A module whose every attribute is a mock: stands in for the heavy imports of an entry-point module."""
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        value = unittest.mock.MagicMock(name=f"{self.__name__}.{name}")
+        setattr(self, name, value)
+        return value
+
+
+ENTRY_STUBS = ("methods.agent_common", "utils.checkpoint_utils", "utils.agent_execution_common",
+               "utils.langfuse_callback", "utils.image_helpers", "utils.funcs", "utils.parallel_dispatch_contract",
+               "utils.usage_tool_events", "utils.parallel_hitl_router", "utils.predict_router", "utils.mcp_auth_tools",
+               "utils.exceptions", "utils.node_interface")
+ENTRY_REAL = ("context_guard", "credential_resolver", "envelope_guard", "task_envelope", "credential_slots_support",
+              "credential_transport")
+
+
+@pytest.fixture
+def entry(real_bus, sdk_slots, monkeypatch):
+    """The real agent entry points (``indexer_agent``, ``indexer_predict_agent``) over the real bus, with their heavy
+    collaborators mocked; the event node is the shared one (a non-fork task) and ``create_elitea_client`` fails."""
+    pylon_tools = types.ModuleType("pylon.core.tools")
+    pylon_tools.log = unittest.mock.MagicMock()
+    pylon_tools.web = types.SimpleNamespace(method=lambda *_a, **_k: (lambda fn: fn))
+    for name, mod in (("pylon", types.ModuleType("pylon")), ("pylon.core", types.ModuleType("pylon.core")),
+                      ("pylon.core.tools", pylon_tools)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    mcp_oauth = types.ModuleType("elitea_sdk.runtime.utils.mcp_oauth")
+    mcp_oauth.McpAuthorizationRequired = type("McpAuthorizationRequired", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "elitea_sdk.runtime.utils.mcp_oauth", mcp_oauth)
+    sdk_utils = types.ModuleType("elitea_sdk.runtime.utils.utils")  # other test files leave this package stubbed
+    sdk_utils.PREDICT_RUN_ID_KWARGS_KEY, sdk_utils.PREDICT_RUN_ID_HEADER = RUN_KEY, "X-Predict-Run-Id"
+    monkeypatch.setitem(sys.modules, "elitea_sdk.runtime.utils.utils", sdk_utils)
+    root = types.ModuleType("iw6946")
+    root.__path__ = [str(PLUGIN_ROOT)]
+    monkeypatch.setitem(sys.modules, "iw6946", root)
+    for name in ENTRY_REAL:
+        monkeypatch.setitem(sys.modules, f"iw6946.utils.{name}", sys.modules[f"utils.{name}"])
+    stubs = {}
+    for name in ENTRY_STUBS:
+        stubs[name] = _StubModule(f"iw6946.{name}")
+        monkeypatch.setitem(sys.modules, f"iw6946.{name}", stubs[name])
+    common = stubs["utils.agent_execution_common"]
+    common.setup_event_node = lambda _context: real_bus.event_node
+    common.with_tracing_span = lambda _tp, _name, _sid, _mid, _pid, func, *a, **k: func(*a, **k)
+
+    def failing_client(*_a, **_k):
+        raise RuntimeError("client creation failed")
+
+    common.create_elitea_client = failing_client
+    task = types.SimpleNamespace(meta={"project_id": 7}, multiprocessing_context="thread")
+    monkeypatch.setitem(sys.modules, "tasknode_task", task)
+    methods = {}
+    for name in ("indexer_agent", "indexer_predict_agent"):
+        module = importlib.import_module(f"iw6946.methods.{name}")
+        methods[name] = type("Host", (module.Method,), {})()
+    yield types.SimpleNamespace(real_bus=real_bus, methods=methods, task=task, common=common,
+                                provider=lambda **handlers: _provider(real_bus, **handlers))
+    for key in [k for k in sys.modules if k.startswith("iw6946.methods")]:
+        del sys.modules[key]
+
+
+def _run_entry(entry, name, kwargs):
+    host = entry.methods[name]
+    if name == "indexer_agent":
+        return host._indexer_agent_task(None, {}, {}, "tok", {}, stream_id="s", message_id="m", **kwargs)
+    return host._indexer_predict_agent_task(None, {}, "tok", {}, stream_id="s", message_id="m", **kwargs)
+
+
+ENTRY_NAMES = ["indexer_agent", "indexer_predict_agent"]
+
+
+@pytest.mark.parametrize("name", ENTRY_NAMES)
+def test_the_run_node_is_closed_when_the_body_fails_between_validation_and_its_big_try(entry, name):
+    """Validation started the shared node; creating the client then fails: nothing stays subscribed on the shared event node."""
+    fake = FakeBus()
+    fake.batch_release = True
+    provider = entry.provider(restricted_validate_execution_context=fake.validate)
+    baseline = _subscriptions(entry.real_bus.event_node)
+    try:
+        with pytest.raises(RuntimeError, match="client creation failed"):
+            _run_entry(entry, name, _kwargs())
+        assert len(fake.validate_requests) == 1
+        assert _subscriptions(entry.real_bus.event_node) == baseline
+    finally:
+        provider.stop()
+
+
+@pytest.mark.parametrize("name", ENTRY_NAMES)
+def test_the_run_node_is_closed_on_the_refusal_path(entry, name):
+    provider = entry.provider(restricted_validate_execution_context=lambda **r: {"ok": False, "reason_code": "EPOCH_MISMATCH"})
+    baseline = _subscriptions(entry.real_bus.event_node)
+    try:
+        _run_entry(entry, name, _kwargs())  # the readable refusal is a result, not an exception
+        assert _subscriptions(entry.real_bus.event_node) == baseline
+        assert entry.common.execution_error.called is False  # it lives in agent_common
+    finally:
+        provider.stop()
+
+
+@pytest.mark.parametrize("name", ENTRY_NAMES)
+def test_a_legacy_run_starts_no_node_at_all(entry, name):
+    baseline = _subscriptions(entry.real_bus.event_node)
+    kwargs = attach_envelope({"project_id": 7}, "legacy")
+    with pytest.raises(RuntimeError, match="client creation failed"):
+        _run_entry(entry, name, kwargs)
+    assert _subscriptions(entry.real_bus.event_node) == baseline
+
+
+@pytest.mark.parametrize("name", ENTRY_NAMES)
+def test_entry_points_hand_the_shared_node_to_validation_and_release(entry, name):
     source = (PLUGIN_ROOT / "methods" / f"{name}.py").read_text()
-    assert source.count("run_rpc = RunRpcNode(local_event_node)") == 1
-    assert source.index("run_rpc = RunRpcNode(") < source.index("enforce_execution_context(")
     assert "rpc=run_rpc" in source[source.index("enforce_execution_context("):source.index("except ContextRejected")]
     assert "rpc=run_rpc" in source[source.index("attach_credential_resolver("):source.index("should_continue = ")]
-    # closed on the refusal path and in the task's finally, before the event node stops
-    assert source.count("run_rpc.close()") == 2
-    assert source.index("credential_resolver.close()") < source.rindex("run_rpc.close()")
+    assert source.index("credential_resolver.close()") < source.rindex("run_rpc.close()")  # before the event node stops
 
 
 def test_old_sdk_slot_by_slot_calls_still_resolve_through_the_real_apply(batch_bus, real_sdk_slots):
     settings = {"base_url": "x", "github_configuration": {"credential_slot": _slot()}}
-    applied, released = real_sdk_slots.apply_credential_slots(settings, "12", _resolver())
+    applied, released = real_sdk_slots.apply_credential_slots(settings, "12", _bresolver())
     assert applied["github_configuration"]["access_token"] == VALUE and released == frozenset({VALUE})
     assert len(batch_bus.batch_requests) == 1 and batch_bus.requests == []
+    batch_bus.batch_requests.clear()
+    real_sdk_slots.apply_credential_slots(settings, "12", _resolver())  # a run whose Main did not say batch
+    assert batch_bus.batch_requests == [] and len(batch_bus.requests) == 1

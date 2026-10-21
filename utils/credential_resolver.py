@@ -7,7 +7,9 @@ sealed to a key generated for that one call (``credential_transport``).
 
 ``resolve_many`` releases every slot of a toolkit build in one bus call (one keypair, one reply,
 each item sealed under its own AAD); ``__call__`` is the one-slot form for SDKs that resolve slot
-by slot. A Main without the batch handler is served slot by slot (remembered per process).
+by slot. Main decides: the batch call is used only when its validate reply said ``batch_release``
+(``ContextView.batch_release``); otherwise, and for probes, every slot is its own call. A bus failure
+of either call is ``DEPENDENCY_UNAVAILABLE``, never a reason to try the other form.
 
 Nothing here keeps material: one X25519 keypair per call whose private half is dropped as
 soon as the reply is opened, no cache, no logging of values, no ids or reasons in user-facing
@@ -20,16 +22,16 @@ from datetime import datetime, timezone
 from .context_guard import PREDICT_RUN_ID_KWARGS_KEY, RunRpcNode, _Counter, _log_info
 from .task_envelope import read_envelope
 
-RELEASE_RPC = "restricted_release_credential"
-RELEASE_BATCH_RPC = "restricted_release_credentials"
-BATCH_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"  # reason code of a Main whose bus does not serve the batch handler
 AAD_VERSION = "v1"
 DEFAULT_TIMEOUT_S = 15
 MAX_BATCH_SLOTS = 64  # Main's MAX_GOVERNED_CREDENTIALS_PER_RUN
+BATCH_TIMEOUT_PER_SLOT_S = 0.5
+MAX_BATCH_TIMEOUT_S = 60
+RELEASE_REPLY_KEYS = frozenset({"ok", "releases"})
+RELEASE_ITEM_KEYS = frozenset({"toolkit_instance_id", "field", "release_id", "fields", "expires_at", "sealed"})
 
 DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
 STALE_CONTEXT = "STALE_CONTEXT"
-CREDENTIAL_REFERENCE_REQUIRED = "CREDENTIAL_REFERENCE_REQUIRED"
 
 CREDENTIAL_SLOT_RESOLUTION = _Counter(
     "credential_slot_resolution_total",
@@ -38,22 +40,14 @@ CREDENTIAL_SLOT_RESOLUTION = _Counter(
 )
 
 
-class _BatchSupport:
-    """Does Main serve the batch release handler? Unknown until a call shows it does not; then remembered."""
-    unsupported = False
-
-
-class _BatchUnsupported(Exception):
-    """Main has no batch release handler (older Main): serve the slots one by one."""
-
-
-def reset_batch_support():
-    _BatchSupport.unsupported = False
-
-
 def _record(result, reason_code):
     CREDENTIAL_SLOT_RESOLUTION.inc(result, reason_code)
     _log_info(f"security_metric name=credential_slot_resolution_total result={result} reason_code={reason_code}")
+
+
+def batch_timeout(base_s, slots):
+    """Bus timeout of a release batch: the single-call timeout plus half a second per slot, at most a minute."""
+    return min(base_s + BATCH_TIMEOUT_PER_SLOT_S * slots, MAX_BATCH_TIMEOUT_S)
 
 
 def governed_credential_code(exc):
@@ -88,15 +82,15 @@ class TrustedCredentialResolver:
     """
 
     def __init__(self, local_event_node, *, project_id, task_name, context_ref=None, run_id=None,
-                 timeout_s=DEFAULT_TIMEOUT_S, rpc=None):
+                 timeout_s=DEFAULT_TIMEOUT_S, rpc=None, batch_release=False):
         self._project_id = project_id
         self._task_name = task_name
         self._context_ref = context_ref
         self._run_id = run_id
         self._timeout_s = timeout_s
         self._owns_rpc = rpc is None
-        self._shared_rpc = RunRpcNode(local_event_node, id_prefix="indexer_rel_", proxy_timeout=timeout_s) \
-            if rpc is None else rpc
+        self._batch_release = batch_release is True  # Main said so in its validate reply
+        self._shared_rpc = RunRpcNode(local_event_node, id_prefix="indexer_rel_") if rpc is None else rpc
 
     # A resolver is shared by reference with whatever copies the client; it never pickles.
     def __copy__(self):
@@ -115,15 +109,15 @@ class TrustedCredentialResolver:
         if self._owns_rpc:
             self._shared_rpc.close()
 
-    def _rpc(self):
-        return self._shared_rpc.proxy(self._timeout_s)
+    def _rpc(self, timeout_s=None):
+        return self._shared_rpc.proxy(self._timeout_s if timeout_s is None else timeout_s)
 
     def _refusal(self, error_type, code):
         _record("deny", code)
         return error_type(code)
 
     def __call__(self, *, toolkit_instance_id, field, slot):
-        """One slot: a one-item batch (SDKs that resolve slot by slot)."""
+        """One slot (SDKs that resolve slot by slot): a one-item batch when Main serves batches."""
         return self.resolve_many(toolkit_instance_id=toolkit_instance_id, items=[{"field": field, "slot": slot}])[field]
 
     def resolve_many(self, *, toolkit_instance_id, items):
@@ -135,11 +129,8 @@ class TrustedCredentialResolver:
         entries = self._entries(items, error_type)
         if not entries:
             return {}
-        if not _BatchSupport.unsupported:
-            try:
-                return self._release_batch(toolkit_instance_id, entries, envelope_type, error_type)
-            except _BatchUnsupported:
-                _BatchSupport.unsupported = True
+        if self._batch_release:
+            return self._release_batch(toolkit_instance_id, entries, envelope_type, error_type)
         return {
             field: self._release_one(toolkit_instance_id, field, slot, envelope_type, error_type)
             for field, slot in entries
@@ -148,8 +139,8 @@ class TrustedCredentialResolver:
     def _entries(self, items, error_type):
         if not isinstance(items, (list, tuple)):
             raise self._refusal(error_type, STALE_CONTEXT)
-        if len(items) > MAX_BATCH_SLOTS:
-            raise self._refusal(error_type, CREDENTIAL_REFERENCE_REQUIRED)
+        if len(items) > MAX_BATCH_SLOTS:  # a malformed request, not a missing reference
+            raise self._refusal(error_type, STALE_CONTEXT)
         entries, seen = [], set()
         for item in items:
             field = item.get("field") if isinstance(item, dict) else None
@@ -178,7 +169,7 @@ class TrustedCredentialResolver:
         private_key, recipient_key = generate_recipient_keypair()  # one keypair for the batch
         try:
             try:
-                reply = self._rpc().restricted_release_credentials(
+                reply = self._rpc(batch_timeout(self._timeout_s, len(entries))).restricted_release_credentials(
                     project_id=self._project_id,
                     context_ref=context_ref,
                     probe_ref=probe_ref,
@@ -187,17 +178,15 @@ class TrustedCredentialResolver:
                     slots=[{"toolkit_instance_id": toolkit_instance_id, "field": field, "slot": slot}
                            for field, slot in entries],
                 )
-            except NotImplementedError:
-                raise _BatchUnsupported() from None
-            except Exception:  # pylint: disable=W0718  # includes queue.Empty (proxy timeout)
+            except Exception:  # pylint: disable=W0718  # includes queue.Empty (proxy timeout): never a fallback
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE) from None
             if not isinstance(reply, dict):
                 raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
             if reply.get("ok") is not True:
                 code = reply.get("reason_code")
-                if code == BATCH_NOT_IMPLEMENTED:
-                    raise _BatchUnsupported()
                 raise self._refusal(error_type, code if isinstance(code, str) and code else DEPENDENCY_UNAVAILABLE)
+            if not set(reply) <= RELEASE_REPLY_KEYS:
+                raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
             releases = self._releases_by_field(reply.get("releases"), toolkit_instance_id, entries, error_type)
             ref = context_ref or probe_ref
             result = {
@@ -212,16 +201,21 @@ class TrustedCredentialResolver:
         return result
 
     def _releases_by_field(self, releases, toolkit_instance_id, entries, error_type):
-        """The reply's releases keyed by field: exactly the requested set, each for this toolkit, no repeats."""
-        by_field = {}
-        if isinstance(releases, list):
-            for release in releases:
-                field = release.get("field") if isinstance(release, dict) else None
-                if (not isinstance(field, str) or field in by_field
-                        or release.get("toolkit_instance_id") != toolkit_instance_id):
-                    raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
-                by_field[field] = release
-        if set(by_field) != {field for field, _slot in entries} or len(releases or ()) != len(entries):
+        """The reply's releases keyed by field: exactly the requested set, each for this toolkit, known keys only,
+        no repeated field or release id."""
+        if not isinstance(releases, list) or len(releases) != len(entries):
+            raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
+        by_field, release_ids = {}, set()
+        for release in releases:
+            if not isinstance(release, dict) or not set(release) <= RELEASE_ITEM_KEYS:
+                raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
+            field, release_id = release.get("field"), release.get("release_id")
+            if (not isinstance(field, str) or field in by_field or release.get("toolkit_instance_id") != toolkit_instance_id
+                    or not isinstance(release_id, str) or release_id in release_ids):
+                raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
+            by_field[field] = release
+            release_ids.add(release_id)
+        if set(by_field) != {field for field, _slot in entries}:
             raise self._refusal(error_type, DEPENDENCY_UNAVAILABLE)
         return by_field
 
@@ -309,6 +303,7 @@ def attach_credential_resolver(client, context_view, kwargs, local_event_node, *
         context_ref=read_envelope(kwargs).context_ref,
         run_id=kwargs.get(PREDICT_RUN_ID_KWARGS_KEY),
         rpc=rpc,
+        batch_release=getattr(context_view, "batch_release", False),
     )
     client.credential_resolver = resolver
     return resolver

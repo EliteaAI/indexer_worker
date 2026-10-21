@@ -209,16 +209,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         traceparent = tasknode_task.meta.get('traceparent') if tasknode_task.meta else None
 
         # Execute with optional tracing span
-        return with_tracing_span(
-            traceparent,
-            'indexer_agent',
-            stream_id,
-            message_id,
-            str(tasknode_task.meta.get('project_id', '')),
-            self._indexer_agent_task_inner,
-            memory, memory_config, client_args, api_token, api_extra_headers,
-            stream_id=stream_id, message_id=message_id, **kwargs
-        )
+        # The run's one bus node: closed on every exit of the task, whatever the inner body does
+        run_rpc = RunRpcNode()
+        try:
+            return with_tracing_span(
+                traceparent,
+                'indexer_agent',
+                stream_id,
+                message_id,
+                str(tasknode_task.meta.get('project_id', '')),
+                self._indexer_agent_task_inner,
+                memory, memory_config, client_args, api_token, api_extra_headers,
+                stream_id=stream_id, message_id=message_id, run_rpc=run_rpc, **kwargs
+            )
+        finally:
+            run_rpc.close()
 
     @web.method()
     def _indexer_agent_task_inner(
@@ -230,6 +235,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             api_extra_headers,
             stream_id: Optional[str] = None,
             message_id: Optional[str] = None,
+            run_rpc: Optional[RunRpcNode] = None,
             **kwargs,
     ):
         """Inner agent task execution (separated for tracing)."""
@@ -238,8 +244,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Setup event node
         local_event_node = setup_event_node(tasknode_task.multiprocessing_context)
-        # One bus node per governed run, shared by validate and release; created on first use (a legacy run makes none)
-        run_rpc = RunRpcNode(local_event_node)
+        # One bus node per governed run, shared by validate and release; started on first use (a legacy run makes none).
+        # The caller owns it and closes it on every exit; the closes below only keep the order before the event node stops.
+        run_rpc = run_rpc if run_rpc is not None else RunRpcNode()
+        run_rpc.bind(local_event_node)
 
         # #6756: a governed run is validated with Main before any LLM or tool work (legacy: no-op)
         try:
