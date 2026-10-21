@@ -130,6 +130,9 @@ class EventTypes(StrEnum):
     # Entity creation events - fired when an MCP tool creates an Agent/Pipeline/Skill/ProjectContext
     agent_entity_created = 'agent_entity_created'
 
+    # Input guardrail verdict (#6886) - rule ids and counts only, never the value
+    agent_input_guardrail = 'agent_input_guardrail'
+
 
 class NodeEvent(BaseModel):
     type: EventTypes
@@ -443,6 +446,9 @@ class NoOpNodeEventInterface(NodeEventInterface):
 
 
 ELITEA_SDK_CUSTOM_EVENTS_MAPPER = {
+    EventTypes.agent_input_guardrail.value: {
+        'action', 'categories', 'rules', 'segments', 'detection_count', 'not_inspected', 'error',
+    },
     EventTypes.agent_on_tool_node.value: {
         'state', 'input_variables', 'tool_result',
     },
