@@ -72,7 +72,7 @@ def test_guard_rejects_with_reason_code_and_counts_by_capability():
     with pytest.raises(EnvelopeRejected) as err:
         envelope_guard.enforce_envelope(kwargs)
     assert err.value.reason_code == "CAPABILITY_MISSING"
-    assert envelope_guard.WORKER_CAPABILITY_REJECT.total(capability="future.v9") >= 1
+    assert envelope_guard.WORKER_CAPABILITY_REJECT.total(capability="unknown") >= 1
 
 
 def test_guard_counts_schema_rejection_without_a_capability_label():

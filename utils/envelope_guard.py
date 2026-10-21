@@ -11,7 +11,7 @@ import time
 
 from .credential_slots_support import (
     CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1, CAPABILITY_CREDENTIAL_SLOTS_RUN_V1, CAPABILITY_CREDENTIAL_SLOTS_V1,
-    slots_supported,
+    CAPABILITY_GOVERNED_OPS_POOL_V1, slots_supported,
 )
 from .security_metrics_client import SecurityCounter
 from .task_envelope import (
@@ -35,6 +35,22 @@ def supported_capabilities():
     return SUPPORTED_CAPABILITIES
 
 
+# The ``capability`` label of ``worker_capability_reject_total`` is one of these or "unknown": the envelope is data
+# from the dispatcher, and the metric must not carry an open-ended set of strings. The full list of missing
+# capabilities is in the per-task warning of ``enforce_envelope``.
+KNOWN_CAPABILITIES = frozenset({
+    CAPABILITY_ENVELOPE_V1, CAPABILITY_CREDENTIAL_SLOTS_V1, CAPABILITY_CREDENTIAL_SLOTS_BATCH_V1,
+    CAPABILITY_CREDENTIAL_SLOTS_RUN_V1, CAPABILITY_GOVERNED_OPS_POOL_V1, "-",
+})
+UNKNOWN_CAPABILITY = "unknown"
+MAX_REJECT_LABELS = 8   # increments per refused task
+MAX_LOGGED_CAPABILITIES = 20
+MAX_LOGGED_CAPABILITY_LEN = 64
+
+# In this worker the counter increments inside forked one-shot task children (``enforce_envelope`` runs in the task
+# target), so the parent process, where the OpenTelemetry total is read, stays at 0 by design. The structured
+# ``security_metric`` log line (written through pylon's logger, or by the shared tool) is the record of
+# ``worker_capability_reject_total`` here; the rate cap of that line is per child, i.e. one line per refused task.
 WORKER_CAPABILITY_REJECT = SecurityCounter(
     "worker_capability_reject_total",
     "Tasks refused by this worker because its envelope could not be honoured",
@@ -69,12 +85,24 @@ def envelope_task_approver(extra=()):
 
 
 def enforce_envelope(kwargs, extra=()):
-    """Entry-point guard: raise ``EnvelopeRejected`` (and count it) for a refused envelope."""
+    """Entry-point guard: raise ``EnvelopeRejected`` (and count it) for a refused envelope.
+
+    The metric is bucketed (``KNOWN_CAPABILITIES`` or "unknown", at most ``MAX_REJECT_LABELS`` increments);
+    the bounded full detail goes to the warning.
+    """
     try:
         read_envelope(kwargs or {}, supported_capabilities() | frozenset(extra))
     except EnvelopeRejected as exc:
-        for capability in exc.missing or ("-",):
-            WORKER_CAPABILITY_REJECT.inc(capability=capability)
+        missing = sorted(exc.missing or ("-",))
+        try:
+            from pylon.core.tools import log  # pylint: disable=C0415,E0401
+            log.warning("task refused: envelope rejected (%s), missing %s", exc.reason_code,
+                        [str(item)[:MAX_LOGGED_CAPABILITY_LEN] for item in missing[:MAX_LOGGED_CAPABILITIES]])
+        except Exception:  # pylint: disable=W0718
+            pass
+        for capability in missing[:MAX_REJECT_LABELS]:
+            WORKER_CAPABILITY_REJECT.inc(
+                capability=capability if capability in KNOWN_CAPABILITIES else UNKNOWN_CAPABILITY)
         raise
 
 

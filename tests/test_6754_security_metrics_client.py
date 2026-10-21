@@ -89,22 +89,67 @@ def test_guard_reaches_the_shared_tool_with_the_capability_label(lines):
 
     assert shared.calls == [("worker_capability_reject_total", envelope_guard.WORKER_CAPABILITY_REJECT.description,
                              ("capability",))]
-    assert shared.counters["worker_capability_reject_total"].incs == [(1, {"capability": "future.v9"})]
+    assert shared.counters["worker_capability_reject_total"].incs == [(1, {"capability": "unknown"})]
 
 
 def test_guard_falls_back_when_the_tool_is_absent(lines):
     kwargs = attach_envelope({}, "governed")
     kwargs["envelope"]["required_capabilities"] = [CAPABILITY_ENVELOPE_V1, "future.v9"]
-    before = envelope_guard.WORKER_CAPABILITY_REJECT.total(capability="future.v9")
+    before = envelope_guard.WORKER_CAPABILITY_REJECT.total(capability="unknown")
 
     with pytest.raises(EnvelopeRejected):
         envelope_guard.enforce_envelope(kwargs)
 
-    assert envelope_guard.WORKER_CAPABILITY_REJECT.total(capability="future.v9") == before + 1
-    assert lines == ["security_metric name=worker_capability_reject_total value=1 capability=future.v9"]
+    assert envelope_guard.WORKER_CAPABILITY_REJECT.total(capability="unknown") == before + 1
+    assert lines == ["security_metric name=worker_capability_reject_total value=1 capability=unknown"]
 
 
 def test_counter_name_and_label_are_unchanged():
     assert envelope_guard.WORKER_CAPABILITY_REJECT.name == "worker_capability_reject_total"
     assert envelope_guard.WORKER_CAPABILITY_REJECT.labels == ("capability",)
     assert "prometheus_client" not in (PLUGIN_ROOT / "utils" / "envelope_guard.py").read_text()
+
+
+def _refuse(*required):
+    kwargs = attach_envelope({}, "governed")
+    kwargs["envelope"]["required_capabilities"] = [CAPABILITY_ENVELOPE_V1, *required]
+    with pytest.raises(EnvelopeRejected):
+        envelope_guard.enforce_envelope(kwargs)
+
+
+def test_an_unknown_or_long_capability_is_bucketed_as_unknown(lines):
+    shared = SharedStub()
+    sys.modules["tools"].security_metrics = shared
+
+    _refuse("x" * 5000, "future.v9\nsecurity_metric name=forged")
+
+    assert shared.counters["worker_capability_reject_total"].incs == [(1, {"capability": "unknown"})] * 2
+
+
+def test_a_known_capability_keeps_its_own_label(lines, monkeypatch):
+    shared = SharedStub()
+    sys.modules["tools"].security_metrics = shared
+    monkeypatch.setattr(envelope_guard, "slots_supported", lambda: False)
+
+    _refuse("credential_slots.v1")
+
+    assert shared.counters["worker_capability_reject_total"].incs == [(1, {"capability": "credential_slots.v1"})]
+
+
+def test_twenty_missing_capabilities_count_at_most_eight_times(lines):
+    shared = SharedStub()
+    sys.modules["tools"].security_metrics = shared
+
+    _refuse(*[f"future.v{n:02d}" for n in range(20)])
+
+    assert len(shared.counters["worker_capability_reject_total"].incs) == envelope_guard.MAX_REJECT_LABELS == 8
+
+
+def test_the_full_detail_goes_to_the_warning_not_the_metric(lines, monkeypatch):
+    warnings = []
+    sys.modules["pylon.core.tools"].log.warning = lambda msg, *a: warnings.append(msg % a)
+
+    _refuse(*[f"future.v{n:02d}" for n in range(30)])
+
+    assert len(warnings) == 1 and "future.v19" in warnings[0] and "future.v20" not in warnings[0]
+    assert "CAPABILITY_MISSING" in warnings[0]
