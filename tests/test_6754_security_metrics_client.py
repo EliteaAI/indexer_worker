@@ -2,6 +2,7 @@
 
 import pathlib
 import sys
+import time
 import types
 
 import pytest
@@ -43,10 +44,11 @@ class SharedStub:
         return self.counters.setdefault(name, SharedCounter())
 
 
-def test_without_the_tool_it_counts_per_label_and_logs_the_structured_line(lines):
+def test_without_the_tool_it_counts_per_label_and_logs_the_structured_line(lines, monkeypatch):
     counter = security_metrics_client.SecurityCounter("c_total", "d", ("capability",))
 
     counter.inc(capability="future.v9")
+    monkeypatch.setattr(security_metrics_client, "_clock", lambda: time.monotonic() + 3600)
     counter.inc(capability="future.v9")
     counter.inc(capability="-")
 
