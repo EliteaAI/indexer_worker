@@ -721,6 +721,33 @@ def execution_error(
     return result
 
 
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
+
+
+def add_model_usage(usage_by_model: dict, model_name, response, pending, token_usage) -> None:
+    """Add one LLM call to the per-model rollup (#6898): provider usage, else the tiktoken estimate.
+
+    ``model_name`` is ``ls_model_name``: the SDK sends the configured Elitea model name as ``model`` to the
+    LLM gateway, so it is the same name the costs catalog prices by.
+    """
+    cache_read = cache_creation = 0
+    for generation_list in getattr(response, "generations", None) or []:
+        for gen in generation_list:
+            usage = getattr(getattr(gen, "message", None), "usage_metadata", None) or {}
+            details = usage.get("input_token_details") or {}
+            cache_read += details.get("cache_read") or 0
+            cache_creation += details.get("cache_creation") or 0
+    if token_usage:
+        tokens_in, tokens_out = token_usage.get("prompt_tokens", 0), token_usage.get("completion_tokens", 0)
+    else:
+        tokens_in, tokens_out = (pending or {}).get("tokens_in", 0), (pending or {}).get("tokens_out", 0)
+    bucket = usage_by_model.setdefault(model_name or "unknown", dict.fromkeys(USAGE_FIELDS, 0))
+    bucket["input_tokens"] += tokens_in or 0
+    bucket["output_tokens"] += tokens_out or 0
+    bucket["cache_read_tokens"] += cache_read
+    bucket["cache_creation_tokens"] += cache_creation
+
+
 class ToolCallPayload(BaseModel):
     """Payload model for tool call information"""
 
@@ -787,6 +814,9 @@ class EliteACallback(BaseCallbackHandler):
         self.tokens_out = 0
         # Per-call token provenance: 'provider' (API usage) or 'estimate' (tiktoken).
         self.token_source_counts = {"provider": 0, "estimate": 0}
+        # Per-model usage of every LLM call in this run, for per-chat usage & cost (#6898)
+        self.usage_by_model: Dict[str, dict] = {}
+        self.usage_run_id = uuid4().hex
         self.pending_llm_requests = defaultdict(
             lambda: {"tokens_in": 0, "tokens_out": 0}
         )
@@ -1613,6 +1643,7 @@ class EliteACallback(BaseCallbackHandler):
 
             self.pending_llm_requests[run_id]["tokens_in"] += tokens_in
             self.pending_llm_requests[run_id]["timestamp_start"] = now
+            self.pending_llm_requests[run_id]["model_name"] = self.current_model_name
             # Store langgraph_node and parent_agent_name for use in on_llm_end
             if metadata and metadata.get("langgraph_node"):
                 self.pending_llm_requests[run_id]["langgraph_node"] = metadata.get(
@@ -1958,6 +1989,7 @@ class EliteACallback(BaseCallbackHandler):
         self.tokens_out += pending.get("tokens_out", 0)
         if pending:
             self.token_source_counts["estimate"] += 1
+            add_model_usage(self.usage_by_model, pending.get("model_name"), None, pending, None)
         self.pending_llm_requests.pop(run_id, None)
         #
         if args:
@@ -1996,6 +2028,9 @@ class EliteACallback(BaseCallbackHandler):
         """Callback"""
         if self.debug:
             log.debug("on_text(%s, %s)", args, kwargs)
+
+    def _add_model_usage(self, model_name, response, pending, token_usage) -> None:
+        add_model_usage(self.usage_by_model, model_name, response, pending, token_usage)
 
     def on_llm_end(self, response: LLMResult, run_id: UUID, **kwargs) -> None:
         if self._is_mcp_auth_paused():
@@ -2059,6 +2094,9 @@ class EliteACallback(BaseCallbackHandler):
             )
 
         self.token_source_counts[token_source] += 1
+        self._add_model_usage(
+            pending.get("model_name") or self.current_model_name, response, pending, token_usage,
+        )
 
         # Get the timestamp_start, langgraph_node, and parent_agent_name before popping
         llm_timestamp_start = pending.get("timestamp_start")
