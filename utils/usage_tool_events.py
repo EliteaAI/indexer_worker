@@ -71,9 +71,9 @@ ATTRIBUTION_HEADER = "X-Elitea-Attribution"
 #: "no individual user" is a sentinel. usage_event.user_id is NOT NULL too.
 SYSTEM_USER_ID = 0
 
-#: How a run was started; NULL/absent means manual, so only automated sources are stamped (#6881)
+#: How a run was started; NULL/absent means unknown, so only listed sources are stamped (#6881, EL-7011)
 TRIGGER_SOURCE_KWARGS_KEY = "trigger_source"
-AUTOMATED_TRIGGER_SOURCES = ("scheduled", "webhook", "index")
+AUTOMATED_TRIGGER_SOURCES = ("chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "index")
 
 # `or` not a get() default: the var is present-but-empty in some deployments.
 _SCHEMA = os.environ.get("POSTGRES_SCHEMA") or "centry"
