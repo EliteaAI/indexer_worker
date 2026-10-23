@@ -139,6 +139,7 @@ from ..utils.node_interface import (
     NodeEvent,
     NodeEventInterface,
 )
+from ..utils.input_guardrail import _audit_key, emit_audit_spans, merge_verdict
 from ..utils.parallel_dispatch_contract import is_fanout_child
 from ..utils.mcp_auth_tools import backfill_mcp_provided_settings, backfill_mcp_provided_settings_dict
 
@@ -596,6 +597,7 @@ def execution_error(
     budget_error_code: Optional[str] = None,
     continuation_error: Optional[dict] = None,
     elitea_callback: Optional["EliteACallback"] = None,
+    input_guardrail: Optional[dict] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -613,6 +615,7 @@ def execution_error(
         budget_error_code: Budget scope that blocked the call, for the UI to link to usage (optional)
         continuation_error: Structured output-continuation failure details (optional)
         elitea_callback: Callback with the steps and token usage gathered before the error (optional)
+        input_guardrail: Input-guardrail block details (#6886); rule ids only, never the value (optional)
 
     Returns:
         Dict containing chat_history and error information
@@ -627,24 +630,27 @@ def execution_error(
             execution_end_time - execution_start_time
         ).total_seconds()
 
-    node_interface.emit(
-        type=EventTypes.agent_tool_start,
-        response_metadata={
-            "tool_name": "Agent Exception Stacktrace",
-            "tool_run_id": exception_uid,
-            "tool_meta": _sanitize_input_for_event(user_input),
-            "tool_inputs": "",
-        },
-    )
-    node_interface.emit(
-        type=EventTypes.agent_tool_end,
-        response_metadata={
-            "tool_name": "Agent Exception Stacktrace",
-            "tool_run_id": exception_uid,
-            "finish_reason": "stop",
-        },
-        content=error,
-    )
+    # A guardrail block is a policy outcome, not a crash, and the stacktrace pin
+    # carries the raw user input - which here is the value that was just blocked
+    if not input_guardrail:
+        node_interface.emit(
+            type=EventTypes.agent_tool_start,
+            response_metadata={
+                "tool_name": "Agent Exception Stacktrace",
+                "tool_run_id": exception_uid,
+                "tool_meta": _sanitize_input_for_event(user_input),
+                "tool_inputs": "",
+            },
+        )
+        node_interface.emit(
+            type=EventTypes.agent_tool_end,
+            response_metadata={
+                "tool_name": "Agent Exception Stacktrace",
+                "tool_run_id": exception_uid,
+                "finish_reason": "stop",
+            },
+            content=error,
+        )
 
     # Carry the user-facing text and budget scope on the exception event too. Surfaces
     # that consume the stream directly (skill test panel) never see full_message, which
@@ -660,6 +666,9 @@ def execution_error(
     #
     if continuation_error:
         exception_meta["continuation_error"] = continuation_error
+    #
+    if input_guardrail:
+        exception_meta["input_guardrail"] = input_guardrail
     #
     node_interface.emit(
         type=EventTypes.agent_exception,
@@ -689,6 +698,8 @@ def execution_error(
         additional_response_meta["budget_error_code"] = budget_error_code
     if continuation_error:
         additional_response_meta["continuation_error"] = continuation_error
+    if input_guardrail:
+        additional_response_meta["input_guardrail"] = input_guardrail
     if additional_response_meta:
         response_metadata["additional_response_meta"] = additional_response_meta
 
@@ -717,6 +728,7 @@ def execution_error(
             human_readable=human_readable,
             budget_error_code=budget_error_code,
             continuation_error=continuation_error,
+            input_guardrail=input_guardrail,
         )
     return result
 
@@ -2343,6 +2355,10 @@ class EliteACustomCallback(BaseCallbackHandler):
         self.task_id: str = task_id
         self.toolkit_metadata: dict = toolkit_metadata or {}
         self.additional_response_meta = {}
+        # (action, segment_kind) pairs already written as input-guardrail audit rows (#6886)
+        self.input_guardrail_audited = set()
+        # The run's agent ({'type','id','name'}); set by the agent task once the payload is known
+        self.audit_entity: Optional[dict] = None
         self.modified_files = []  # List to store modified file information
         self.generated_image_filepaths = []  # Filepaths of tool-generated images for thumbnail resolution
         self.index_statuses = []  # List to store index operation statuses
@@ -2360,6 +2376,27 @@ class EliteACustomCallback(BaseCallbackHandler):
         # self.stream_id = node_interface.stream_id
 
         super().__init__()
+
+    def _record_input_guardrail(self, data: dict) -> None:
+        """Keep the turn's input-guardrail verdict on the message meta and audit it (#6886).
+
+        The live event itself goes out through the mapper below; this keeps the verdict
+        for a reload (warn/redact notices) and writes one audit row per detection.
+        """
+        try:
+            self.additional_response_meta["input_guardrail"] = merge_verdict(
+                self.additional_response_meta.get("input_guardrail"), data,
+            )
+            entries = [
+                e for e in data.get("audit") or []
+                if isinstance(e, dict) and _audit_key(e) not in self.input_guardrail_audited
+            ]
+            self.input_guardrail_audited.update(_audit_key(e) for e in entries)
+            emit_audit_spans(
+                entries, user_id=self.user_id, project_id=self.project_id, entity=self.audit_entity,
+            )
+        except Exception as e:  # pylint: disable=W0718
+            log.warning(f"[INPUT_GUARDRAIL] Failed to record verdict: {e}")
 
     def _persist_injection_marker(self, payload: dict) -> None:
         """Persist a consumed injection as a trace-step delta on the partial_message channel.
@@ -2584,6 +2621,9 @@ class EliteACustomCallback(BaseCallbackHandler):
         if name == "mcp_auth_decision" and isinstance(data, dict):
             self._persist_mcp_auth_decision(data, metadata)
             return
+
+        if name == "input_guardrail" and isinstance(data, dict):
+            self._record_input_guardrail(data)
 
         event_key = f"agent_{name}"
         fields = ELITEA_SDK_CUSTOM_EVENTS_MAPPER.get(event_key, set())

@@ -274,13 +274,66 @@ def build_output_continuation_error(exc: Exception) -> Optional[Dict[str, Any]]:
     }
 
 
+INPUT_GUARDRAIL_BLOCKED_CODE = 'input_guardrail_blocked'
+_INPUT_GUARDRAIL_CATEGORY_LABELS = {
+    'credentials': 'a credential',
+    'personal_data': 'personal data',
+}
+
+
+def build_input_guardrail_error(exc: Exception) -> Optional[Dict[str, Any]]:
+    """Return the structured contract for an SDK input-guardrail block (#6886).
+
+    Class-name detection for the same hot-reload reason as above. Carries rule
+    ids only: the exception never holds the detected value, and neither does this.
+    """
+    if type(exc).__name__ != 'InputGuardrailBlocked':
+        return None
+    categories = [str(c) for c in (getattr(exc, 'categories', None) or [])]
+    segments = [str(s) for s in (getattr(exc, 'segments', None) or [])]
+    labels = [_INPUT_GUARDRAIL_CATEGORY_LABELS.get(c, c) for c in categories]
+    if categories and categories != ['error'] and segments == ['instructions']:
+        # The user cannot fix this by editing their message; the agent owner can
+        message = (
+            f"This agent's instructions appear to contain {' and '.join(labels)}, so the turn was not sent "
+            "to the model. Ask the agent's owner to remove it or store it as a project secret."
+        )
+        message_key = "input_guardrail.blocked.instructions"
+    elif categories and categories != ['error']:
+        message = (
+            f"Your message appears to contain {' and '.join(labels)}. It was not sent to the model. "
+            "Remove it, or store it as a project secret and reference it instead."
+        )
+        message_key = f"input_guardrail.blocked.{categories[0]}"
+    else:
+        # fail_closed on a detector error: nothing was detected, the check could not run
+        message = "Your message could not be checked by the input guardrail, so it was not sent to the model."
+        message_key = "input_guardrail.blocked.error"
+    return {
+        'code': INPUT_GUARDRAIL_BLOCKED_CODE,
+        'action': 'block',
+        'user_message': message,
+        'message_key': message_key,
+        'categories': categories,
+        'rules': [str(r) for r in (getattr(exc, 'rules', None) or [])],
+        'segments': segments,
+    }
+
+
 def build_parallel_terminal_error(
     error_message: str,
     human_readable: Optional[str] = None,
     budget_error_code: Optional[str] = None,
     continuation_error: Optional[Dict[str, Any]] = None,
+    input_guardrail: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the bounded error result supplied to a parallel parent."""
+    if input_guardrail:
+        return {
+            'code': INPUT_GUARDRAIL_BLOCKED_CODE,
+            'user_message': input_guardrail.get('user_message') or 'Input blocked by the input guardrail.',
+            'categories': input_guardrail.get('categories') or [],
+        }
     if continuation_error:
         return {
             'code': continuation_error.get('code') or 'output_continuation_exhausted',

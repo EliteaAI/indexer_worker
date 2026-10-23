@@ -74,10 +74,11 @@ from ..utils.agent_execution_common import (
 )
 from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
-from ..utils.funcs import build_output_continuation_error, expand_mcp_token_aliases
+from ..utils.input_guardrail import INSPECTED_CONFIG_KEY, audit_blocked, inspected_segments
+from ..utils.funcs import build_input_guardrail_error, build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils.usage_tool_events import (
-    ATTRIBUTION_HEADER, attribution_header, attribution_signing_key,
+    ATTRIBUTION_HEADER, attribution_header, attribution_signing_key, entity_from_application,
 )
 from ..utils import parallel_hitl_router, predict_router
 from ..utils.mcp_auth_tools import (
@@ -307,6 +308,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             log.warning(f"predict_router.register failed for thread {thread_id}: {_inj_exc}")
 
         elitea_callback = None  # guard: McpAuthorizationRequired may be raised before create_callbacks
+        elitea_custom_callback = None
         try:
             version_details = kwargs.get("application", {}).get('version_details', {})
             # version details is missed for requests from API endpoint
@@ -399,6 +401,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 tasknode_task.id,
                 debug=kwargs.get("debug", False)
             )
+            # Names the agent on the input-guardrail audit rows (#6886)
+            elitea_custom_callback.audit_entity = entity_from_application(kwargs.get('application'))
 
             # Stop and HITL pause end a run with no terminal event; partial saves
             # are the only chance to persist which skills applied.
@@ -508,6 +512,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             }
             invoke_config['configurable']['invoked_skills'] = kwargs.get('invoked_skills') or []
             invoke_config['configurable']['attached_skills'] = kwargs.get('attached_skills') or []
+            # Segments the platform's input guardrail already inspected this turn (#6886)
+            invoke_config['configurable'][INSPECTED_CONFIG_KEY] = inspected_segments(kwargs)
 
             # HITL resume takes precedence over generic checkpoint continuation.
             if mcp_auth_resume:
@@ -750,6 +756,27 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 elitea_callback=elitea_callback,
             )
         except Exception as e:
+            # An input-guardrail block (#6886) is a policy outcome: no stacktrace pin,
+            # and nothing in the error echoes the input it stopped
+            input_guardrail = build_input_guardrail_error(e)
+            if input_guardrail:
+                # A sub-agent's event may not reach this run's callback; audit from the block
+                audit_blocked(
+                    e,
+                    getattr(elitea_custom_callback, 'input_guardrail_audited', set()),
+                    user_id=tasknode_task.meta.get('user_context', {}).get('user_id'),
+                    project_id=tasknode_task.meta.get('project_id'),
+                    entity=entity_from_application(kwargs.get('application')),
+                )
+                return execution_error(
+                    node_interface, user_input, chat_history,
+                    "Input blocked by the input guardrail",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=input_guardrail['user_message'],
+                    execution_start_time=execution_start_time,
+                    input_guardrail=input_guardrail,
+                    elitea_callback=elitea_callback,
+                )
             continuation_error = build_output_continuation_error(e)
             if continuation_error:
                 return execution_error(
