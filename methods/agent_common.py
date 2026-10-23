@@ -896,7 +896,7 @@ class EliteACallback(BaseCallbackHandler):
             return False
         return self.mcp_auth_pause_payload is not None
 
-    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None, finish_reason="stop"):
+    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None, finish_reason="stop", error=None):
         """Emit the PARENT's bare sub-agent invocation chip for a durable child (#4993).
 
         In the sequential (in-process) path the orchestrator runs the sub-agent
@@ -964,6 +964,7 @@ class EliteACallback(BaseCallbackHandler):
             agent_type=_agent_type,
             tool_output=output_text,
             finish_reason=finish_reason,
+            error=error,
             timestamp_start=now,
             timestamp_finish=now,
         )
@@ -1577,7 +1578,8 @@ class EliteACallback(BaseCallbackHandler):
         # Human-readable headline: the exception message without the full traceback.
         # Shown immediately in the live chip so the user sees a readable error
         # without waiting for the orchestrator's final response (#7041).
-        error_headline = str(tool_exception)
+        # Fallback to the class name for exceptions with empty messages (e.g. KeyError()).
+        error_headline = str(tool_exception) or type(tool_exception).__name__
         if len(error_headline) > 500:
             error_headline = error_headline[:500] + "..."
         if tool_run_id in self.tool_calls:
@@ -1614,10 +1616,7 @@ class EliteACallback(BaseCallbackHandler):
 
         self.node_interface.emit(
             type=EventTypes.agent_tool_error,
-            response_metadata={
-                **tool_call.model_dump(include=include_fields),
-                "headline": error_headline,
-            },
+            response_metadata=tool_call.model_dump(include=include_fields),
             content=error_headline,
         )
 
@@ -2064,9 +2063,8 @@ class EliteACallback(BaseCallbackHandler):
         for key, value in hierarchy_metadata.items():
             if value is not None:
                 error_step[key] = value
-        self.thinking_steps.append(
-            self.node_interface.decorate_thinking_step_for_persistence(error_step)
-        )
+        decorated_error_step = self.node_interface.decorate_thinking_step_for_persistence(error_step)
+        self.thinking_steps.append(decorated_error_step)
 
         # Emit agent_llm_end so the FE LLM chip is closed instead of spinning
         # forever when the LLM errors out without producing a response (#7041).
@@ -2074,9 +2072,34 @@ class EliteACallback(BaseCallbackHandler):
             type=EventTypes.agent_llm_end,
             response_metadata={
                 "tool_run_id": str(run_id),
-                "thinking_steps": [self.thinking_steps[-1]],
+                "thinking_steps": [decorated_error_step],
                 "llm_start_timestamp": self.llm_start_timestamp,
             },
+        )
+
+        # Persist the error thinking step via partial_message so it survives a
+        # page reload and appears in run history, mirroring what on_llm_end does
+        # for successful LLM calls (#7041).
+        msg_event_node = NodeEvent(
+            type=EventTypes.partial_message,
+            stream_id=self.node_interface.stream_id,
+            message_id=self.message_id,
+            response_metadata={
+                "project_id": self.project_id,
+                "chat_project_id": self.chat_project_id,
+                "thread_id": self.thread_id,
+                "thinking_steps": [decorated_error_step],
+                "tool_calls": {},
+                "llm_start_timestamp": self.llm_start_timestamp,
+                "additional_response_meta": {},
+                "invoked_skills": self._applied_skills_for_partial(),
+            },
+            content=None,
+            **self.node_interface.payload_additional_kwargs,
+        ).model_dump_json()
+        msg_event_node = json.loads(msg_event_node)
+        self.node_interface.event_node.emit(
+            EVENTNODE_PARTIAL_RESPONSE_NAME, msg_event_node
         )
 
     #
@@ -2096,6 +2119,9 @@ class EliteACallback(BaseCallbackHandler):
             return
         if self.debug:
             log.debug("on_llm_end(%s, %s)", response, kwargs)
+        # A successful LLM call supersedes any prior error so a recovered run
+        # does not incorrectly propagate the error state (#7041).
+        self.llm_error = None
 
         # The run may have ended before `_compute_stream_delta` ever saw enough
         # chunks to tell cumulative from delta streaming (e.g. a two-chunk

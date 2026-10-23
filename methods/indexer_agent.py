@@ -611,14 +611,17 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 _task_text = user_input if isinstance(user_input, str) else None
                 # Reflect actual outcome: an LLM error in the child means the
                 # invocation chip should show error state in run history (#7041).
-                _chip_finish_reason = (
-                    "error" if elitea_callback.llm_error else "stop"
-                )
+                # Use llm_error only when it is still set — on_llm_end clears it
+                # on a successful LLM call so a recovered run is NOT flagged.
+                _llm_err = elitea_callback.llm_error
+                _chip_finish_reason = "error" if _llm_err else "stop"
+                _chip_error = str(_llm_err) if _llm_err else None
                 elitea_callback.emit_subagent_invocation_chip(
                     task_text=_task_text,
                     response=response,
                     agent_type=version_details.get("agent_type"),
                     finish_reason=_chip_finish_reason,
+                    error=_chip_error,
                 )
 
             # Extract context info (includes summarization details when summarization occurred)
