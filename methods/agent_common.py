@@ -896,7 +896,7 @@ class EliteACallback(BaseCallbackHandler):
             return False
         return self.mcp_auth_pause_payload is not None
 
-    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None):
+    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None, finish_reason="stop"):
         """Emit the PARENT's bare sub-agent invocation chip for a durable child (#4993).
 
         In the sequential (in-process) path the orchestrator runs the sub-agent
@@ -920,6 +920,9 @@ class EliteACallback(BaseCallbackHandler):
         output, messages, name_meaning, …). The in-process path serializes this
         WHOLE dict as the tool_output, so the UI shows the same structured JSON;
         we must do the same here, not just the plain ``output`` string (#4993).
+
+        Pass ``finish_reason="error"`` when the child run ended with an error so
+        run history shows the correct chip state (#7041).
 
         No-op for an ordinary top-level run (``subagent_name`` is None).
         """
@@ -960,7 +963,7 @@ class EliteACallback(BaseCallbackHandler):
             metadata=metadata,
             agent_type=_agent_type,
             tool_output=output_text,
-            finish_reason="stop",
+            finish_reason=finish_reason,
             timestamp_start=now,
             timestamp_finish=now,
         )
@@ -1571,6 +1574,12 @@ class EliteACallback(BaseCallbackHandler):
             return
 
         error_str = "".join(traceback.format_exception(tool_exception))
+        # Human-readable headline: the exception message without the full traceback.
+        # Shown immediately in the live chip so the user sees a readable error
+        # without waiting for the orchestrator's final response (#7041).
+        error_headline = str(tool_exception)
+        if len(error_headline) > 500:
+            error_headline = error_headline[:500] + "..."
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "error"
             self.tool_calls[tool_run_id].error = error_str
@@ -1589,7 +1598,8 @@ class EliteACallback(BaseCallbackHandler):
             )
             self.tool_calls[tool_run_id] = tool_call
 
-        # Include agent_type field (will be None if not applicable)
+        # Include tool_meta and metadata so the FE chip has display info and
+        # parent_agent_name routing identical to a successful tool_end (#7041).
         include_fields = {
             "tool_name",
             "tool_run_id",
@@ -1598,12 +1608,17 @@ class EliteACallback(BaseCallbackHandler):
             "timestamp_start",
             "timestamp_finish",
             "agent_type",
+            "tool_meta",
+            "metadata",
         }
 
         self.node_interface.emit(
             type=EventTypes.agent_tool_error,
-            response_metadata=tool_call.model_dump(include=include_fields),
-            content=error_str,
+            response_metadata={
+                **tool_call.model_dump(include=include_fields),
+                "headline": error_headline,
+            },
+            content=error_headline,
         )
 
     #

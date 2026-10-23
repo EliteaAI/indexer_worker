@@ -609,10 +609,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 and not response.get("hitl_interrupt")
             ):
                 _task_text = user_input if isinstance(user_input, str) else None
+                # Reflect actual outcome: an LLM error in the child means the
+                # invocation chip should show error state in run history (#7041).
+                _chip_finish_reason = (
+                    "error" if elitea_callback.llm_error else "stop"
+                )
                 elitea_callback.emit_subagent_invocation_chip(
                     task_text=_task_text,
                     response=response,
                     agent_type=version_details.get("agent_type"),
+                    finish_reason=_chip_finish_reason,
                 )
 
             # Extract context info (includes summarization details when summarization occurred)
