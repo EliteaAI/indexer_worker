@@ -23,6 +23,9 @@ from langchain_core.messages import HumanMessage
 from pylon.core.tools import log
 from pylon.core.tools import web
 
+from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution_context, rejection_message
+from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
+from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.node_interface import EventTypes
 
@@ -72,7 +75,11 @@ from ..utils.agent_execution_common import (
     apply_parallel_reconcile,
     maybe_emit_next_input_suggestion,
 )
-from ..utils.langfuse_callback import flush_langfuse_callback, langfuse_trace_context
+from ..utils.langfuse_callback import (
+    create_run_audit_callback,
+    flush_langfuse_callback,
+    langfuse_trace_context,
+)
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.input_guardrail import INSPECTED_CONFIG_KEY, audit_blocked, inspected_segments
 from ..utils.funcs import build_input_guardrail_error, build_output_continuation_error, expand_mcp_token_aliases
@@ -131,6 +138,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.debug(f'indexer_agent start stream_id={stream_id}, message_id={message_id}')
         #
         try:
+            enforce_envelope(kwargs)
             # Extract client args - will be used to create EliteAClient after fork
             client_args = kwargs.get("llm", {}).get("kwargs", {})
             api_token = kwargs.get("api_token", client_args.get("api_key", None))
@@ -202,16 +210,21 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         traceparent = tasknode_task.meta.get('traceparent') if tasknode_task.meta else None
 
         # Execute with optional tracing span
-        return with_tracing_span(
-            traceparent,
-            'indexer_agent',
-            stream_id,
-            message_id,
-            str(tasknode_task.meta.get('project_id', '')),
-            self._indexer_agent_task_inner,
-            memory, memory_config, client_args, api_token, api_extra_headers,
-            stream_id=stream_id, message_id=message_id, **kwargs
-        )
+        # The run's one bus node: closed on every exit of the task, whatever the inner body does
+        run_rpc = RunRpcNode()
+        try:
+            return with_tracing_span(
+                traceparent,
+                'indexer_agent',
+                stream_id,
+                message_id,
+                str(tasknode_task.meta.get('project_id', '')),
+                self._indexer_agent_task_inner,
+                memory, memory_config, client_args, api_token, api_extra_headers,
+                stream_id=stream_id, message_id=message_id, run_rpc=run_rpc, **kwargs
+            )
+        finally:
+            run_rpc.close()
 
     @web.method()
     def _indexer_agent_task_inner(
@@ -223,6 +236,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             api_extra_headers,
             stream_id: Optional[str] = None,
             message_id: Optional[str] = None,
+            run_rpc: Optional[RunRpcNode] = None,
             **kwargs,
     ):
         """Inner agent task execution (separated for tracing)."""
@@ -231,12 +245,52 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Setup event node
         local_event_node = setup_event_node(tasknode_task.multiprocessing_context)
+        # One bus node per governed run, shared by validate and release; started on first use (a legacy run makes none).
+        # The caller owns it and closes it on every exit; the closes below only keep the order before the event node stops.
+        run_rpc = run_rpc if run_rpc is not None else RunRpcNode()
+        run_rpc.bind(local_event_node)
+
+        # #6756: a governed run is validated with Main before any LLM or tool work (legacy: no-op)
+        try:
+            context_view = enforce_execution_context(
+                kwargs, local_event_node, task_name="indexer_agent",
+                project_id=tasknode_task.meta.get("project_id"), rpc=run_rpc,
+            )
+        except ContextRejected as rejected:
+            # Readable {reason_code, message} to the user instead of a generic task failure
+            node_interface = None
+            try:
+                node_interface = create_node_interface(
+                    local_event_node, stream_id, message_id, tasknode_task.meta,
+                    execution_generation=kwargs.get('execution_generation'),
+                )
+                result = execution_error(
+                    node_interface, kwargs.get("user_input"), kwargs.get("chat_history", []),
+                    f"ContextRejected: {rejected.reason_code}",
+                    ensure_thread_id(kwargs.get("thread_id"), kwargs.get("conversation_id")),
+                    message_id, tasknode_task.meta,
+                    human_readable=rejection_message(rejected.reason_code),
+                )
+                result["reason_code"] = rejected.reason_code
+                return result
+            finally:
+                if node_interface is not None:
+                    node_interface.flush()
+                run_rpc.close()
+                if tasknode_task.multiprocessing_context == "fork":
+                    local_event_node.stop()
 
         # Create EliteAClient AFTER fork
         client = create_elitea_client(client_args, api_token, api_extra_headers)
         install_routing_context_signer(client, local_event_node, kwargs.get("routing_principal"))
         # #6913: pre-expanded sub-agents from pylon_main; the SDK falls back to PATCH on a miss
         client.prefetched_version_details = (kwargs.get("application") or {}).get("subagent_version_details") or {}
+        # #6946: a governed run resolves its credential slots through Main; a legacy client is untouched
+        credential_resolver = attach_credential_resolver(
+            client, context_view, kwargs, local_event_node,
+            task_name="indexer_agent", project_id=tasknode_task.meta.get("project_id"),
+            rpc=run_rpc,
+        )
 
         should_continue = kwargs.get('should_continue', False)
         hitl_resume = kwargs.get('hitl_resume', False)
@@ -343,7 +397,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             mcp_tokens = expand_mcp_token_aliases(raw_mcp_tokens)
 
             # Resolve {{secret.xxx}} placeholders in MCP tool settings before passing to SDK
-            if version_details and isinstance(version_details.get("tools"), list):
+            # A governed run has nothing to resolve here: free-form secrets are refused upstream (#6946)
+            if credential_resolver is None and version_details and isinstance(version_details.get("tools"), list):
                 version_details["tools"] = unsecret_mcp_tools(version_details["tools"], client)
 
             # Create application agent
@@ -440,6 +495,11 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             callbacks = [elitea_callback, elitea_custom_callback]
             if langfuse_callback:
                 callbacks.append(langfuse_callback)
+
+            # Audit trail does not depend on Langfuse (#6945).
+            run_audit_callback = create_run_audit_callback(tasknode_task.meta)
+            if run_audit_callback:
+                callbacks.append(run_audit_callback)
 
             # Tool usage rows (#6572): gated by usage.mode only, so they are written
             # with tracing disabled.
@@ -756,6 +816,19 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 elitea_callback=elitea_callback,
             )
         except Exception as e:
+            # #6946: a governed credential slot that could not be resolved ends the run readably
+            governed_code = governed_credential_code(e)
+            if governed_code:
+                result = execution_error(
+                    node_interface, user_input, chat_history,
+                    f"GovernedCredentialError: {governed_code}",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=rejection_message(governed_code),
+                    execution_start_time=execution_start_time,
+                    elitea_callback=elitea_callback,
+                )
+                result["reason_code"] = governed_code
+                return result
             # An input-guardrail block (#6886) is a policy outcome: no stacktrace pin,
             # and nothing in the error echoes the input it stopped
             input_guardrail = build_input_guardrail_error(e)
@@ -872,6 +945,10 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # Flush Langfuse traces
             flush_langfuse_callback(langfuse_client, langfuse_callback)
+
+            if credential_resolver is not None:
+                credential_resolver.close()
+            run_rpc.close()
 
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
