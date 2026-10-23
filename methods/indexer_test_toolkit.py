@@ -30,6 +30,7 @@ from tools import worker_core  # pylint: disable=E0401
 
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired, extract_user_friendly_mcp_error
 
+from ..utils.envelope_guard import enforce_envelope
 from ..utils.funcs import (
     normalize_mcp_auth_metadata_urls,
     backfill_mcp_auth_metadata,
@@ -512,6 +513,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.debug(f'indexer_test_toolkit_tool start stream_id={stream_id}, message_id={message_id}')
         #
         try:
+            enforce_envelope(kwargs)
             return self._indexer_test_toolkit_tool_task(
                 *args,
                 stream_id=stream_id,
@@ -934,6 +936,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         log.debug(f'indexer_test_mcp_connection start stream_id={stream_id}, message_id={message_id}')
         #
         try:
+            enforce_envelope(kwargs)
             return self._indexer_test_mcp_connection_task(
                 *args,
                 stream_id=stream_id,
