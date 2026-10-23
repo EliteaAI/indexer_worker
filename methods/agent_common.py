@@ -2119,9 +2119,6 @@ class EliteACallback(BaseCallbackHandler):
             return
         if self.debug:
             log.debug("on_llm_end(%s, %s)", response, kwargs)
-        # A successful LLM call supersedes any prior error so a recovered run
-        # does not incorrectly propagate the error state (#7041).
-        self.llm_error = None
 
         # The run may have ended before `_compute_stream_delta` ever saw enough
         # chunks to tell cumulative from delta streaming (e.g. a two-chunk

@@ -18,7 +18,7 @@
 """ Method for Application Agent """
 from copy import deepcopy
 from typing import Any, Dict, Optional
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from pylon.core.tools import log
 from pylon.core.tools import web
@@ -609,13 +609,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 and not response.get("hitl_interrupt")
             ):
                 _task_text = user_input if isinstance(user_input, str) else None
-                # Reflect actual outcome: an LLM error in the child means the
-                # invocation chip should show error state in run history (#7041).
-                # Use llm_error only when it is still set — on_llm_end clears it
-                # on a successful LLM call so a recovered run is NOT flagged.
-                _llm_err = elitea_callback.llm_error
-                _chip_finish_reason = "error" if _llm_err else "stop"
-                _chip_error = str(_llm_err) if _llm_err else None
+                # Detect terminal LLM error from the response messages, using
+                # the same scan as _raise_if_llm_node_error in application.py
+                # (#7041). This is more reliable than elitea_callback.llm_error,
+                # which never clears and would falsely flag a recovered run.
+                _llm_node_error_msg = None
+                for _m in reversed(response.get('messages', [])):
+                    if isinstance(_m, HumanMessage):
+                        break
+                    if isinstance(_m, BaseMessage):
+                        if getattr(_m, 'response_metadata', {}).get('llm_node_error'):
+                            _llm_node_error_msg = _m.content
+                        break
+                _chip_finish_reason = "error" if _llm_node_error_msg else "stop"
+                _chip_error = str(_llm_node_error_msg) if _llm_node_error_msg else None
                 elitea_callback.emit_subagent_invocation_chip(
                     task_text=_task_text,
                     response=response,
