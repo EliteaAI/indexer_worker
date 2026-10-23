@@ -896,7 +896,7 @@ class EliteACallback(BaseCallbackHandler):
             return False
         return self.mcp_auth_pause_payload is not None
 
-    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None):
+    def emit_subagent_invocation_chip(self, task_text, response, agent_type=None, finish_reason="stop", error=None):
         """Emit the PARENT's bare sub-agent invocation chip for a durable child (#4993).
 
         In the sequential (in-process) path the orchestrator runs the sub-agent
@@ -920,6 +920,9 @@ class EliteACallback(BaseCallbackHandler):
         output, messages, name_meaning, …). The in-process path serializes this
         WHOLE dict as the tool_output, so the UI shows the same structured JSON;
         we must do the same here, not just the plain ``output`` string (#4993).
+
+        Pass ``finish_reason="error"`` when the child run ended with an error so
+        run history shows the correct chip state (#7041).
 
         No-op for an ordinary top-level run (``subagent_name`` is None).
         """
@@ -960,7 +963,8 @@ class EliteACallback(BaseCallbackHandler):
             metadata=metadata,
             agent_type=_agent_type,
             tool_output=output_text,
-            finish_reason="stop",
+            finish_reason=finish_reason,
+            error=error,
             timestamp_start=now,
             timestamp_finish=now,
         )
@@ -1571,6 +1575,13 @@ class EliteACallback(BaseCallbackHandler):
             return
 
         error_str = "".join(traceback.format_exception(tool_exception))
+        # Human-readable headline: the exception message without the full traceback.
+        # Shown immediately in the live chip so the user sees a readable error
+        # without waiting for the orchestrator's final response (#7041).
+        # Fallback to the class name for exceptions with empty messages (e.g. KeyError()).
+        error_headline = str(tool_exception) or type(tool_exception).__name__
+        if len(error_headline) > 500:
+            error_headline = error_headline[:500] + "..."
         if tool_run_id in self.tool_calls:
             self.tool_calls[tool_run_id].finish_reason = "error"
             self.tool_calls[tool_run_id].error = error_str
@@ -1589,7 +1600,8 @@ class EliteACallback(BaseCallbackHandler):
             )
             self.tool_calls[tool_run_id] = tool_call
 
-        # Include agent_type field (will be None if not applicable)
+        # Include tool_meta and metadata so the FE chip has display info and
+        # parent_agent_name routing identical to a successful tool_end (#7041).
         include_fields = {
             "tool_name",
             "tool_run_id",
@@ -1598,12 +1610,14 @@ class EliteACallback(BaseCallbackHandler):
             "timestamp_start",
             "timestamp_finish",
             "agent_type",
+            "tool_meta",
+            "metadata",
         }
 
         self.node_interface.emit(
             type=EventTypes.agent_tool_error,
             response_metadata=tool_call.model_dump(include=include_fields),
-            content=error_str,
+            content=error_headline,
         )
 
     #
@@ -2002,6 +2016,11 @@ class EliteACallback(BaseCallbackHandler):
         if pending:
             self.token_source_counts["estimate"] += 1
             add_model_usage(self.usage_by_model, pending.get("model_name"), None, pending, None)
+        # Save lineage metadata before pop so the error thinking step carries them.
+        llm_timestamp_start = pending.get("timestamp_start")
+        langgraph_node = pending.get("langgraph_node")
+        parent_agent_name = pending.get("parent_agent_name")
+        hierarchy_metadata = pending.get("hierarchy_metadata", {})
         self.pending_llm_requests.pop(run_id, None)
         #
         if args:
@@ -2021,15 +2040,66 @@ class EliteACallback(BaseCallbackHandler):
             self.llm_error.budget_error_code = budget_code
         else:
             self.llm_error = InternalSDKError("Unknown LLM error occurred")
+
+        # Build a synthetic error thinking step so the FE chip shows the error
+        # message as its content instead of "No input, no output" (#7041).
+        now = datetime.now(tz=timezone.utc).isoformat()
+        error_text = str(self.llm_error)
+        error_step: dict = {
+            "text": error_text,
+            "tool_run_id": str(run_id),
+            "timestamp_start": llm_timestamp_start or now,
+            "timestamp_finish": now,
+            "message": {
+                "response_metadata": {
+                    "tool_name": langgraph_node or "Thinking step",
+                },
+            },
+        }
+        if parent_agent_name:
+            error_step["parent_agent_name"] = parent_agent_name
+        elif self.subagent_name:
+            error_step["parent_agent_name"] = self.subagent_name
+        for key, value in hierarchy_metadata.items():
+            if value is not None:
+                error_step[key] = value
+        decorated_error_step = self.node_interface.decorate_thinking_step_for_persistence(error_step)
+        self.thinking_steps.append(decorated_error_step)
+
         # Emit agent_llm_end so the FE LLM chip is closed instead of spinning
         # forever when the LLM errors out without producing a response (#7041).
         self.node_interface.emit(
             type=EventTypes.agent_llm_end,
             response_metadata={
                 "tool_run_id": str(run_id),
-                "thinking_steps": [],
+                "thinking_steps": [decorated_error_step],
                 "llm_start_timestamp": self.llm_start_timestamp,
             },
+        )
+
+        # Persist the error thinking step via partial_message so it survives a
+        # page reload and appears in run history, mirroring what on_llm_end does
+        # for successful LLM calls (#7041).
+        msg_event_node = NodeEvent(
+            type=EventTypes.partial_message,
+            stream_id=self.node_interface.stream_id,
+            message_id=self.message_id,
+            response_metadata={
+                "project_id": self.project_id,
+                "chat_project_id": self.chat_project_id,
+                "thread_id": self.thread_id,
+                "thinking_steps": [decorated_error_step],
+                "tool_calls": {},
+                "llm_start_timestamp": self.llm_start_timestamp,
+                "additional_response_meta": {},
+                "invoked_skills": self._applied_skills_for_partial(),
+            },
+            content=None,
+            **self.node_interface.payload_additional_kwargs,
+        ).model_dump_json()
+        msg_event_node = json.loads(msg_event_node)
+        self.node_interface.event_node.emit(
+            EVENTNODE_PARTIAL_RESPONSE_NAME, msg_event_node
         )
 
     #
