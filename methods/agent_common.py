@@ -141,6 +141,7 @@ from ..utils.node_interface import (
 )
 from ..utils.input_guardrail import _audit_key, emit_audit_spans, merge_verdict
 from ..utils.parallel_dispatch_contract import is_fanout_child
+from ..utils.pipeline_trace import HITL_EVENTS, PipelineTraceRecorder
 from ..utils.mcp_auth_tools import backfill_mcp_provided_settings, backfill_mcp_provided_settings_dict
 
 # Event node names
@@ -226,7 +227,16 @@ def build_execution_evidence(
         'chat_history_tokens_input': elitea_callback.tokens_in if tokens_in is None else tokens_in,
         'llm_response_tokens_output': elitea_callback.tokens_out if tokens_out is None else tokens_out,
         'token_source': envelope_token_source(elitea_callback),
+        **pipeline_trace_evidence(elitea_callback),
     }
+
+
+def pipeline_trace_evidence(elitea_callback: Optional['EliteACallback']) -> Dict[str, Any]:
+    """``pipeline_trace`` for a pipeline run (#7015); agents carry no key, so their envelope is unchanged."""
+    recorder = getattr(elitea_callback, 'pipeline_trace', None)
+    if recorder is None:
+        return {}
+    return {'pipeline_trace': json.loads(json.dumps(recorder.snapshot(), default=str))}
 
 
 def build_mcp_auth_pause_result(
@@ -819,6 +829,9 @@ class EliteACallback(BaseCallbackHandler):
         # Set post-construction by indexer_agent (which has the child's
         # version_details in scope); defaults None for an ordinary top-level run.
         self.subagent_agent_type: str = None
+        # Node spans of a pipeline run (#7015), set by indexer_agent for agent_type 'pipeline'.
+        # None for agents, so their envelope carries no pipeline_trace.
+        self.pipeline_trace: Optional[PipelineTraceRecorder] = None
         self.applied_skills: list = []
         self.skills_by_name: dict = {}
         self.thinking_steps: list[dict] = []
@@ -1005,19 +1018,36 @@ class EliteACallback(BaseCallbackHandler):
         """Callback"""
         if self.debug:
             log.debug("on_chain_start(%s, %s)", args, kwargs)
+        if self.pipeline_trace is not None:
+            self.pipeline_trace.on_chain_start(
+                kwargs.get("run_id"), kwargs.get("name"), kwargs.get("metadata"), kwargs.get("tags"),
+            )
 
     def on_chain_end(self, *args, **kwargs):
         """Callback"""
         if self.debug:
             log.debug("on_chain_end(%s, %s)", args, kwargs)
+        if self.pipeline_trace is not None:
+            self.pipeline_trace.on_chain_end(kwargs.get("run_id"))
 
     def on_chain_error(self, *args, **kwargs):
         """Callback"""
         if self.debug:
             log.debug("on_chain_error(%s, %s)", args, kwargs)
+        if self.pipeline_trace is not None:
+            self.pipeline_trace.on_chain_error(kwargs.get("run_id"), args[0] if args else None)
         #
         # exception = args[0]
         # FIXME: should we emit an error here too?
+
+    def on_custom_event(self, name: str, data: Any, *, run_id: UUID, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        """Edge and HITL events of a pipeline node (#7015).
+
+        Recorded here, not in EliteACustomCallback, so the spans don't depend on the
+        node interface: a non-interactive run drops these events before they are emitted.
+        """
+        if self.pipeline_trace is not None:
+            self.pipeline_trace.on_custom_event(name, data, metadata)
 
     #
     # Tool
@@ -2694,6 +2724,11 @@ class EliteACustomCallback(BaseCallbackHandler):
 
         if name == "input_guardrail" and isinstance(data, dict):
             self._record_input_guardrail(data)
+
+        # Pipeline HITL node markers: nothing to emit, the interrupt itself travels as
+        # agent_hitl_interrupt. EliteACallback records them on the node span (#7015).
+        if name in HITL_EVENTS:
+            return
 
         event_key = f"agent_{name}"
         fields = ELITEA_SDK_CUSTOM_EVENTS_MAPPER.get(event_key, set())
