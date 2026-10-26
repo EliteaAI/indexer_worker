@@ -4,7 +4,7 @@ A pipeline's LLM and tool calls already reach ``thinking_steps`` / ``tool_calls_
 which nodes ran, in what order, how long each took and which edge was taken was only sent as
 live custom events, and non-interactive runs (batch evaluation) drop those. This records one
 span per top-level node from LangGraph's chain callbacks, so it works whatever the node
-interface does with the events.
+interface does with the events. Only evaluation runs record it: nothing else reads it.
 
 A node's run is the chain whose ``metadata.langgraph_node`` equals its run name and that
 carries a ``graph:step:N`` tag. Only the outer graph is recorded (no ``|`` in the checkpoint
@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+from .usage_tool_events import ENTITY_KWARGS_KEY, ENTITY_TYPE_EVALUATION
 
 MAX_PIPELINE_SPANS = 500
 MAX_ERROR_CHARS = 500
@@ -169,7 +171,16 @@ class PipelineTraceRecorder:
         return {'spans': spans, 'truncated': self.truncated}
 
 
-def attach_pipeline_trace(callback, version_details: Optional[dict]) -> None:
-    """Start recording node spans on ``callback`` when the run is a pipeline."""
-    if (version_details or {}).get('agent_type') == 'pipeline':
+def is_evaluation_run(kwargs: Optional[dict]) -> bool:
+    """Whether the predict was started by a batch evaluation, which marks its leaf entity (#6677)."""
+    entity = (kwargs or {}).get(ENTITY_KWARGS_KEY)
+    return isinstance(entity, dict) and entity.get('type') == ENTITY_TYPE_EVALUATION
+
+
+def attach_pipeline_trace(callback, version_details: Optional[dict], kwargs: Optional[dict]) -> None:
+    """Start recording node spans on ``callback`` for a pipeline run of a batch evaluation.
+
+    Evaluation is the only reader, so chat, scheduled and webhook runs record nothing and their
+    envelope stays as it was, like an agent's."""
+    if (version_details or {}).get('agent_type') == 'pipeline' and is_evaluation_run(kwargs):
         callback.pipeline_trace = PipelineTraceRecorder(pipeline_node_types(version_details))

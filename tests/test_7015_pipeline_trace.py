@@ -3,7 +3,8 @@
 Batch evaluation runs non-interactively, so the pipeline's edge and node custom events are
 dropped by NoOpNodeEventInterface and its trajectory had only LLM and tool steps. The
 callback now records one span per top-level node from LangGraph's chain callbacks and
-``build_execution_evidence`` returns them as ``pipeline_trace``. Agents carry no such key.
+``build_execution_evidence`` returns them as ``pipeline_trace``. Only evaluation runs record it;
+agents and chat, scheduled or webhook pipeline runs carry no such key.
 
 Also covers the reconcile payload: a parked fan-out parent resumed for reconcile keeps the
 evaluation entity and trigger source, so its spend is not relabelled as a plain app run.
@@ -42,11 +43,15 @@ nodes:
 """
 
 
-def _callback(version_details=None):
+PIPELINE = {'agent_type': 'pipeline', 'instructions': PIPELINE_YAML}
+# What elitea_core's batch evaluation puts on the predict payload (usage_attribution, #6677)
+EVAL_KWARGS = {'_elitea_entity': {'type': 'evaluation', 'id': 42}}
+
+
+def _callback(version_details=None, kwargs=EVAL_KWARGS):
     callback = agent_common.EliteACallback(_NodeInterface())
     pipeline_trace.attach_pipeline_trace(
-        callback, version_details if version_details is not None
-        else {'agent_type': 'pipeline', 'instructions': PIPELINE_YAML},
+        callback, version_details if version_details is not None else PIPELINE, kwargs,
     )
     return callback
 
@@ -72,6 +77,20 @@ def test_node_types_come_from_the_pipeline_yaml_with_sdk_id_cleaning():
     assert types == {'Ask': 'llm', 'Route': 'router', 'Printme': 'printer', 'Review': 'hitl'}
     assert pipeline_trace.pipeline_node_types({'instructions': '- not: [a mapping'}) == {}
     assert pipeline_trace.pipeline_node_types(None) == {}
+
+
+@pytest.mark.parametrize('kwargs', [
+    None,
+    {},
+    {'trigger_source': 'scheduled'},
+    {'_elitea_entity': {'type': 'application', 'id': 7}},
+    {'_elitea_entity': 'evaluation'},
+], ids=['no-kwargs', 'chat', 'scheduled', 'other-entity', 'malformed-entity'])
+def test_pipeline_runs_outside_an_evaluation_record_no_trace(kwargs):
+    callback = _callback(kwargs=kwargs)
+    assert callback.pipeline_trace is None
+    _node(callback, 'Lookup', 1)
+    assert 'pipeline_trace' not in agent_common.build_execution_evidence(callback)
 
 
 def test_agents_carry_no_pipeline_trace():

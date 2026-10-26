@@ -459,8 +459,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             )
             # Names the agent on the input-guardrail audit rows (#6886)
             elitea_custom_callback.audit_entity = entity_from_application(kwargs.get('application'))
-            # Node spans for the result envelope; batch evaluation reads them (#7015)
-            attach_pipeline_trace(elitea_callback, version_details)
+            # Node spans for the result envelope of an evaluation run, their only reader (#7015)
+            attach_pipeline_trace(elitea_callback, version_details, kwargs)
 
             # Stop and HITL pause end a run with no terminal event; partial saves
             # are the only chance to persist which skills applied.
