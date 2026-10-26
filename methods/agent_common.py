@@ -236,7 +236,7 @@ def pipeline_trace_evidence(elitea_callback: Optional['EliteACallback']) -> Dict
     recorder = getattr(elitea_callback, 'pipeline_trace', None)
     if recorder is None:
         return {}
-    return {'pipeline_trace': json.loads(json.dumps(recorder.snapshot(), default=str))}
+    return {'pipeline_trace': recorder.snapshot()}
 
 
 def build_mcp_auth_pause_result(
@@ -1021,6 +1021,7 @@ class EliteACallback(BaseCallbackHandler):
         if self.pipeline_trace is not None:
             self.pipeline_trace.on_chain_start(
                 kwargs.get("run_id"), kwargs.get("name"), kwargs.get("metadata"), kwargs.get("tags"),
+                parent_run_id=kwargs.get("parent_run_id"),
             )
 
     def on_chain_end(self, *args, **kwargs):
