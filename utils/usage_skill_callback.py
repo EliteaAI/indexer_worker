@@ -133,8 +133,7 @@ class UsageSkillCallback(BaseCallbackHandler):
         return attribution.get("entity_name") if is_child else None
 
 
-def disclosed_skills(kwargs):
-    """Attached (agent and participant) skills, then the project catalog; an attached name shadows a project copy."""
+def collect_disclosed_skills(kwargs):
     attached = [s for s in kwargs.get("attached_skills") or [] if isinstance(s, dict) and s.get("name")]
     taken = {s["name"].strip().lower() for s in attached}
     project = [

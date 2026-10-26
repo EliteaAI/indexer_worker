@@ -24,23 +24,23 @@ PROJECT = [
 
 
 def test_attached_skills_come_first_and_shadow_a_project_copy():
-    names = [s["name"] for s in callback_module.disclosed_skills({"attached_skills": ATTACHED, "project_skills": PROJECT})]
+    names = [s["name"] for s in callback_module.collect_disclosed_skills({"attached_skills": ATTACHED, "project_skills": PROJECT})]
 
     assert names == ["Reviewer", "pdf-report", "release-notes"]
 
 
 def test_project_skills_alone_are_disclosed():
-    assert callback_module.disclosed_skills({"project_skills": PROJECT[:1]}) == PROJECT[:1]
+    assert callback_module.collect_disclosed_skills({"project_skills": PROJECT[:1]}) == PROJECT[:1]
 
 
 def test_missing_lists_disclose_nothing():
-    assert callback_module.disclosed_skills({}) == []
-    assert callback_module.disclosed_skills({"attached_skills": None, "project_skills": None}) == []
+    assert callback_module.collect_disclosed_skills({}) == []
+    assert callback_module.collect_disclosed_skills({"attached_skills": None, "project_skills": None}) == []
 
 
 def test_a_project_skill_identity_keeps_its_project_and_version():
     identities = callback_module.skill_identities(
-        callback_module.disclosed_skills({"attached_skills": ATTACHED, "project_skills": PROJECT})
+        callback_module.collect_disclosed_skills({"attached_skills": ATTACHED, "project_skills": PROJECT})
     )
 
     assert identities["release-notes"] == {"skill_id": 10, "skill_version_id": 100, "skill_project_id": 7}
@@ -67,8 +67,8 @@ def test_both_agent_entry_points_forward_project_skills_and_register_them(path):
         line.startswith("invoke_config['configurable']['project_skills'] = kwargs.get('project_skills')")
         for line in assignments
     )
-    assert source.count("for s in disclosed_skills(kwargs)") == 1
-    assert source.count("attached_skills=disclosed_skills(kwargs)") == 1
+    assert source.count("for s in collect_disclosed_skills(kwargs)") == 1
+    assert source.count("attached_skills=collect_disclosed_skills(kwargs)") == 1
     assert "for s in (kwargs.get('attached_skills') or [])" not in source
 
 
@@ -85,5 +85,5 @@ def test_the_reconcile_payload_carries_project_skills():
 def test_the_usage_skill_callback_is_built_over_the_disclosed_skills():
     function = _function("utils/agent_execution_common.py", "create_usage_skill_callback")
 
-    assert "disclosed_skills(kwargs)" in ast.unparse(function)
+    assert "collect_disclosed_skills(kwargs)" in ast.unparse(function)
     assert "kwargs.get('attached_skills')" not in ast.unparse(function)

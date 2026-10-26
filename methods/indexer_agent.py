@@ -88,7 +88,7 @@ from ..utils.usage_tool_events import (
     ATTRIBUTION_HEADER, attribution_header, attribution_signing_key, entity_from_application,
 )
 from ..utils import parallel_hitl_router, predict_router
-from ..utils.usage_skill_callback import disclosed_skills
+from ..utils.usage_skill_callback import collect_disclosed_skills
 from ..utils.mcp_auth_tools import (
     _has_mcp_toolkits,
     _build_mcp_server_alias_map,
@@ -471,7 +471,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             elitea_callback.applied_skills = applied_skills
             elitea_callback.skills_by_name = {
                 (s.get('name') or '').strip().lower(): s
-                for s in disclosed_skills(kwargs)
+                for s in collect_disclosed_skills(kwargs)
             }
 
             # Durable fan-out child (#4993 Track 2): give the callback this child's
@@ -719,7 +719,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 image_thumbnails=image_thumbnails,
                 context_info=context_info,
                 applied_skills=applied_skills,
-                attached_skills=disclosed_skills(kwargs),
+                attached_skills=collect_disclosed_skills(kwargs),
                 parallel_reconcile=parallel_reconcile,
             )
 

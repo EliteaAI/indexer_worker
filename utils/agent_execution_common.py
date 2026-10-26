@@ -62,7 +62,7 @@ from .parallel_dispatch_contract import (
     normalize_hitl_pause,
     split_mcp_auth_interrupts,
 )
-from .usage_skill_callback import UsageSkillCallback, disclosed_skills, subagent_skill_registries
+from .usage_skill_callback import UsageSkillCallback, collect_disclosed_skills, subagent_skill_registries
 from .usage_skill_events import fresh_dispatch_mentions
 from .usage_tool_callback import UsageToolCallback
 from .usage_tool_events import (
@@ -616,7 +616,7 @@ def create_usage_skill_callback(
         return None
     return UsageSkillCallback(
         build_attribution(kwargs, task_meta, task_id),
-        disclosed_skills(kwargs),
+        collect_disclosed_skills(kwargs),
         subagent_skill_registries(kwargs.get('application')),
         fresh_dispatch_mentions(kwargs),
     )
