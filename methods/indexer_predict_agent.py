@@ -27,6 +27,7 @@ from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution
 from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
+from ..utils.pipeline_trace import attach_pipeline_trace
 from ..utils.node_interface import EventTypes
 
 # Import shared components
@@ -456,6 +457,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             )
             # Names the agent on the input-guardrail audit rows (#6886)
             elitea_custom_callback.audit_entity = entity_from_application(kwargs.get('application'))
+            # Node spans for the result envelope of an evaluation run, their only reader (#7015)
+            attach_pipeline_trace(elitea_callback, application_data.get('version_details'), kwargs)
 
             # Stop and HITL pause end a run with no terminal event; partial saves
             # are the only chance to persist which skills applied.

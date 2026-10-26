@@ -69,7 +69,9 @@ from .usage_tool_events import (
     build_attribution,
     enabled as usage_enabled,
     entity_from_application,
+    ENTITY_KWARGS_KEY,
     ROOT_ENTITY_KWARGS_KEY,
+    TRIGGER_SOURCE_KWARGS_KEY,
 )
 
 from ..methods.agent_common import (
@@ -1578,6 +1580,10 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'applied_skills',
         PREDICT_RUN_ID_KWARGS_KEY,
         ROOT_ENTITY_KWARGS_KEY,
+        # The resumed parent's spend stays labelled as the evaluation (or schedule)
+        # that launched it, not as a plain application run (#7015)
+        ENTITY_KWARGS_KEY,
+        TRIGGER_SOURCE_KWARGS_KEY,
         # Re-dispatch keeps the parent's envelope, never one re-derived from the current flag (#6940)
         ENVELOPE_KEY,
     )
