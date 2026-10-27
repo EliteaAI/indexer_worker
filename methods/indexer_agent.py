@@ -83,7 +83,7 @@ from ..utils.langfuse_callback import (
 )
 from ..utils.image_helpers import resolve_filepath_images, resolve_generated_image_thumbnails
 from ..utils.input_guardrail import INSPECTED_CONFIG_KEY, audit_blocked, inspected_segments
-from ..utils.funcs import build_input_guardrail_error, build_output_continuation_error, expand_mcp_token_aliases
+from ..utils.funcs import STATE_CONFLICT_MESSAGE, build_input_guardrail_error, is_state_conflict_error, build_output_continuation_error, expand_mcp_token_aliases
 from ..utils.parallel_dispatch_contract import has_mcp_auth_interrupt, normalize_hitl_pause
 from ..utils.usage_tool_events import (
     ATTRIBUTION_HEADER, attribution_header, attribution_signing_key, entity_from_application,
@@ -796,7 +796,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time,
                 elitea_callback=elitea_callback,
             )
-        except ValueError:
+        except ValueError as e:
+            if is_state_conflict_error(e):
+                return execution_error(
+                    node_interface, user_input, chat_history,
+                    f"Conversation state conflict on user input: {user_input}: {e}",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=STATE_CONFLICT_MESSAGE,
+                    execution_start_time=execution_start_time,
+                    elitea_callback=elitea_callback,
+                )
             return execution_error(
                 node_interface, user_input, chat_history,
                 f"Seems like your agent is missconfigured on user input: {user_input}",

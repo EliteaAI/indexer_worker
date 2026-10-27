@@ -28,6 +28,7 @@ from ..utils.credential_resolver import attach_credential_resolver, governed_cre
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.pipeline_trace import attach_pipeline_trace
+from ..utils.funcs import STATE_CONFLICT_MESSAGE, is_state_conflict_error
 from ..utils.node_interface import EventTypes
 
 # Import shared components
@@ -727,7 +728,16 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 execution_start_time=execution_start_time,
                 elitea_callback=elitea_callback,
             )
-        except ValueError:
+        except ValueError as e:
+            if is_state_conflict_error(e):
+                return execution_error(
+                    node_interface, user_input, chat_history,
+                    f"Conversation state conflict on user input: {user_input}: {e}",
+                    thread_id, message_id, tasknode_task.meta,
+                    human_readable=STATE_CONFLICT_MESSAGE,
+                    execution_start_time=execution_start_time,
+                    elitea_callback=elitea_callback,
+                )
             return execution_error(
                 node_interface, user_input, chat_history,
                 f"Seems like your predict agent is missconfigured on user input: {user_input}",

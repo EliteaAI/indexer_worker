@@ -741,6 +741,16 @@ def is_mcp_authorization_required_error(exc: Exception) -> bool:
     return _is_mcp_authorization_required_error(exc)
 
 
+# Raised by langgraph's add_messages when another run rewrote the thread mid-turn
+_STATE_CONFLICT_PREFIX = "Attempting to delete a message with an ID that doesn't exist"
+STATE_CONFLICT_MESSAGE = "This run was interrupted by a conflicting update to the conversation. Please retry."
+
+
+def is_state_conflict_error(exc: Exception) -> bool:
+    """True for a LangGraph state-reducer conflict, which is not a configuration error."""
+    return isinstance(exc, ValueError) and str(exc).startswith(_STATE_CONFLICT_PREFIX)
+
+
 # Scope codes the LLM proxy sets on a budget rejection; the UI maps them to its own
 # wording and usage links
 BUDGET_ERROR_CODES = ("project_budget_exceeded", "member_budget_exceeded")
