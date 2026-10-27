@@ -73,7 +73,7 @@ SYSTEM_USER_ID = 0
 
 #: How a run was started; NULL/absent means unknown, so only listed sources are stamped (#6881, EL-7011)
 TRIGGER_SOURCE_KWARGS_KEY = "trigger_source"
-AUTOMATED_TRIGGER_SOURCES = ("chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "index")
+STAMPED_TRIGGER_SOURCES = ("chat", "api", "mcp", "webhook", "scheduled", "schedule_manual", "index")
 
 # `or` not a get() default: the var is present-but-empty in some deployments.
 _SCHEMA = os.environ.get("POSTGRES_SCHEMA") or "centry"
@@ -228,7 +228,7 @@ def run_attribution(kwargs):
         "root_entity_id": root.get("id"),
         "root_entity_version_id": root.get("version_id"),
         "root_entity_project_id": root.get("project_id"),
-        "trigger_source": trigger_source if trigger_source in AUTOMATED_TRIGGER_SOURCES else None,
+        "trigger_source": trigger_source if trigger_source in STAMPED_TRIGGER_SOURCES else None,
     }
 
 

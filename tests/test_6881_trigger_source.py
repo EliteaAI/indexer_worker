@@ -77,5 +77,5 @@ def test_tool_row_and_attribution_carry_the_same_source(monkeypatch):
 @pytest.mark.parametrize("source", SIX)
 def test_el_7011_r1_2_tool_row_stamps_each_of_the_six_sources(source):
     # R1.2: the six values, plus index, are the allow-list
-    assert source in module.AUTOMATED_TRIGGER_SOURCES
+    assert source in module.STAMPED_TRIGGER_SOURCES
     assert module.run_attribution({**APP, "trigger_source": source})["trigger_source"] == source
