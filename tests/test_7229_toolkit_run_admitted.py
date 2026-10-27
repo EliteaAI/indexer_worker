@@ -18,13 +18,25 @@ def test_the_run_token_is_taken_before_the_envelope_and_given_back_when_the_task
     assert "finally:\n            end_run_token(run_token)" in WRAPPER
 
 
-def test_an_admitted_run_is_validated_before_any_tool_work_and_refused_readably():
+def test_a_governed_run_is_validated_before_any_tool_work_and_refused_readably():
     validate = TASK.index("enforce_execution_context(")
-    assert TASK.index("if read_envelope(kwargs).context_ref:") < validate < TASK.index("client.test_toolkit_tool(")
+    gate = TASK.index("if not (unadmitted and not read_envelope(kwargs).context_ref):")
+    assert TASK.index("unadmitted = kwargs.pop(UNADMITTED_KWARG, False) is True") < gate < validate \
+        < TASK.index("client.test_toolkit_tool(")
     assert 'task_name="indexer_test_toolkit_tool"' in TASK[validate:validate + 200]
     refused = TASK[TASK.index("except ContextRejected as rejected:"):]
-    assert "rejection_message(rejected.reason_code)" in refused[:600]
-    assert 'result["reason_code"] = rejected.reason_code' in refused[:900]
+    refused = refused[:refused.index("return result")]
+    # emitted before the forked node stops (events sent after it are dropped), as a refusal, not a traceback
+    assert refused.index("test_error(") < refused.index("run_rpc.close()") < refused.index("local_event_node.stop()")
+    assert "refusal_code=rejected.reason_code" in refused
+
+
+def test_a_refusal_is_the_readable_code_and_text_with_no_trace():
+    body = SOURCE[SOURCE.index("def test_error("):SOURCE.index("def check_missing_index_data_status_event(")]
+    assert 'json.dumps({"code": refusal_code, "error": error_message})' in body
+    assert "if not budget_error_code and not refusal_code:" in body   # no synthetic traceback tool call
+    assert "result['reason_code'] = refusal_code" in body
+    assert "refusal_code=governed_code" in TASK
 
 
 def test_the_client_gets_the_run_token_and_the_trusted_resolver_and_both_are_closed():
@@ -39,4 +51,5 @@ def test_the_client_gets_the_run_token_and_the_trusted_resolver_and_both_are_clo
 
 def test_a_governed_credential_refusal_reads_as_its_reason():
     assert "error_msg = rejection_message(governed_code)" in TASK
+    assert "UNADMITTED_KWARG = 'c1009_unadmitted_read'" in SOURCE
     assert context_guard.rejection_message("NO_SUCH_CODE") == context_guard.DEFAULT_REJECTION_MESSAGE

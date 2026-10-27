@@ -62,6 +62,9 @@ from ..utils.usage_tool_events import (
 )
 
 INDEX_TOOL_NAME = 'index_data'
+# Set by Main on the governed dispatch it did not admit (the platform's attachment read, proven to carry no credential);
+# it never takes the key from a caller. Twin of elitea_core utils/admission.py UNADMITTED_KWARG
+UNADMITTED_KWARG = 'c1009_unadmitted_read'
 
 def build_mcp_auth_metadata(
     exception: 'McpAuthorizationRequired',
@@ -226,15 +229,22 @@ def test_error(
         node_interface: NodeEventInterface, toolkit_config: dict, tool_name: str,
         error_message: str, message_id: str, tasknode_task_meta: dict,
         execution_generation: Optional[str] = None,
-        budget_error_code: Optional[str] = None
+        budget_error_code: Optional[str] = None,
+        refusal_code: Optional[str] = None,
 ) -> dict:
     """Handle test execution errors with proper event emission
 
     budget_error_code carries the budget scope that blocked the call, so the UI can show
     its own wording and a usage link instead of the raw provider payload.
+
+    refusal_code (C-1009, #7229): a governed refusal. The message is the readable `{code, error}` the chat renders
+    as its refusal card, and no stack trace is shown or stored: a refusal is not a failure to debug.
     """
     exception_uid = str(uuid4())
     error = str(traceback.format_exc())
+    if refusal_code:
+        error_message = json.dumps({"code": refusal_code, "error": error_message})
+        error = error_message
 
     # Clean toolkit_config to ensure JSON serializability
     clean_toolkit_config = clean_toolkit_config_for_events(
@@ -246,7 +256,7 @@ def test_error(
     # budget block it is noise: the trace is already reachable from the error frame's
     # "Error debugging info" expander, and rendering it as tool output puts a wall of
     # provider internals above the one sentence the user needs.
-    if not budget_error_code:
+    if not budget_error_code and not refusal_code:
         node_interface.emit(
             type=EventTypes.agent_tool_start,
             response_metadata={
@@ -319,12 +329,15 @@ def test_error(
     msg_event_node = json.loads(msg_event_node)
     node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
 
-    return {
+    result = {
         'success': False,
         'error': error_message,
         'toolkit_config': clean_toolkit_config,
         'tool_name': tool_name
     }
+    if refusal_code:
+        result['reason_code'] = refusal_code
+    return result
 
 
 def check_missing_index_data_status_event(
@@ -619,29 +632,6 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 message_id, tasknode_task.meta, execution_generation
             )
 
-        # #7229: an admitted toolkit run (a governed envelope with a context) is validated with Main before any tool
-        # work; its credentials are slots the trusted resolver releases. A governed dispatch Main did not admit (the
-        # platform's attachment read) carries no context and, Main made sure, no credential: it runs as before
-        run_rpc, context_view, credential_resolver = None, None, None
-        if read_envelope(kwargs).context_ref:
-            run_rpc = RunRpcNode()
-            run_rpc.bind(local_event_node)
-            try:
-                context_view = enforce_execution_context(
-                    kwargs, local_event_node, task_name="indexer_test_toolkit_tool",
-                    project_id=tasknode_task.meta.get("project_id"), rpc=run_rpc,
-                )
-            except ContextRejected as rejected:
-                run_rpc.close()
-                if tasknode_task.multiprocessing_context == "fork":
-                    local_event_node.stop()
-                result = test_error(
-                    node_interface, clean_toolkit_config, tool_name, rejection_message(rejected.reason_code),
-                    message_id, tasknode_task.meta, execution_generation,
-                )
-                result["reason_code"] = rejected.reason_code
-                return result
-
         # Resolve MCP credentials from pylon config if toolkit is MCP type and credentials are missing
         from ..utils.funcs import resolve_mcp_credentials
         toolkit_config = resolve_mcp_credentials(toolkit_config)
@@ -650,6 +640,30 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             toolkit_config,
             "Could not serialize toolkit_config after credential resolution"
         )
+
+        # #7229: a governed toolkit run is validated with Main before any tool work (a governed envelope without a
+        # context is refused); its credentials are slots the trusted resolver releases. Only the platform's own
+        # attachment read, which Main marks as not admitted after proving it carries no credential, runs as before
+        run_rpc, context_view, credential_resolver = None, None, None
+        unadmitted = kwargs.pop(UNADMITTED_KWARG, False) is True
+        if not (unadmitted and not read_envelope(kwargs).context_ref):
+            run_rpc = RunRpcNode()
+            run_rpc.bind(local_event_node)
+            try:
+                context_view = enforce_execution_context(
+                    kwargs, local_event_node, task_name="indexer_test_toolkit_tool",
+                    project_id=tasknode_task.meta.get("project_id"), rpc=run_rpc,
+                )
+            except ContextRejected as rejected:
+                # the refusal is emitted first: a forked node drops what is sent after it stopped
+                result = test_error(
+                    node_interface, clean_toolkit_config, tool_name, rejection_message(rejected.reason_code),
+                    message_id, tasknode_task.meta, execution_generation, refusal_code=rejected.reason_code,
+                )
+                run_rpc.close()
+                if tasknode_task.multiprocessing_context == "fork":
+                    local_event_node.stop()
+                return result
 
         try:
             # Create EliteAClient with authentication
@@ -942,14 +956,14 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # For all exceptions (including index_data after emitting event), handle as errors
             error_msg = budget_message or f"Failed to test toolkit tool: {str(e)}"
-            governed_code = governed_credential_code(e)
-            if governed_code and not budget_message:   # a governed credential refusal reads as its reason (#7229)
+            governed_code = None if budget_message else governed_credential_code(e)
+            if governed_code:   # a governed credential refusal reads as its reason (#7229)
                 error_msg = rejection_message(governed_code)
             log.exception("Failed to test toolkit tool: %s", e)
             return test_error(
                 node_interface, clean_toolkit_config, tool_name, error_msg,
                 message_id, tasknode_task.meta, execution_generation,
-                budget_error_code=budget_code,
+                budget_error_code=budget_code, refusal_code=governed_code,
             )
         finally:
             if credential_resolver is not None:
