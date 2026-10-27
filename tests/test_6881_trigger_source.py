@@ -22,7 +22,10 @@ def _decode(header):
     return json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
 
 
-@pytest.mark.parametrize("source", ["scheduled", "webhook", "index"])
+SIX = ["chat", "api", "mcp", "webhook", "scheduled", "schedule_manual"]
+
+
+@pytest.mark.parametrize("source", SIX + ["index"])
 def test_automated_source_is_signed_into_the_header(source):
     decoded = _decode(module.attribution_header({**APP, "trigger_source": source}, project_id=3, key=KEY))
     signature = decoded.pop("sig")
@@ -31,7 +34,7 @@ def test_automated_source_is_signed_into_the_header(source):
     assert signature == module.sign_attribution(decoded, 3, KEY)
 
 
-@pytest.mark.parametrize("source", [None, "", "manual", "cron", 5])
+@pytest.mark.parametrize("source", [None, "", "manual", "cron", 5, "x" * 17])
 def test_manual_or_unknown_source_is_not_stamped(source):
     assert module.run_attribution({**APP, "trigger_source": source})["trigger_source"] is None
     decoded = _decode(module.attribution_header({**APP, "trigger_source": source}, project_id=3, key=KEY))
@@ -69,3 +72,10 @@ def test_tool_row_and_attribution_carry_the_same_source(monkeypatch):
 
     assert captured["trigger_source"] == "scheduled"
     assert captured["user_id"] == 9
+
+
+@pytest.mark.parametrize("source", SIX)
+def test_el_7011_r1_2_tool_row_stamps_each_of_the_six_sources(source):
+    # R1.2: the six values, plus index, are the allow-list
+    assert source in module.STAMPED_TRIGGER_SOURCES
+    assert module.run_attribution({**APP, "trigger_source": source})["trigger_source"] == source
