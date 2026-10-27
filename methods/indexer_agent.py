@@ -574,6 +574,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 ),
             }
             invoke_config['configurable']['invoked_skills'] = kwargs.get('invoked_skills') or []
+            invoke_config['configurable']['capped_skills'] = kwargs.get('capped_skills') or []
             invoke_config['configurable']['attached_skills'] = kwargs.get('attached_skills') or []
             # Segments the platform's input guardrail already inspected this turn (#6886)
             invoke_config['configurable'][INSPECTED_CONFIG_KEY] = inspected_segments(kwargs)
