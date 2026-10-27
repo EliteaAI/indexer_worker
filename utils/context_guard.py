@@ -5,6 +5,7 @@ tool work the worker validates that reference with Main over the worker bus and 
 on any failure. A legacy envelope makes no call at all.
 """
 
+import json
 import threading
 
 from elitea_sdk.runtime.utils.utils import PREDICT_RUN_ID_KWARGS_KEY  # pylint: disable=E0401
@@ -54,6 +55,24 @@ class ContextRejected(EnvelopeRejected):
 
 def rejection_message(reason_code):
     return REJECTION_MESSAGES.get(reason_code, DEFAULT_REJECTION_MESSAGE)
+
+
+# Set by Main on the governed dispatch it did not admit (the platform's attachment read, proven to carry no credential);
+# it never takes the key from a caller. Twin of elitea_core utils/admission.py UNADMITTED_KWARG (#7229)
+UNADMITTED_KWARG = "c1009_unadmitted_read"
+
+
+def takes_unadmitted_read(kwargs) -> bool:
+    """Is this toolkit run the platform's own read that Main did not admit (#7229)? Only when Main marked it and its
+    envelope carries no context: such a run is not validated. The marker is taken out of the kwargs either way, so no
+    tool sees it. Anything else, a governed envelope without a context included, goes to ``enforce_execution_context``."""
+    marked = kwargs.pop(UNADMITTED_KWARG, False) is True
+    return marked and not read_envelope(kwargs).context_ref
+
+
+def refusal_text(reason_code, message=None) -> str:
+    """The readable ``{code, error}`` of a governed refusal, as the chat's refusal card reads it (#7229)."""
+    return json.dumps({"code": reason_code, "error": message or rejection_message(reason_code)})
 
 
 class _Counter:

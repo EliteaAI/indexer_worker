@@ -30,11 +30,12 @@ from tools import worker_core  # pylint: disable=E0401
 
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired, extract_user_friendly_mcp_error
 
-from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution_context, rejection_message
+from ..utils.context_guard import (
+    ContextRejected, RunRpcNode, enforce_execution_context, refusal_text, rejection_message, takes_unadmitted_read,
+)
 from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.internal_run_token import attach_run_token, begin_run_token, end_run_token
-from ..utils.task_envelope import read_envelope
 from ..utils.funcs import (
     normalize_mcp_auth_metadata_urls,
     backfill_mcp_auth_metadata,
@@ -62,9 +63,6 @@ from ..utils.usage_tool_events import (
 )
 
 INDEX_TOOL_NAME = 'index_data'
-# Set by Main on the governed dispatch it did not admit (the platform's attachment read, proven to carry no credential);
-# it never takes the key from a caller. Twin of elitea_core utils/admission.py UNADMITTED_KWARG
-UNADMITTED_KWARG = 'c1009_unadmitted_read'
 
 def build_mcp_auth_metadata(
     exception: 'McpAuthorizationRequired',
@@ -243,7 +241,7 @@ def test_error(
     exception_uid = str(uuid4())
     error = str(traceback.format_exc())
     if refusal_code:
-        error_message = json.dumps({"code": refusal_code, "error": error_message})
+        error_message = refusal_text(refusal_code, error_message)
         error = error_message
 
     # Clean toolkit_config to ensure JSON serializability
@@ -645,8 +643,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         # context is refused); its credentials are slots the trusted resolver releases. Only the platform's own
         # attachment read, which Main marks as not admitted after proving it carries no credential, runs as before
         run_rpc, context_view, credential_resolver = None, None, None
-        unadmitted = kwargs.pop(UNADMITTED_KWARG, False) is True
-        if not (unadmitted and not read_envelope(kwargs).context_ref):
+        if not takes_unadmitted_read(kwargs):
             run_rpc = RunRpcNode()
             run_rpc.bind(local_event_node)
             try:
