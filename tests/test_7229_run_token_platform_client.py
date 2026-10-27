@@ -91,3 +91,38 @@ def test_the_pgvector_warm_up_fires_only_with_a_credential():
 def test_a_refused_sub_agent_fetch_is_explained_readably():
     assert rejection_message("DENIED_DEVELOPMENT_CHILD") == REJECTION_MESSAGES["DENIED_DEVELOPMENT_CHILD"]
     assert "sub-agent" in rejection_message("DENIED_DEVELOPMENT_CHILD")
+
+
+def _langfuse_fetch():
+    """``fetch_langfuse_config`` of methods/agent_common.py, run from its source with ``requests`` recorded."""
+    import ast  # pylint: disable=C0415
+    source = (PLUGIN_ROOT / "methods" / "agent_common.py").read_text()
+    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "fetch_langfuse_config")
+    asked = []
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": []}
+
+    namespace = {"Optional": __import__("typing").Optional, "Dict": dict, "Any": object,
+                 "requests": types.SimpleNamespace(get=lambda url, **kwargs: asked.append(url) or Response()),
+                 "log": types.SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None),
+                 "_unsecret_vault_references": lambda data, client: data}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "agent_common.py", "exec"), namespace)  # pylint: disable=W0122
+    return namespace["fetch_langfuse_config"], asked
+
+
+def test_a_run_on_its_run_token_does_not_ask_for_the_langfuse_credentials():
+    fetch, asked = _langfuse_fetch()
+    governed = Client()
+    governed.base_url, governed.project_id = "http://pylon_main:8080", 1
+    attached(governed)
+    assert fetch(governed) is None and asked == []
+    legacy = Client("pat-value")
+    legacy.base_url, legacy.project_id = "http://pylon_main:8080", 1
+    attached(legacy)   # a client with its own credential asks as before
+    fetch(legacy)
+    assert len(asked) == 1

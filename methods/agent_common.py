@@ -537,6 +537,10 @@ def fetch_langfuse_config(client) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with langfuse config (base_url, public_key, secret_key) or None
     """
+    run_auth = getattr(client, "internal_run_auth", None)
+    if run_auth is not None and getattr(client, "auth_token", None) == run_auth.token:
+        # A governed run's only bearer is its run token, which returns no credential (#7229): not asked, not refused
+        return None
     try:
         # Fetch configurations with type=langfuse and section=credentials
         url = f"{client.base_url}/api/v2/configurations/configurations/{client.project_id}?type=langfuse&section=credentials"
