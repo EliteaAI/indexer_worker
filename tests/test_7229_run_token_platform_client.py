@@ -14,6 +14,12 @@ PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOKEN = "eio1." + "a" * 40 + "." + "b" * 43
 
 
+@pytest.fixture(autouse=True)
+def sdk_with_the_guard(monkeypatch):
+    """The installed SDK keeps the run token out of the sandbox (``is_run_token_bearer``), unless a test says not."""
+    monkeypatch.setitem(irt._SDK_GUARD, "ok", True)  # pylint: disable=W0212
+
+
 class Client:
     """The parts of ``EliteAClient`` the attach reads and writes: the bearer, the session and the request headers."""
 
@@ -162,3 +168,57 @@ def test_the_short_lived_pgvector_client_gets_the_run_token_only_without_a_crede
     finally:
         irt.end_run_token(marker)
     assert irt.platform_bearer(None, {"deployment": "http://pylon_main:8080"}) is None   # no run token: as before
+
+
+class _ModelError(Exception):
+    """What a model client raises for a refused call: the status and Main's body in the text."""
+
+
+@pytest.mark.parametrize("code", ["CONTEXT_NOT_LIVE", "INTERNAL_TOKEN_EXPIRED", "INTERNAL_TOKEN_INVALID"])
+def test_a_platform_call_refused_on_the_run_token_ends_the_run_readably(code):
+    from utils.credential_resolver import governed_credential_code
+    from utils.context_guard import rejection_message
+    error = _ModelError(f"Error code: 403 - {{'error': '{code}', 'message': 'x'}}")
+    wrapped = RuntimeError("agent failed")
+    wrapped.__cause__ = error
+    kwargs = {irt.TOKEN_KWARG: {"token": TOKEN, "origins": ["http://pylon_main:8080"], "identity": "id"}}
+    marker = irt.begin_run_token(kwargs)
+    try:
+        assert governed_credential_code(error) == code and governed_credential_code(wrapped) == code
+        assert rejection_message(code) != rejection_message("SOMETHING_NEW")
+    finally:
+        irt.end_run_token(marker)
+    assert governed_credential_code(error) is None   # a run without a run token: a model error as before
+
+
+def test_without_an_sdk_that_keeps_the_token_out_of_the_sandbox_the_run_token_is_never_the_bearer(monkeypatch):
+    monkeypatch.setitem(irt._SDK_GUARD, "ok", False)  # pylint: disable=W0212
+    client = Client()
+    attached(client)
+    assert client.auth_token is None and "Authorization" not in client.headers
+    assert client.internal_run_auth.token == TOKEN   # the internal MCP still gets it (it never reaches the sandbox)
+
+
+@pytest.mark.parametrize("path", ["methods/indexer_agent.py", "methods/indexer_predict_agent.py"])
+def test_both_agent_tasks_give_the_pgvector_fallback_the_run_bearer(path):
+    text = (PLUGIN_ROOT / path).read_text()
+    call = text[text.index("pgvector_connstr = resolve_pgvector_connstr("):]
+    call = call[:call.index(")", call.index("prefetched="))]
+    assert "platform_bearer(api_token, client_args)" in call and "api_token, api_extra_headers" not in call
+
+
+def test_the_card_names_the_sub_agent_the_sdk_says_was_refused():
+    from utils.credential_resolver import governed_text
+    error = types.SimpleNamespace(subagent="public helper")
+    assert governed_text(error, "PUBLIC_AGENT_NOT_ADMITTED").endswith("(sub-agent “public helper”)")
+    assert governed_text(Exception("x"), "PUBLIC_AGENT_NOT_ADMITTED") == rejection_message("PUBLIC_AGENT_NOT_ADMITTED")
+
+
+def test_a_withheld_langfuse_configuration_is_counted_and_said(monkeypatch):
+    from utils import credential_resolver
+    said = []
+    monkeypatch.setattr(credential_resolver, "_log_info", said.append)
+    before = credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("skip", "TRACING_NOT_RELEASED")
+    credential_resolver.record_tracing_withheld()
+    assert credential_resolver.CREDENTIAL_SLOT_RESOLUTION.total("skip", "TRACING_NOT_RELEASED") == before + 1
+    assert said == ["security_metric name=credential_slot_resolution_total result=skip reason_code=TRACING_NOT_RELEASED"]

@@ -24,7 +24,7 @@ from pylon.core.tools import log
 from pylon.core.tools import web
 
 from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution_context, rejection_message
-from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
+from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code, governed_text
 from ..utils.internal_run_token import attach_run_token, begin_run_token, end_run_token, platform_bearer
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
@@ -858,7 +858,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     node_interface, user_input, chat_history,
                     f"GovernedCredentialError: {governed_code}",
                     thread_id, message_id, tasknode_task.meta,
-                    human_readable=rejection_message(governed_code),
+                    human_readable=governed_text(e, governed_code),
                     execution_start_time=execution_start_time,
                     elitea_callback=elitea_callback,
                 )
