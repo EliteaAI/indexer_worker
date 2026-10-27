@@ -103,9 +103,10 @@ def test_no_synthetic_stacktrace_tool_for_a_budget_block():
     # reachable from the frame's own "Error debugging info" expander.
     handler = _function(TOOLKIT_SOURCE, 'test_error')
     #
-    assert 'if not budget_error_code:' in handler
+    # (a governed refusal, #7229, loses it too)
+    assert 'if not budget_error_code and not refusal_code:' in handler
     #
-    gated = handler.split('if not budget_error_code:')[1]
+    gated = handler.split('if not budget_error_code and not refusal_code:')[1]
     assert 'Toolkit Test Exception' in gated
 
 

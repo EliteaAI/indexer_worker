@@ -30,7 +30,12 @@ from tools import worker_core  # pylint: disable=E0401
 
 from elitea_sdk.runtime.utils.mcp_oauth import McpAuthorizationRequired, extract_user_friendly_mcp_error
 
+from ..utils.context_guard import (
+    ContextRejected, RunRpcNode, enforce_execution_context, refusal_text, rejection_message, takes_unadmitted_read,
+)
+from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
 from ..utils.envelope_guard import enforce_envelope
+from ..utils.internal_run_token import attach_run_token, begin_run_token, end_run_token
 from ..utils.funcs import (
     normalize_mcp_auth_metadata_urls,
     backfill_mcp_auth_metadata,
@@ -222,15 +227,22 @@ def test_error(
         node_interface: NodeEventInterface, toolkit_config: dict, tool_name: str,
         error_message: str, message_id: str, tasknode_task_meta: dict,
         execution_generation: Optional[str] = None,
-        budget_error_code: Optional[str] = None
+        budget_error_code: Optional[str] = None,
+        refusal_code: Optional[str] = None,
 ) -> dict:
     """Handle test execution errors with proper event emission
 
     budget_error_code carries the budget scope that blocked the call, so the UI can show
     its own wording and a usage link instead of the raw provider payload.
+
+    refusal_code (C-1009, #7229): a governed refusal. The message is the readable `{code, error}` the chat renders
+    as its refusal card, and no stack trace is shown or stored: a refusal is not a failure to debug.
     """
     exception_uid = str(uuid4())
     error = str(traceback.format_exc())
+    if refusal_code:
+        error_message = refusal_text(refusal_code, error_message)
+        error = error_message
 
     # Clean toolkit_config to ensure JSON serializability
     clean_toolkit_config = clean_toolkit_config_for_events(
@@ -242,7 +254,7 @@ def test_error(
     # budget block it is noise: the trace is already reachable from the error frame's
     # "Error debugging info" expander, and rendering it as tool output puts a wall of
     # provider internals above the one sentence the user needs.
-    if not budget_error_code:
+    if not budget_error_code and not refusal_code:
         node_interface.emit(
             type=EventTypes.agent_tool_start,
             response_metadata={
@@ -315,12 +327,15 @@ def test_error(
     msg_event_node = json.loads(msg_event_node)
     node_interface.event_node.emit(EVENTNODE_FULL_RESPONSE_NAME, msg_event_node)
 
-    return {
+    result = {
         'success': False,
         'error': error_message,
         'toolkit_config': clean_toolkit_config,
         'tool_name': tool_name
     }
+    if refusal_code:
+        result['reason_code'] = refusal_code
+    return result
 
 
 def check_missing_index_data_status_event(
@@ -511,6 +526,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         self.indexer_enable_logging()
         #
         log.debug(f'indexer_test_toolkit_tool start stream_id={stream_id}, message_id={message_id}')
+        # #7214/#7229: an admitted toolkit run's token, out of the kwargs before anything reads or copies them
+        run_token = begin_run_token(kwargs)
         #
         try:
             enforce_envelope(kwargs)
@@ -523,6 +540,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except:  # pylint: disable=W0702
             log.exception("indexer_test_toolkit_tool failed to start")
             raise
+        finally:
+            end_run_token(run_token)
 
     @web.method()
     def _indexer_test_toolkit_tool_task(  # pylint: disable=R0914,R0915
@@ -620,6 +639,29 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             "Could not serialize toolkit_config after credential resolution"
         )
 
+        # #7229: a governed toolkit run is validated with Main before any tool work (a governed envelope without a
+        # context is refused); its credentials are slots the trusted resolver releases. Only the platform's own
+        # attachment read, which Main marks as not admitted after proving it carries no credential, runs as before
+        run_rpc, context_view, credential_resolver = None, None, None
+        if not takes_unadmitted_read(kwargs):
+            run_rpc = RunRpcNode()
+            run_rpc.bind(local_event_node)
+            try:
+                context_view = enforce_execution_context(
+                    kwargs, local_event_node, task_name="indexer_test_toolkit_tool",
+                    project_id=tasknode_task.meta.get("project_id"), rpc=run_rpc,
+                )
+            except ContextRejected as rejected:
+                # the refusal is emitted first: a forked node drops what is sent after it stopped
+                result = test_error(
+                    node_interface, clean_toolkit_config, tool_name, rejection_message(rejected.reason_code),
+                    message_id, tasknode_task.meta, execution_generation, refusal_code=rejected.reason_code,
+                )
+                run_rpc.close()
+                if tasknode_task.multiprocessing_context == "fork":
+                    local_event_node.stop()
+                return result
+
         try:
             # Create EliteAClient with authentication
             from ..utils.funcs import dev_reload_sdk
@@ -647,6 +689,13 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 session_cookie_name=session_cookie_name,
                 api_extra_headers=api_extra_headers,
                 tool_spend_signer=tool_spend_signer(),
+            )
+            # #7214/#7229: an admitted run's internal Elitea MCP toolkits authenticate with the run token, and its
+            # credential slots are released through Main (a legacy client is untouched)
+            attach_run_token(client)
+            credential_resolver = attach_credential_resolver(
+                client, context_view, kwargs, local_event_node,
+                task_name="indexer_test_toolkit_tool", project_id=tasknode_task.meta.get("project_id"), rpc=run_rpc,
             )
             # Seems like not used
             # Generate persistent tool_run_id for this execution
@@ -904,13 +953,20 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # For all exceptions (including index_data after emitting event), handle as errors
             error_msg = budget_message or f"Failed to test toolkit tool: {str(e)}"
+            governed_code = None if budget_message else governed_credential_code(e)
+            if governed_code:   # a governed credential refusal reads as its reason (#7229)
+                error_msg = rejection_message(governed_code)
             log.exception("Failed to test toolkit tool: %s", e)
             return test_error(
                 node_interface, clean_toolkit_config, tool_name, error_msg,
                 message_id, tasknode_task.meta, execution_generation,
-                budget_error_code=budget_code,
+                budget_error_code=budget_code, refusal_code=governed_code,
             )
         finally:
+            if credential_resolver is not None:
+                credential_resolver.close()
+            if run_rpc is not None:
+                run_rpc.close()
             # Stop event node if forked (following indexer_agent.py pattern)
             if tasknode_task.multiprocessing_context == "fork":
                 local_event_node.stop()
