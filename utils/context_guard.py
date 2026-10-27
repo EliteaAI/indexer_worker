@@ -33,7 +33,8 @@ REJECTION_MESSAGES = {
     "CONTEXT_NOT_LIVE": "This run is no longer admitted: it ended, was revoked or stayed idle too long. Please start it "
                         "again.",
     "INTERNAL_TOKEN_EXPIRED": "This run reached its time limit. Please start it again.",
-    "INTERNAL_TOKEN_INVALID": "This run could not prove who it acts for to the platform. Please start it again.",
+    "INTERNAL_TOKEN_INVALID": "This run asked the platform for something governed runs cannot do yet; the run was "
+                              "stopped.",
     "PUBLIC_AGENT_NOT_ADMITTED": "Agents from another project (public agents) are not available to governed runs yet; "
                                  "the run was not started.",
     # A sub-agent version fetched on the run token that nothing was decided for (#7229, Main's text)

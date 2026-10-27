@@ -113,20 +113,29 @@ def attach_run_token(client):
 _SDK_GUARD = {}
 
 
+def _sdk_has_guard() -> bool:
+    try:
+        from elitea_sdk.runtime.utils.internal_run_auth import is_run_token_bearer  # pylint: disable=C0415,E0401,W0611
+    except Exception:  # pylint: disable=W0703
+        return False
+    return True
+
+
 def sdk_keeps_run_token_in_worker() -> bool:
     """Does the installed SDK keep a run token that is its client's bearer out of the code it hands the sandbox
     (``is_run_token_bearer``, elitea-sdk #7229)? Without it the run token is never made the bearer (the run then has no
     platform identity and fails, rather than hand its bearer to generated code); said once in the log."""
-    if "ok" not in _SDK_GUARD:
-        try:
-            from elitea_sdk.runtime.utils.internal_run_auth import is_run_token_bearer  # pylint: disable=C0415,E0401,W0611
-            _SDK_GUARD["ok"] = True
-        except Exception:  # pylint: disable=W0703
-            _SDK_GUARD["ok"] = False
+    if _SDK_GUARD.get("ok"):
+        return True
+    if not _sdk_has_guard():
+        if not _SDK_GUARD.get("said"):   # asked again next time: a reinstalled SDK is picked up without a restart
+            _SDK_GUARD["said"] = True
             from pylon.core.tools import log  # pylint: disable=C0415,E0401,E0611
             log.error("The installed elitea-sdk cannot keep the run token out of the code sandbox: governed runs get no "
                       "platform identity until the SDK pin with is_run_token_bearer is installed (#7229)")
-    return _SDK_GUARD["ok"]
+        return False
+    _SDK_GUARD["ok"] = True
+    return True
 
 
 def platform_bearer(api_token, client_args):
@@ -140,7 +149,7 @@ def platform_bearer(api_token, client_args):
     base_url = args.get("deployment", args.get("base_url"))
     if auth is None or _has_own_credential(None, args.get("auth_session"), args.get("api_extra_headers")):
         return None
-    return auth.token if _origin_of(base_url) in auth.origins else None
+    return auth.token if _origin_of(base_url) in auth.origins and sdk_keeps_run_token_in_worker() else None
 
 
 # What Main answers a platform call of the run's client on its run token once the run is no longer live (#7229)
@@ -148,16 +157,24 @@ _REFUSAL = re.compile(r"\b(CONTEXT_NOT_LIVE|INTERNAL_TOKEN_EXPIRED|INTERNAL_TOKE
 _MAX_CAUSES = 5
 
 
+def _refusal_status(exc):
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in (401, 403)
+
+
 def run_token_refusal_code(exc):
     """The refusal code of a platform call made on this task's run token (a model call or a tool's platform call that
-    Main refused because the run ended, was revoked or went idle), or None. Only while the task holds a run token; read
-    from the error and its causes (an SDK or model client may wrap it)."""
+    Main refused with 401/403 because the run ended, was revoked or went idle, or because the run token may not use
+    that route), or None. Only while the task holds a run token; read from the HTTP error and its causes (an SDK or
+    model client may wrap it), never from an error that merely mentions a code."""
     if _CURRENT.get() is None:
         return None
     for _ in range(_MAX_CAUSES):
         if exc is None:
             break
-        found = _REFUSAL.search(f"{exc} {getattr(exc, 'body', '')}")
+        found = _REFUSAL.search(f"{exc} {getattr(exc, 'body', '')}") if _refusal_status(exc) else None
         if found:
             return found.group(1)
         exc = exc.__cause__ or exc.__context__

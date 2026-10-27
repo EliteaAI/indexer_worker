@@ -173,6 +173,10 @@ def test_the_short_lived_pgvector_client_gets_the_run_token_only_without_a_crede
 class _ModelError(Exception):
     """What a model client raises for a refused call: the status and Main's body in the text."""
 
+    def __init__(self, text, status_code=403):
+        super().__init__(text)
+        self.status_code = status_code
+
 
 @pytest.mark.parametrize("code", ["CONTEXT_NOT_LIVE", "INTERNAL_TOKEN_EXPIRED", "INTERNAL_TOKEN_INVALID"])
 def test_a_platform_call_refused_on_the_run_token_ends_the_run_readably(code):
@@ -191,12 +195,37 @@ def test_a_platform_call_refused_on_the_run_token_ends_the_run_readably(code):
     assert governed_credential_code(error) is None   # a run without a run token: a model error as before
 
 
+def test_an_error_that_only_mentions_a_code_is_not_a_run_token_refusal():
+    from utils.credential_resolver import governed_credential_code
+    kwargs = {irt.TOKEN_KWARG: {"token": TOKEN, "origins": ["http://pylon_main:8080"], "identity": "id"}}
+    marker = irt.begin_run_token(kwargs)
+    try:
+        echoed = RuntimeError("the tool said: CONTEXT_NOT_LIVE")
+        late = ValueError("unrelated")
+        late.__context__ = RuntimeError("body INTERNAL_TOKEN_INVALID")
+        server = _ModelError("Error code: 500 - {'error': 'CONTEXT_NOT_LIVE'}", status_code=500)
+        assert governed_credential_code(echoed) is None and governed_credential_code(late) is None
+        assert governed_credential_code(server) is None
+    finally:
+        irt.end_run_token(marker)
+
+
 def test_without_an_sdk_that_keeps_the_token_out_of_the_sandbox_the_run_token_is_never_the_bearer(monkeypatch):
     monkeypatch.setitem(irt._SDK_GUARD, "ok", False)  # pylint: disable=W0212
+    monkeypatch.setitem(irt._SDK_GUARD, "said", True)  # pylint: disable=W0212
+    monkeypatch.setattr(irt, "_sdk_has_guard", lambda: False)
     client = Client()
     attached(client)
     assert client.auth_token is None and "Authorization" not in client.headers
     assert client.internal_run_auth.token == TOKEN   # the internal MCP still gets it (it never reaches the sandbox)
+    kwargs = {irt.TOKEN_KWARG: {"token": TOKEN, "origins": ["http://pylon_main:8080"], "identity": "id"}}
+    marker = irt.begin_run_token(kwargs)
+    try:
+        assert irt.platform_bearer(None, {"deployment": "http://pylon_main:8080"}) is None   # no fallback bearer either
+        monkeypatch.setattr(irt, "_sdk_has_guard", lambda: True)   # the pinned SDK installed: picked up, no restart
+        assert irt.platform_bearer(None, {"deployment": "http://pylon_main:8080"}) == TOKEN
+    finally:
+        irt.end_run_token(marker)
 
 
 @pytest.mark.parametrize("path", ["methods/indexer_agent.py", "methods/indexer_predict_agent.py"])
