@@ -25,6 +25,7 @@ from pylon.core.tools import web
 
 from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution_context, rejection_message
 from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
+from ..utils.internal_run_token import attach_run_token, begin_run_token, end_run_token
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.pipeline_trace import attach_pipeline_trace
@@ -143,6 +144,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         #
         log.debug(f'indexer_predict_agent start stream_id={stream_id}, message_id={message_id}')
         #
+        # #7214: the run token leaves the kwargs before anything reads or copies them
+        run_token = begin_run_token(kwargs)
         try:
             enforce_envelope(kwargs)
             # Extract client args - will be used to create EliteAClient after fork
@@ -194,6 +197,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
         except:  # pylint: disable=W0702
             log.exception("indexer_predict_agent failed to start")
             raise
+        finally:
+            end_run_token(run_token)
 
     @web.method()
     def _indexer_predict_agent_task(  # pylint: disable=R0914,R0915
@@ -288,6 +293,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
         # Create EliteAClient AFTER fork
         client = create_elitea_client(client_args, api_token, api_extra_headers)
+        # #7214: a governed run's internal Elitea MCP toolkits authenticate with the run token (legacy: none)
+        attach_run_token(client)
         install_routing_context_signer(client, local_event_node, kwargs.get("routing_principal"))
         # #6913: pre-expanded sub-agents from pylon_main; the SDK falls back to PATCH on a miss
         client.prefetched_version_details = (kwargs.get("application") or {}).get("subagent_version_details") or {}
