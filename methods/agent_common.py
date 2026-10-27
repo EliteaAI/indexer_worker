@@ -540,6 +540,7 @@ def fetch_langfuse_config(client) -> Optional[Dict[str, Any]]:
     run_auth = getattr(client, "internal_run_auth", None)
     if run_auth is not None and getattr(client, "auth_token", None) == run_auth.token:
         # A governed run's only bearer is its run token, which returns no credential (#7229): not asked, not refused
+        log.debug("Langfuse configuration is not read on a governed run's run token")
         return None
     try:
         # Fetch configurations with type=langfuse and section=credentials

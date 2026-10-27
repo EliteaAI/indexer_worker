@@ -17,7 +17,8 @@ TOKEN = "eio1." + "a" * 40 + "." + "b" * 43
 class Client:
     """The parts of ``EliteAClient`` the attach reads and writes: the bearer, the session and the request headers."""
 
-    def __init__(self, auth_token=None, auth_session=None):
+    def __init__(self, auth_token=None, auth_session=None, base_url="http://pylon_main:8080"):
+        self.base_url = base_url
         self.auth_token, self.auth_session = auth_token, (auth_session if not auth_token else None)
         self.headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
         self.headers["X-Project-Id"] = "1"
@@ -118,11 +119,46 @@ def _langfuse_fetch():
 def test_a_run_on_its_run_token_does_not_ask_for_the_langfuse_credentials():
     fetch, asked = _langfuse_fetch()
     governed = Client()
-    governed.base_url, governed.project_id = "http://pylon_main:8080", 1
+    governed.project_id = 1
     attached(governed)
     assert fetch(governed) is None and asked == []
     legacy = Client("pat-value")
-    legacy.base_url, legacy.project_id = "http://pylon_main:8080", 1
+    legacy.project_id = 1
     attached(legacy)   # a client with its own credential asks as before
     fetch(legacy)
     assert len(asked) == 1
+
+
+@pytest.mark.parametrize("base_url", ["https://elsewhere.example", "http://pylon_main:9090", "ftp://pylon_main:8080",
+                                      None])
+def test_the_run_token_is_never_the_bearer_of_a_client_for_another_origin(base_url):
+    client = Client(base_url=base_url)
+    attached(client)
+    assert client.auth_token is None and "Authorization" not in client.headers
+
+
+def test_a_base_url_with_a_path_prefix_on_the_tokens_origin_takes_it():
+    client = Client(base_url="http://pylon_main:8080/elitea")
+    attached(client)
+    assert client.auth_token == TOKEN
+
+
+def test_an_authorization_header_the_client_already_has_is_kept():
+    client = Client()
+    client.headers["authorization"] = "Bearer caller-value"
+    attached(client)
+    assert client.auth_token is None and client.headers["authorization"] == "Bearer caller-value"
+    assert "Authorization" not in client.headers
+
+
+def test_the_short_lived_pgvector_client_gets_the_run_token_only_without_a_credential():
+    kwargs = {irt.TOKEN_KWARG: {"token": TOKEN, "origins": ["http://pylon_main:8080"], "identity": "id"}}
+    marker = irt.begin_run_token(kwargs)
+    try:
+        assert irt.platform_bearer(None, {"deployment": "http://pylon_main:8080"}) == TOKEN
+        assert irt.platform_bearer("pat-value", {"deployment": "http://pylon_main:8080"}) == "pat-value"
+        assert irt.platform_bearer(None, {"deployment": "http://pylon_main:8080", "auth_session": "s"}) is None
+        assert irt.platform_bearer(None, {"deployment": "https://elsewhere.example"}) is None
+    finally:
+        irt.end_run_token(marker)
+    assert irt.platform_bearer(None, {"deployment": "http://pylon_main:8080"}) is None   # no run token: as before

@@ -25,7 +25,7 @@ from pylon.core.tools import web
 
 from ..utils.context_guard import ContextRejected, RunRpcNode, enforce_execution_context, rejection_message
 from ..utils.credential_resolver import attach_credential_resolver, governed_credential_code
-from ..utils.internal_run_token import attach_run_token, begin_run_token, end_run_token
+from ..utils.internal_run_token import attach_run_token, begin_run_token, end_run_token, platform_bearer
 from ..utils.envelope_guard import enforce_envelope
 from ..utils.exceptions import InternalSDKError, PipelineConfigurationError
 from ..utils.pipeline_trace import attach_pipeline_trace
@@ -163,7 +163,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
 
             # No-op unless memory is postgres; prefers the parent-resolved value (#6245)
             pgvector_connstr = resolve_pgvector_connstr(
-                self.descriptor.config, client_args, api_token, api_extra_headers,
+                self.descriptor.config, client_args, platform_bearer(api_token, client_args), api_extra_headers,
                 prefetched=kwargs.get("pgvector_connstr"),
             )
 

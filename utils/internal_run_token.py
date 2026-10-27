@@ -79,15 +79,44 @@ def end_run_token(marker):
     _CURRENT.reset(marker)
 
 
+def _origin_of(url):
+    """``scheme://host[:port]`` of a client's base URL (which may carry a path prefix), lower-case; None if unreadable."""
+    if not isinstance(url, str):
+        return None
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}".lower() if parts.scheme in ("http", "https") and parts.netloc else None
+
+
+def _has_own_credential(auth_token, auth_session, headers) -> bool:
+    return bool(auth_token or auth_session or (isinstance(headers, dict) and any(
+        isinstance(key, str) and key.lower() == "authorization" for key in headers)))
+
+
 def attach_run_token(client):
     """Hang the task's run token (if any) on the run's Elitea client, where the SDK's MCP client finds it. A client
-    that Main gave no credential of its own (no personal or system token, no session: an admitted run under enforce,
-    #7229) takes the run token as its bearer for every platform call; one that has a credential keeps it unchanged."""
+    that Main gave no credential of its own (no personal or system token, no session, no Authorization header: an
+    admitted run under enforce, #7229) and that talks to one of the token's origins takes the run token as its bearer
+    for every platform call; any other client keeps what it has, unchanged."""
     auth = _CURRENT.get()
     if auth is not None and client is not None:
         client.internal_run_auth = auth
-        if not getattr(client, "auth_token", None) and not getattr(client, "auth_session", None):
+        headers = getattr(client, "headers", None)
+        if not _has_own_credential(getattr(client, "auth_token", None), getattr(client, "auth_session", None), headers) \
+                and _origin_of(getattr(client, "base_url", None)) in auth.origins and isinstance(headers, dict):
             client.auth_token = auth.token
-            if isinstance(getattr(client, "headers", None), dict):
-                client.headers["Authorization"] = f"Bearer {auth.token}"
+            headers["Authorization"] = f"Bearer {auth.token}"
     return auth
+
+
+def platform_bearer(api_token, client_args):
+    """The bearer of a short-lived platform client the task builds before its run client (the post-fork pgvector
+    fallback): the payload's own token, else (#7229) the task's run token when the payload carries no credential and
+    the client goes to one of the token's origins; None otherwise."""
+    if api_token:
+        return api_token
+    auth = _CURRENT.get()
+    args = client_args if isinstance(client_args, dict) else {}
+    base_url = args.get("deployment", args.get("base_url"))
+    if auth is None or _has_own_credential(None, args.get("auth_session"), args.get("api_extra_headers")):
+        return None
+    return auth.token if _origin_of(base_url) in auth.origins else None
