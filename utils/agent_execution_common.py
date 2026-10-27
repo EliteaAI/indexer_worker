@@ -1275,12 +1275,14 @@ def build_success_result(
     return_chat_history: bool = False,
     hitl_interrupt: Optional[Dict[str, Any]] = None,
     hitl_interrupts: Optional[List[Dict[str, Any]]] = None,
+    output_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build successful execution result dict.
 
     Args:
         chat_history: Updated chat history
+        output_text: Final assistant answer, text only (images and other non-text blocks excluded)
         elitea_callback: Callback with thinking steps and tool calls
         tokens_in: Input token count
         tokens_out: Output token count
@@ -1310,6 +1312,7 @@ def build_success_result(
     )
     result = {
         'error': None,
+        'output_text': output_text or '',
         **build_execution_evidence(elitea_callback, tokens_in, tokens_out),
     }
     if return_chat_history:
