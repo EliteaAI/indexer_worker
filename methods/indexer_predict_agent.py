@@ -896,4 +896,5 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             return_chat_history=return_chat_history,
             hitl_interrupt=paused_hitl_interrupt,
             hitl_interrupts=paused_hitl_interrupts,
+            output_text=output['content'],
         )
