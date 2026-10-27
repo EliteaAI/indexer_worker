@@ -99,11 +99,14 @@ def agent_task_approver(descriptor_config):
             #
             kwargs = event_payload.get("kwargs") or {}
             client_args = (kwargs.get("llm") or {}).get("kwargs") or {}
+            api_token = kwargs.get("api_token", client_args.get("api_key"))
+            if not api_token and not client_args.get("auth_session"):
+                return True   # nothing to fetch with (#7229: a governed run's only bearer is its run token)
             #
             request_warm(
                 client_args.get("project_id"),
                 client_args,
-                kwargs.get("api_token", client_args.get("api_key")),
+                api_token,
                 kwargs.get("api_extra_headers", client_args.get("api_extra_headers", {})),
             )
         except Exception as exc:  # pylint: disable=W0718

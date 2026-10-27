@@ -1,7 +1,8 @@
 """The run token of a governed run (C-1009, EliteaAI/elitea_issues#7214).
 
 Main mints it at admission and puts it on the task payload as one kwarg (``TOKEN_KWARG``): the bearer the run's
-internal Elitea MCP requests authenticate with, in place of a personal or system token. The task takes it out of its
+internal Elitea MCP requests authenticate with, in place of a personal or system token, and (#7229) the bearer of the
+run's whole platform client when Main sent no other credential. The task takes it out of its
 kwargs first (``take_run_token``), before anything reads or copies them (child and reconcile payloads are built from
 the kwargs and never carry it), keeps it for the duration of the task only (``begin_run_token``), and hangs it on the
 run's Elitea client (``attach_run_token``), where the SDK's MCP client sends it to the origins listed with it and to no
@@ -79,8 +80,14 @@ def end_run_token(marker):
 
 
 def attach_run_token(client):
-    """Hang the task's run token (if any) on the run's Elitea client, where the SDK's MCP client finds it."""
+    """Hang the task's run token (if any) on the run's Elitea client, where the SDK's MCP client finds it. A client
+    that Main gave no credential of its own (no personal or system token, no session: an admitted run under enforce,
+    #7229) takes the run token as its bearer for every platform call; one that has a credential keeps it unchanged."""
     auth = _CURRENT.get()
     if auth is not None and client is not None:
         client.internal_run_auth = auth
+        if not getattr(client, "auth_token", None) and not getattr(client, "auth_session", None):
+            client.auth_token = auth.token
+            if isinstance(getattr(client, "headers", None), dict):
+                client.headers["Authorization"] = f"Bearer {auth.token}"
     return auth
