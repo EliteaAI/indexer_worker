@@ -133,6 +133,16 @@ class UsageSkillCallback(BaseCallbackHandler):
         return attribution.get("entity_name") if is_child else None
 
 
+def collect_disclosed_skills(kwargs):
+    attached = [s for s in kwargs.get("attached_skills") or [] if isinstance(s, dict) and s.get("name")]
+    taken = {s["name"].strip().lower() for s in attached}
+    project = [
+        s for s in kwargs.get("project_skills") or []
+        if isinstance(s, dict) and s.get("name") and s["name"].strip().lower() not in taken
+    ]
+    return attached + project
+
+
 def skill_identities(skills):
     return {
         s["name"].strip().lower(): {

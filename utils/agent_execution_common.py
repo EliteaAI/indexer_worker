@@ -62,7 +62,7 @@ from .parallel_dispatch_contract import (
     normalize_hitl_pause,
     split_mcp_auth_interrupts,
 )
-from .usage_skill_callback import UsageSkillCallback, subagent_skill_registries
+from .usage_skill_callback import UsageSkillCallback, collect_disclosed_skills, subagent_skill_registries
 from .usage_skill_events import fresh_dispatch_mentions
 from .usage_tool_callback import UsageToolCallback
 from .usage_tool_events import (
@@ -618,7 +618,7 @@ def create_usage_skill_callback(
         return None
     return UsageSkillCallback(
         build_attribution(kwargs, task_meta, task_id),
-        kwargs.get('attached_skills'),
+        collect_disclosed_skills(kwargs),
         subagent_skill_registries(kwargs.get('application')),
         fresh_dispatch_mentions(kwargs),
     )
@@ -1577,7 +1577,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'auto_approve_sensitive_actions',
         'return_chat_history',
         'execution_generation',
-        'attached_skills', 'invoked_skills', 'project_context',
+        'attached_skills', 'project_skills', 'invoked_skills', 'project_context',
         # A parked parent emits no full_message, so the reconcile re-invoke is what
         # persists the turn. Never fed to the model.
         'applied_skills',
