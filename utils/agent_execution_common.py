@@ -1528,6 +1528,10 @@ def build_child_launch_payloads(
         # Literal key: tests exec this function in a minimal namespace (== task_envelope.ENVELOPE_KEY)
         if parent_kwargs.get('envelope'):
             child_payload['envelope'] = parent_kwargs['envelope']
+        # Children of a scheduled/webhook/index parent are that automated run, not manual ones (#7201)
+        # Literal key, as above (== usage_tool_events.TRIGGER_SOURCE_KWARGS_KEY)
+        if parent_kwargs.get('trigger_source'):
+            child_payload['trigger_source'] = parent_kwargs['trigger_source']
 
         # Usage attribution (#6572): the child's own 'application' above becomes its
         # entity_*, so root_* would be lost without an explicit carry. Falling back to
