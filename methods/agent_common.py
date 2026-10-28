@@ -41,6 +41,11 @@ try:
     from elitea_sdk.runtime.tool_outcome import ToolResultStatus, recorded_outcomes
 except ImportError:  # SDK without the sink reader: tool ends stay "stop", as before
     recorded_outcomes = None
+try:
+    from elitea_sdk.runtime.utils.failure_signals import describe_llm_error
+except ImportError:  # older SDK: keep the raw exception text
+    def describe_llm_error(error, idle_timeout=None):  # pylint: disable=W0613
+        return str(error)
 from pydantic import BaseModel
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
@@ -2066,7 +2071,7 @@ class EliteACallback(BaseCallbackHandler):
                     f"status code: {status_code}, message: {error_message}"
                 )
             except (AttributeError, TypeError, KeyError):
-                self.llm_error = InternalSDKError(str(args[0]))
+                self.llm_error = InternalSDKError(describe_llm_error(args[0]))
             #
             self.llm_error.budget_error_code = budget_code
         else:
