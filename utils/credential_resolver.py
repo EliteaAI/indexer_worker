@@ -20,6 +20,7 @@ import json
 from datetime import datetime, timezone
 
 from .context_guard import PREDICT_RUN_ID_KWARGS_KEY, RunRpcNode, _Counter, _log_info
+from .internal_run_token import run_token_refusal_code
 from .task_envelope import read_envelope
 
 AAD_VERSION = "v1"
@@ -46,17 +47,35 @@ def _record(result, reason_code):
     _log_info(f"security_metric name=credential_slot_resolution_total result={result} reason_code={reason_code}")
 
 
+def record_tracing_withheld():
+    """A governed run on its run token does not get the project's Langfuse configuration (a credential the run token
+    is not released, #7229): counted and said at info level, so the missing traces have a visible cause."""
+    CREDENTIAL_SLOT_RESOLUTION.inc("skip", "TRACING_NOT_RELEASED")
+    _log_info("security_metric name=credential_slot_resolution_total result=skip reason_code=TRACING_NOT_RELEASED")
+
+
 def batch_timeout(base_s, slots):
     """Bus timeout of a release batch: the single-call timeout plus half a second per slot, at most a minute."""
     return min(base_s + BATCH_TIMEOUT_PER_SLOT_S * slots, MAX_BATCH_TIMEOUT_S)
 
 
 def governed_credential_code(exc):
-    """Reason code of a ``GovernedCredentialError`` (matched by shape: class identity can change on SDK reload)."""
+    """Reason code of a ``GovernedCredentialError`` (matched by shape: class identity can change on SDK reload), or of
+    a platform call Main refused on the task's run token (#7229: the run ended, was revoked or went idle)."""
     code = getattr(exc, "reason_code", None)
     if type(exc).__name__ == "GovernedCredentialError" and isinstance(code, str) and code:
         return code
-    return None
+    return run_token_refusal_code(exc)
+
+
+def governed_text(exc, code):
+    """The readable text of a governed refusal: the fixed text of its code, naming the sub-agent refused when the SDK
+    said which (its saved name only, #7229)."""
+    from .context_guard import rejection_message  # pylint: disable=C0415
+    subagent = getattr(exc, "subagent", None)
+    text = rejection_message(code)
+    return f"{text} (sub-agent \u201c{subagent[:80]}\u201d)" if isinstance(subagent, str) and subagent else text
+
 
 
 def _sdk_types():

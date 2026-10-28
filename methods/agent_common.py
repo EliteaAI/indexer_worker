@@ -542,6 +542,16 @@ def fetch_langfuse_config(client) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with langfuse config (base_url, public_key, secret_key) or None
     """
+    run_auth = getattr(client, "internal_run_auth", None)
+    if run_auth is not None and getattr(client, "auth_token", None) == run_auth.token:
+        # A governed run's only bearer is its run token, which returns no credential (#7229): not asked, not refused,
+        # and counted so the missing traces have a visible cause (releasing it through Main is a follow-up)
+        try:
+            from ..utils.credential_resolver import record_tracing_withheld  # pylint: disable=C0415
+            record_tracing_withheld()
+        except Exception:  # pylint: disable=W0703
+            log.warning("Langfuse configuration is not available to a governed run (#7229)")
+        return None
     try:
         # Fetch configurations with type=langfuse and section=credentials
         url = f"{client.base_url}/api/v2/configurations/configurations/{client.project_id}?type=langfuse&section=credentials"

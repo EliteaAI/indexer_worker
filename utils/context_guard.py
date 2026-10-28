@@ -29,6 +29,18 @@ REJECTION_MESSAGES = {
     "CREDENTIAL_GENERATION_MISMATCH": "The credential changed since the run was approved; the run was not started.",
     "DENIED_GRANT": "The credential grant is no longer in force; the run was not started.",
     "DENIED_RBAC": "Permission to use this credential was denied; the run was not started.",
+    # A platform call on the run token after the run ended, was revoked or went idle (#7229)
+    "CONTEXT_NOT_LIVE": "This run is no longer admitted: it ended, was revoked or stayed idle too long. Please start it "
+                        "again.",
+    "INTERNAL_TOKEN_EXPIRED": "This run reached its time limit. Please start it again.",
+    "INTERNAL_TOKEN_INVALID": "This run asked the platform for something governed runs cannot do yet; the run was "
+                              "stopped.",
+    "PUBLIC_AGENT_NOT_ADMITTED": "Agents from another project (public agents) are not available to governed runs yet; "
+                                 "the run was not started.",
+    # A sub-agent version fetched on the run token that nothing was decided for (#7229, Main's text)
+    "DENIED_DEVELOPMENT_CHILD": "A sub-agent of this draft asked for a credential that was not checked for it when the "
+                                "draft started (only the sub-agents the draft calls are checked, each on its own); the "
+                                "run was not started.",
     "MANDATE_INACTIVE": "The mandate for this run is not active; the run was not started.",
     "MANDATE_EXPIRED": "The mandate for this run has expired; the run was not started.",
     # Autonomous runs (#6947): the mandate's runtime limit, enforced by Main's deadline sweep.

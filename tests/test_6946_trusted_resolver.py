@@ -454,7 +454,7 @@ def test_agent_entry_points_are_wired(name):
     assert "if credential_resolver is None" in source and "unsecret_mcp_tools(" in source
     assert "credential_resolver.close()" in source
     assert "governed_code = governed_credential_code(e)" in source
-    assert "human_readable=rejection_message(governed_code)" in source
+    assert "human_readable=governed_text(e, governed_code)" in source
 
 
 def test_unsecret_mcp_tools_is_guarded_by_the_legacy_check_in_both_entry_points():
