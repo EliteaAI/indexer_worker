@@ -164,6 +164,47 @@ def test_the_card_gets_code_text_and_reference_live_and_after_a_reload():
     assert by_type["full_message"]["content"] == result["human_readable"] == "readable"
 
 
+def _load_test_error(log):
+    source = (PLUGIN_ROOT / "methods" / "indexer_test_toolkit.py").read_text()
+    body = source[source.index("def test_error("):source.index("def check_missing_index_data_status_event(")]
+    namespace = {
+        "json": json, "traceback": traceback, "uuid4": uuid4, "Optional": typing.Optional, "Any": typing.Any,
+        "NodeEventInterface": object, "NodeEvent": _NodeEvent,
+        "EventTypes": types.SimpleNamespace(
+            agent_tool_start="agent_tool_start", agent_tool_end="agent_tool_end",
+            agent_exception="agent_exception", full_message="full_message",
+        ),
+        "EVENTNODE_FULL_RESPONSE_NAME": "full_response",
+        "clean_toolkit_config_for_events": lambda config, fallback: config,
+        "clean_for_json_serialization": lambda data, fallback: data,
+        "refusal_text": refusal_text,
+        "log": log,
+    }
+    exec(compile(body, "<test_error>", "exec"), namespace)  # pylint: disable=W0122
+    return namespace["test_error"]
+
+
+def test_a_toolkit_test_refusal_logs_its_trace_once_under_the_reference_and_sends_none(no_bus):
+    kwargs = attach_envelope({"project_id": 5}, "governed")
+    kwargs["envelope"]["context_ref"] = "ctx-1"
+    log, node = _Log(), _NodeInterface()
+    try:
+        enforce_execution_context(kwargs, object(), task_name="indexer_test_toolkit_tool", project_id=5)
+    except ContextRejected as rejected:   # what the toolkit Test runner does with it
+        result = _load_test_error(log)(
+            node, {"type": "sharepoint"}, "get_lists", context_guard.rejection_message(rejected.reason_code),
+            "message-1", {"project_id": 5}, refusal_code=rejected.reason_code,
+        )
+    else:
+        pytest.fail("the run was not refused")
+
+    _assert_no_trace(_everything_sent(node, result))
+    refusal = json.loads(result["error"])
+    assert refusal["code"] == "DEPENDENCY_UNAVAILABLE" and refusal["ref"]
+    assert len(log.lines) == 1
+    assert f"ref={refusal['ref']}" in log.lines[0] and "Traceback" in log.lines[0] and LEAK in log.lines[0]
+
+
 @pytest.mark.parametrize("code", STEP4_CODES)
 def test_each_release_refusal_of_a_delegated_credential_has_its_own_readable_text(code):
     text = context_guard.rejection_message(code)
