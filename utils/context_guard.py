@@ -49,6 +49,22 @@ REJECTION_MESSAGES = {
     "AUDIT_UNAVAILABLE": "Auditing is unavailable; the run was not started.",
     "WORKER_CAPABILITY_UNAVAILABLE": "This worker cannot apply governed credentials; the run was not started.",
     "UNSUPPORTED_AUTH_MODE": "This toolkit cannot use a governed credential yet; the run was not started.",
+    # Credentials that act with the person's Microsoft sign-in, refused at release (#6756 step 4). Main's texts.
+    "DENIED_SUBJECT_MISMATCH": "This Microsoft credential belongs to another identity than the person running the agent; "
+                               "the run was not started.",
+    "DENIED_MANDATE_DELEGATION_UNSUPPORTED": "Scheduled and webhook runs cannot act with a person's Microsoft sign-in "
+                                             "yet; the run was not started.",
+    "DENIED_DELEGATION_UNSUPPORTED_CALLER": "This credential acts with your Microsoft sign-in, which only works in runs "
+                                            "you start yourself from Elitea; the run was not started.",
+    "DENIED_ASSERTION_UNAVAILABLE": "Your Microsoft sign-in is not available to this run. Sign in with Microsoft again, "
+                                    "then retry.",
+    "DENIED_ASSERTION_SOURCE_UNSUPPORTED": "You signed in through your organisation's login page; acting with your "
+                                           "Microsoft account needs a connected Microsoft account, which is not "
+                                           "available yet. The run was not started.",
+    "DENIED_OAUTH_APP_UNAVAILABLE": "The Microsoft app this credential uses is not available; ask an administrator. "
+                                    "The run was not started.",
+    "DELEGATION_EXCHANGE_FAILED": "Microsoft refused to issue a token for this credential (consent or site access "
+                                  "missing); ask an administrator. The run was not started.",
     **dict.fromkeys(
         ("STORE_DENIED", "STORE_SEALED", "STORE_UNAVAILABLE", "STORE_TLS_INVALID", "STORE_NOT_FOUND",
          "STORE_VERSION_CONFLICT"),
@@ -82,9 +98,13 @@ def takes_unadmitted_read(kwargs) -> bool:
     return marked and not read_envelope(kwargs).context_ref
 
 
-def refusal_text(reason_code, message=None) -> str:
-    """The readable ``{code, error}`` of a governed refusal, as the chat's refusal card reads it (#7229)."""
-    return json.dumps({"code": reason_code, "error": message or rejection_message(reason_code)})
+def refusal_text(reason_code, message=None, ref=None) -> str:
+    """The readable ``{code, error}`` of a governed refusal, as the chat's refusal card reads it (#7229), with the
+    support reference ``ref`` that names the server log line holding the details (never the details themselves)."""
+    payload = {"code": reason_code, "error": message or rejection_message(reason_code)}
+    if ref:
+        payload["ref"] = ref
+    return json.dumps(payload)
 
 
 class _Counter:
