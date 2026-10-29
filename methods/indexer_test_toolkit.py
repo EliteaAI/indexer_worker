@@ -241,7 +241,9 @@ def test_error(
     exception_uid = str(uuid4())
     error = str(traceback.format_exc())
     if refusal_code:
-        error_message = refusal_text(refusal_code, error_message)
+        # the trace stays in the server log under the support reference the card shows (#6756)
+        log.warning(f"governed refusal {refusal_code} ref={exception_uid}\n{error}")
+        error_message = refusal_text(refusal_code, error_message, ref=exception_uid)
         error = error_message
 
     # Clean toolkit_config to ensure JSON serializability

@@ -282,6 +282,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     ensure_thread_id(kwargs.get("thread_id"), kwargs.get("conversation_id")),
                     message_id, tasknode_task.meta,
                     human_readable=rejection_message(rejected.reason_code),
+                    refusal_code=rejected.reason_code,
                 )
                 result["reason_code"] = rejected.reason_code
                 return result
@@ -774,6 +775,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     human_readable=governed_text(e, governed_code),
                     execution_start_time=execution_start_time,
                     elitea_callback=elitea_callback,
+                    refusal_code=governed_code,
                 )
                 result["reason_code"] = governed_code
                 return result

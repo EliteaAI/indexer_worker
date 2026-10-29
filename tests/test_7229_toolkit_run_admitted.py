@@ -39,7 +39,7 @@ def test_a_governed_run_is_validated_before_any_tool_work_and_refused_readably()
 
 def test_a_refusal_is_the_readable_code_and_text_with_no_trace():
     body = SOURCE[SOURCE.index("def test_error("):SOURCE.index("def check_missing_index_data_status_event(")]
-    assert "error_message = refusal_text(refusal_code, error_message)" in body
+    assert "error_message = refusal_text(refusal_code, error_message, ref=exception_uid)" in body
     assert "if not budget_error_code and not refusal_code:" in body   # no synthetic traceback tool call
     assert "result['reason_code'] = refusal_code" in body
     assert "refusal_code=governed_code" in TASK

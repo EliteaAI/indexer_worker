@@ -125,6 +125,7 @@ except ImportError:
     LOAD_SKILL_ALREADY_ACTIVE_RE = re.compile(r'^Skill "([^"]+)" is already (?:loaded|active)')
 
 from ..utils.constants import DEFAULT_MEMORY_CONFIG
+from ..utils.context_guard import refusal_text
 from ..utils.exceptions import InternalSDKError
 from ..utils.funcs import (
     _is_mcp_authorization_required_error,
@@ -623,6 +624,7 @@ def execution_error(
     continuation_error: Optional[dict] = None,
     elitea_callback: Optional["EliteACallback"] = None,
     input_guardrail: Optional[dict] = None,
+    refusal_code: Optional[str] = None,
 ) -> dict:
     """
     Handle execution errors by emitting appropriate events and returning error response.
@@ -641,12 +643,19 @@ def execution_error(
         continuation_error: Structured output-continuation failure details (optional)
         elitea_callback: Callback with the steps and token usage gathered before the error (optional)
         input_guardrail: Input-guardrail block details (#6886); rule ids only, never the value (optional)
+        refusal_code: Reason code of a governed refusal (admission or credential release, C-1009); the stack trace
+            then stays in the server log only (optional)
 
     Returns:
         Dict containing chat_history and error information
     """
     exception_uid = str(uuid4())
     error = str(traceback.format_exc())
+    if refusal_code:
+        # A governed refusal is a decision, not a crash (C-1009 #6756): the card gets the readable {code, error, ref}
+        # and the stack trace stays in the server log under that support reference, never on the socket or message
+        log.warning(f"governed refusal {refusal_code} ref={exception_uid}\n{error}")
+        error = error_message = refusal_text(refusal_code, human_readable, ref=exception_uid)
 
     execution_time_seconds = None
     if execution_start_time:
@@ -656,8 +665,8 @@ def execution_error(
         ).total_seconds()
 
     # A guardrail block is a policy outcome, not a crash, and the stacktrace pin
-    # carries the raw user input - which here is the value that was just blocked
-    if not input_guardrail:
+    # carries the raw user input - which here is the value that was just blocked. A refusal has no trace to pin.
+    if not input_guardrail and not refusal_code:
         node_interface.emit(
             type=EventTypes.agent_tool_start,
             response_metadata={
