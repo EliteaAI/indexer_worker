@@ -25,6 +25,7 @@ to reduce code duplication and ensure consistent behavior.
 import json
 import re
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -881,6 +882,30 @@ def _collect_applied_skills(applied_skills, attached_skills, tool_calls):
     return applied
 
 
+_TOOL_ERROR_MAX_LEN = 200
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]+')
+
+try:
+    from elitea_sdk.runtime.tool_outcome import run_error_flag
+except ImportError:  # older SDK: runs behave as before, no tool error is reported
+    @contextmanager
+    def run_error_flag():
+        yield {}
+
+
+def tool_error_text(tool_error: Optional[Dict[str, Any]]) -> Optional[str]:
+    """One safe line "<toolkit> · <tool>: <reason>" for the first tool error, else None."""
+    # The holder keeps the first failure under its "error" key; it stays empty until then.
+    tool_error = (tool_error or {}).get('error')
+    if not tool_error or not tool_error.get('tool'):
+        return None
+    parts = [str(tool_error.get(key) or '') for key in ('toolkit', 'tool', 'reason')]
+    toolkit, tool, reason = (_CONTROL_CHARS.sub(' ', part).strip() for part in parts)
+    name = f"{toolkit} · {tool}" if toolkit else tool
+    text = f"{name}: {reason}" if reason else name
+    return ' '.join(text.split())[:_TOOL_ERROR_MAX_LEN]
+
+
 def emit_response_events(
     node_interface: NodeEventInterface,
     response: Dict[str, Any],
@@ -901,7 +926,8 @@ def emit_response_events(
     context_info: Optional[Dict[str, Any]] = None,
     applied_skills: Optional[List[Dict[str, Any]]] = None,
     attached_skills: Optional[List[Dict[str, Any]]] = None,
-    parallel_reconcile: Optional[Any] = None
+    parallel_reconcile: Optional[Any] = None,
+    tool_error: Optional[Dict[str, Any]] = None,
 ):
     """
     Emit all response-related events.
@@ -920,6 +946,7 @@ def emit_response_events(
         user_message: The user's message
         should_continue: Whether this was a continuation
         context_info: Context info with message/token counts and summarization details if summarization occurred
+        tool_error: Holder yielded by run_error_flag; a tool failure marks a non-interactive run as failed
     """
     thread_id_response = response.get('thread_id', thread_id)
 
@@ -1060,6 +1087,13 @@ def emit_response_events(
                 applied_skills, attached_skills, elitea_callback.tool_calls
             ),
         }
+
+        # A scheduled or system run has no reader to see a failed tool, so the
+        # stored run status must carry it. A chat run shows the failure itself.
+        tool_error_line = tool_error_text(tool_error)
+        if tool_error_line and task_meta.get("non_interactive"):
+            full_message_metadata['is_error'] = True
+            full_message_metadata['error'] = tool_error_line
 
         msg_event_node = NodeEvent(
             type=EventTypes.full_message,

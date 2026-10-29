@@ -63,6 +63,7 @@ from ..utils.agent_execution_common import (
     create_suggestion_audit_callback,
     configure_checkpoint_resume,
     emit_response_events,
+    run_error_flag,
     with_tracing_span,
     build_success_result,
     prepare_invoke_input,
@@ -625,7 +626,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             apply_parallel_reconcile(invoke_input, kwargs)
 
             # Invoke the agent executor with Langfuse trace context
-            with langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
+            with run_error_flag() as tool_error, \
+                    langfuse_trace_context(langfuse_trace_attrs, langfuse_client):
                 response = agent_executor.invoke(invoke_input, invoke_config)
 
             # Callback-path MCP auth interruption: pause immediately and do not
@@ -732,6 +734,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 applied_skills=applied_skills,
                 attached_skills=collect_disclosed_skills(kwargs),
                 parallel_reconcile=parallel_reconcile,
+                tool_error=tool_error,
             )
 
             # Best-effort, ephemeral suggestion for the user's likely next
