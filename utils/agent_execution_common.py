@@ -1106,6 +1106,8 @@ def emit_response_events(
 
         # A scheduled or system run has no reader to see a failed tool, so the
         # stored run status must carry it. A chat run shows the failure itself.
+        # The holder lives inside one executor call. A parked fan-out parent and the run after a
+        # human decision start with an empty holder, so an error from before that point is not seen.
         tool_error_line = tool_error_text(tool_error)
         if tool_error_line and task_meta.get("non_interactive"):
             full_message_metadata['is_error'] = True

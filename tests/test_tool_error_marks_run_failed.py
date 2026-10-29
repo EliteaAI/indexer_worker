@@ -154,3 +154,36 @@ def test_a_failure_without_a_tool_name_still_fails_the_run(marker):
 def test_an_empty_holder_gives_nothing():
     assert tool_error_text({'error': {}}) is None
     assert tool_error_text({}) is None
+
+
+@pytest.mark.parametrize('method_file', ['indexer_agent.py', 'indexer_predict_agent.py'])
+def test_both_agent_methods_open_the_holder_and_pass_it_to_the_response_events(method_file):
+    source = (Path(__file__).resolve().parents[1] / 'methods' / method_file).read_text()
+
+    assert 'run_error_flag() as tool_error' in source
+    assert 'tool_error=tool_error' in source
+    # The holder has to be open around the executor call, not after it
+    assert source.index('run_error_flag() as tool_error') < source.index('agent_executor.invoke(')
+
+
+def test_without_run_error_flag_in_the_sdk_the_worker_runs_as_before_and_says_so():
+    common = Path(__file__).resolve().parents[1] / 'utils' / 'agent_execution_common.py'
+    tree = ast.parse(common.read_text())
+    guards = [n for n in tree.body if isinstance(n, ast.Try)
+              and any(isinstance(h.type, ast.Name) and h.type.id == 'ImportError' for h in n.handlers)
+              and 'run_error_flag' in ast.unparse(n)]
+    assert len(guards) == 1
+    guard = guards[0]
+    warned = []
+    fallback = ast.Module(body=[
+        ast.ImportFrom(module='contextlib', names=[ast.alias(name='contextmanager')], level=0),
+        *guard.handlers[0].body,
+    ], type_ignores=[])
+    scope = {'log': SimpleNamespace(warning=lambda *a: warned.append(a))}
+    exec(compile(ast.fix_missing_locations(fallback), 'fallback', 'exec'), scope)  # noqa: S102 -- only the fallback branch runs
+
+    with scope['run_error_flag']() as holder:
+        pass
+
+    assert holder == {}
+    assert warned and 'run_error_flag' in warned[0][0]
