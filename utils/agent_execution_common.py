@@ -25,6 +25,7 @@ to reduce code duplication and ensure consistent behavior.
 import json
 import re
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -881,6 +882,46 @@ def _collect_applied_skills(applied_skills, attached_skills, tool_calls):
     return applied
 
 
+_TOOL_NAME_MAX_LEN = 60
+# Control characters, plus zero-width and direction-changing characters that could hide or reorder text for a reader
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+')
+# Only a name is allowed into the sentence a person reads: the reason is raw tool or provider output (class names,
+# paths, URLs with credentials) and stays in the worker log
+_PLAIN_NAME = re.compile(r'[^\w .\-]+')
+
+try:
+    from elitea_sdk.runtime.tool_outcome import run_error_flag  # noqa: F401 -- re-exported to the agent methods
+except ImportError:  # older SDK: runs behave as before, no tool error is reported
+    log.warning('The installed elitea_sdk has no run_error_flag: a failed tool does not fail a scheduled run')
+
+    @contextmanager
+    def run_error_flag():
+        yield {}
+
+
+def _plain_name(value: Any) -> str:
+    cleaned = _PLAIN_NAME.sub(' ', _CONTROL_CHARS.sub(' ', str(value or '')))
+    return ' '.join(cleaned.split())[:_TOOL_NAME_MAX_LEN]
+
+
+def tool_error_text(tool_error: Optional[Dict[str, Any]]) -> Optional[str]:
+    """A plain sentence for the person who owns the run, or None when no tool failed.
+
+    It names the toolkit and the tool and nothing else. The technical reason goes to the worker log, because it
+    shows internals to a reader who cannot act on it.
+    """
+    # The holder keeps the first failure under its "error" key; it stays empty until then.
+    tool_error = (tool_error or {}).get('error')
+    if not tool_error:
+        return None
+    log.warning('A tool failed in a non-interactive run: toolkit=%r tool=%r reason=%r',
+                tool_error.get('toolkit'), tool_error.get('tool'), tool_error.get('reason'))
+    toolkit, tool = _plain_name(tool_error.get('toolkit')), _plain_name(tool_error.get('tool'))
+    # A failure without a tool name is still a failure: the run must not look successful
+    step = f"The step '{tool}' of {toolkit}" if tool and toolkit else f"The step '{tool}'" if tool else 'A step'
+    return f"{step} could not be completed. Open the run log or ask an administrator for details."
+
+
 def emit_response_events(
     node_interface: NodeEventInterface,
     response: Dict[str, Any],
@@ -901,7 +942,8 @@ def emit_response_events(
     context_info: Optional[Dict[str, Any]] = None,
     applied_skills: Optional[List[Dict[str, Any]]] = None,
     attached_skills: Optional[List[Dict[str, Any]]] = None,
-    parallel_reconcile: Optional[Any] = None
+    parallel_reconcile: Optional[Any] = None,
+    tool_error: Optional[Dict[str, Any]] = None,
 ):
     """
     Emit all response-related events.
@@ -920,6 +962,7 @@ def emit_response_events(
         user_message: The user's message
         should_continue: Whether this was a continuation
         context_info: Context info with message/token counts and summarization details if summarization occurred
+        tool_error: Holder yielded by run_error_flag; a tool failure marks a non-interactive run as failed
     """
     thread_id_response = response.get('thread_id', thread_id)
 
@@ -1060,6 +1103,15 @@ def emit_response_events(
                 applied_skills, attached_skills, elitea_callback.tool_calls
             ),
         }
+
+        # A scheduled or system run has no reader to see a failed tool, so the
+        # stored run status must carry it. A chat run shows the failure itself.
+        # The holder lives inside one executor call. A parked fan-out parent and the run after a
+        # human decision start with an empty holder, so an error from before that point is not seen.
+        tool_error_line = tool_error_text(tool_error)
+        if tool_error_line and task_meta.get("non_interactive"):
+            full_message_metadata['is_error'] = True
+            full_message_metadata['error'] = tool_error_line
 
         msg_event_node = NodeEvent(
             type=EventTypes.full_message,
