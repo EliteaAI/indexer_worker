@@ -17,9 +17,9 @@ source = Path(__file__).resolve().parents[1] / 'utils/agent_execution_common.py'
 tree = ast.parse(source.read_text())
 tree.body = [
     n for n in tree.body
-    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events'))
+    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events', '_plain_name'))
     or (isinstance(n, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id in ('_TOOL_ERROR_MAX_LEN', '_CONTROL_CHARS') for t in n.targets))
+        isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
 ]
 
 
@@ -49,6 +49,7 @@ namespace = {
     'Optional': typing.Optional, 'Dict': typing.Dict, 'Any': typing.Any, 'List': typing.List,
     'NodeEventInterface': object, 'EliteACallback': object, 'EliteACustomCallback': object,
     'HumanMessage': object, 're': re, 'json': json,
+    'log': SimpleNamespace(warning=lambda *a, **k: None),
     'NodeEvent': FakeNodeEvent,
     'EventTypes': SimpleNamespace(
         mcp_authorization_required='mcp_auth', agent_hitl_interrupt='hitl', pipeline_finish='finish',
@@ -59,7 +60,7 @@ namespace = {
     '_merge_usage_by_model': lambda callbacks: {},
     '_collect_applied_skills': lambda applied, attached, calls: [],
 }
-exec(compile(tree, str(source), 'exec'), namespace)
+exec(compile(tree, str(source), "exec"), namespace)  # noqa: S102 -- the module pulls in heavy imports, so only the helpers under test are run
 tool_error_text = namespace['tool_error_text']
 
 
@@ -87,7 +88,9 @@ def test_marker_in_a_non_interactive_run_sets_is_error_and_error_text():
     meta = metadata(emit({'non_interactive': True}, MARKER))
 
     assert meta['is_error'] is True
-    assert meta['error'] == 'github · create_issue: HTTP 403'
+    assert meta['error'] == ("The step 'create_issue' of github could not be completed. "
+                             'Open the run log or ask an administrator for details.')
+    assert 'HTTP 403' not in meta['error']
 
 
 def test_marker_in_an_interactive_run_adds_neither_key():
@@ -117,24 +120,37 @@ def test_content_is_unchanged_by_a_marker():
     assert interface.full_messages[0]['content'] == 'answer'
 
 
-def test_error_text_is_one_short_line_without_control_characters():
-    text = tool_error_text({'error': {'toolkit': 'git\nhub', 'tool': 'run\x00it', 'reason': 'a\nb\u2028c\r\td' + 'x' * 500}})
+def test_error_text_is_a_plain_sentence_without_the_technical_reason():
+    reason = "langchain_core.tools.base.ToolException: Node x failed at /data/plugins/a.py with token=abc123 https://u:p@h/x?k=1"
+    text = tool_error_text({'error': {'toolkit': 'GitHub toolkit', 'tool': 'create_issue', 'reason': reason}})
 
-    assert len(text) <= 200
-    assert text.startswith('git hub · run it: a b c d')
-    assert not re.search(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]', text)
-
-
-def test_empty_toolkit_gives_the_tool_name_only():
-    assert tool_error_text({'error': {'toolkit': '', 'tool': 'create_issue', 'reason': ''}}) == 'create_issue'
+    assert text == ("The step 'create_issue' of GitHub toolkit could not be completed. "
+                    "Open the run log or ask an administrator for details.")
+    for leak in ('langchain', 'ToolException', '/data', 'abc123', 'u:p', 'k=1'):
+        assert leak not in text
 
 
-def test_empty_toolkit_keeps_the_reason():
-    assert tool_error_text({'error': {'toolkit': None, 'tool': 'create_issue', 'reason': 'boom'}}) == 'create_issue: boom'
+def test_names_are_cleaned_of_control_direction_and_markup_characters():
+    text = tool_error_text({'error': {'toolkit': 'git\nhub\u202e', 'tool': 'run\x00it<b>' + 'x' * 500, 'reason': ''}})
+
+    assert len(text) < 250
+    assert '<' not in text and '>' not in text
+    assert not re.search(r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e]', text)
 
 
-@pytest.mark.parametrize('marker', [{'error': {'toolkit': 'github', 'tool': '', 'reason': 'boom'}}, {'error': {'toolkit': 'github'}}, {'error': {}}])
-def test_marker_with_an_empty_tool_gives_nothing(marker):
-    assert tool_error_text(marker) is None
+def test_empty_toolkit_names_the_step_only():
+    text = tool_error_text({'error': {'toolkit': '', 'tool': 'create_issue', 'reason': 'boom'}})
+
+    assert text.startswith("The step 'create_issue' could not be completed.")
+
+
+@pytest.mark.parametrize('marker', [{'error': {'toolkit': 'github', 'tool': '', 'reason': 'boom'}}, {'error': {'toolkit': 'github'}}])
+def test_a_failure_without_a_tool_name_still_fails_the_run(marker):
+    assert tool_error_text(marker).startswith('A step could not be completed.')
     meta = metadata(emit({'non_interactive': True}, marker))
-    assert 'is_error' not in meta
+    assert meta['is_error'] is True
+
+
+def test_an_empty_holder_gives_nothing():
+    assert tool_error_text({'error': {}}) is None
+    assert tool_error_text({}) is None
