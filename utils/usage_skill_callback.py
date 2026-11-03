@@ -28,23 +28,44 @@ except ImportError:
     LOADED_SKILL_PREFIX_RE = re.compile(r'^Skill "([^"]+)" is now active')
     LOAD_SKILL_UNKNOWN = 'No skill named "{name}" is attached to this agent.'
 
+try:
+    from elitea_sdk.runtime.langchain.constants import READ_SKILL_FILE_PREFIX_RE, SKILL_FILES_BLOCK_END
+except ImportError:
+    READ_SKILL_FILE_PREFIX_RE = re.compile(
+        '^Skill "([^"]+)" file "([^"]+)"((?: lines [0-9]+-(?:[0-9]+|end))?):\n'
+    )
+    SKILL_FILES_BLOCK_END = "</skill_files>"
+
 from pylon.core.tools import log
 
 from .usage_skill_events import (
     SKILL_OUTCOME_UNKNOWN,
     SKILL_SOURCE_LOAD,
+    SKILL_SOURCE_READ_FILE,
     record_skill_event,
     record_skill_mention,
 )
 from .usage_tool_events import ENTITY_TYPE_APPLICATION
 
 LOAD_SKILL_TOOL_NAME = "load_skill"
+READ_SKILL_FILE_TOOL_NAME = "read_skill_file"
+LIST_SKILL_FILES_TOOL_NAME = "list_skill_files"
 _UNKNOWN_SKILL_PREFIX = LOAD_SKILL_UNKNOWN.split("{name}", 1)[0]
-_SKILL_BODY_RE = re.compile(r'<skill name="[^"]*">\n(.*)\n</skill>\s*$', re.DOTALL)
+_SKILL_BODY_RE = re.compile(r'<skill name="[^"]*">\n(.*)\n</skill>', re.DOTALL)
+_SKILL_FILE_CONTENT_RE = re.compile(r'<skill_file path="[^"]*">\n(.*)\n</skill_file>\s*$', re.DOTALL)
+
+
+def _split_auto_loaded(content):
+    """A file tool's result as the skill body it loaded on the way (empty when none) and the tool's own answer."""
+    if not isinstance(content, str) or not LOADED_SKILL_PREFIX_RE.match(content):
+        return "", content
+    loaded, _separator, answer = content.partition(SKILL_FILES_BLOCK_END)
+    return loaded + SKILL_FILES_BLOCK_END, answer.lstrip("\n")
 
 
 class UsageSkillCallback(BaseCallbackHandler):
-    """One skill row when load_skill returned a body, and one per ~mention of the run."""
+    """One skill row when load_skill or a file tool loading on the way returned a body, one when read_skill_file returned
+    a file, and one per ~mention of the run."""
 
     def __init__(self, attribution: dict, attached_skills=None, subagent_skills=None, mentioned_skills=None):
         self._attribution = attribution
@@ -66,9 +87,11 @@ class UsageSkillCallback(BaseCallbackHandler):
         """Callback"""
         try:
             serialized = args[0] if args and isinstance(args[0], dict) else {}
-            if (serialized.get("name") or kwargs.get("name")) != LOAD_SKILL_TOOL_NAME:
+            tool_name = serialized.get("name") or kwargs.get("name")
+            if tool_name not in (LOAD_SKILL_TOOL_NAME, READ_SKILL_FILE_TOOL_NAME, LIST_SKILL_FILES_TOOL_NAME):
                 return
             self._open[str(run_id)] = {
+                "tool_name": tool_name,
                 "parent_agent_name": (kwargs.get("metadata") or {}).get("parent_agent_name"),
                 "inputs": kwargs.get("inputs"),
             }
@@ -79,8 +102,16 @@ class UsageSkillCallback(BaseCallbackHandler):
         """Callback"""
         try:
             started = self._open.pop(str(run_id), None)
-            if started is not None:
-                self._record_skill_load(started, args[0] if args else kwargs.get("output"))
+            if started is None:
+                return
+            output = args[0] if args else kwargs.get("output")
+            if started["tool_name"] == LOAD_SKILL_TOOL_NAME:
+                self._record_skill_load(started, output)
+                return
+            loaded, answer = _split_auto_loaded(getattr(output, "content", output))
+            if loaded:
+                self._record_skill_load(started, loaded)
+            self._record_skill_file_read(started, answer)
         except Exception as exc:  # pylint: disable=W0703
             log.debug("usage: skill load capture failed: %s", exc)
 
@@ -92,25 +123,13 @@ class UsageSkillCallback(BaseCallbackHandler):
         content = getattr(output, "content", output)
         if not isinstance(content, str):
             return
-        in_process_parent = started.get("parent_agent_name")
-        parent_agent_name = in_process_parent or self._child_agent_name()
+        parent_agent_name = started.get("parent_agent_name") or self._child_agent_name()
         loaded = LOADED_SKILL_PREFIX_RE.match(content)
         if loaded:
-            name = loaded.group(1)
-            registry = (
-                self._subagent_skills.get(in_process_parent.strip().lower(), {})
-                if in_process_parent else self._skills_by_name
-            )
-            registered = registry.get(name.strip().lower(), {})
             body = _SKILL_BODY_RE.search(content)
             record_skill_event(
                 self._attribution,
-                {
-                    "skill_id": registered.get("skill_id"),
-                    "skill_version_id": registered.get("skill_version_id"),
-                    "skill_project_id": registered.get("skill_project_id"),
-                    "name": name,
-                },
+                self._registered_skill(started, loaded.group(1)),
                 SKILL_SOURCE_LOAD,
                 body_chars=len(body.group(1)) if body else 0,
                 parent_agent_name=parent_agent_name,
@@ -123,6 +142,42 @@ class UsageSkillCallback(BaseCallbackHandler):
                 outcome=SKILL_OUTCOME_UNKNOWN,
                 parent_agent_name=parent_agent_name,
             )
+
+    def _record_skill_file_read(self, started, output):
+        """One row per file read_skill_file served; refusals and repeats of a read in context write nothing."""
+        content = getattr(output, "content", output)
+        if not isinstance(content, str):
+            return
+        read = READ_SKILL_FILE_PREFIX_RE.match(content)
+        if not read:
+            return
+        file_content = _SKILL_FILE_CONTENT_RE.search(content)
+        record_skill_event(
+            self._attribution,
+            self._registered_skill(started, read.group(1)),
+            SKILL_SOURCE_READ_FILE,
+            parent_agent_name=started.get("parent_agent_name") or self._child_agent_name(),
+            file_read={
+                "path": read.group(2),
+                "lines": read.group(3),
+                "bytes": len(file_content.group(1).encode("utf-8")) if file_content else 0,
+            },
+        )
+
+    def _registered_skill(self, started, name):
+        """The run's identity of a skill named in a tool result: the sub-agent's registry for its own calls."""
+        in_process_parent = started.get("parent_agent_name")
+        registry = (
+            self._subagent_skills.get(in_process_parent.strip().lower(), {})
+            if in_process_parent else self._skills_by_name
+        )
+        registered = registry.get(name.strip().lower(), {})
+        return {
+            "skill_id": registered.get("skill_id"),
+            "skill_version_id": registered.get("skill_version_id"),
+            "skill_project_id": registered.get("skill_project_id"),
+            "name": name,
+        }
 
     def _child_agent_name(self):
         attribution = self._attribution or {}
