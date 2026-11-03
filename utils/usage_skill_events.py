@@ -25,10 +25,12 @@ from .usage_tool_events import _COLUMNS, _SCHEMA, _VALUES, _correlation, _row_pa
 
 #: Zero tokens and cost: the skill body's tokens are already in the agent's own llm rows
 EVENT_TYPE_SKILL = "skill"
+EVENT_TYPE_SKILL_FILE = "skill_file"
 #: Twin of elitea_core utils/usage_attribution.ENTITY_TYPE_SKILL
 ENTITY_TYPE_SKILL = "skill"
 SKILL_SOURCE_LOAD = "load_skill"
 SKILL_SOURCE_MENTION = "mention"
+SKILL_SOURCE_READ_FILE = "read_skill_file"
 SKILL_OUTCOME_LOADED = "loaded"
 SKILL_OUTCOME_UNKNOWN = "unknown_skill"
 BODY_CHARS_PER_TOKEN = 4
@@ -53,7 +55,8 @@ def own_project_id(skill):
 
 
 def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED, body_chars=0,
-                       parent_agent_name=None):
+                       parent_agent_name=None, file_read=None):
+    """One skill usage row per run and activation; a file read is a skill_file row keyed by its path and line range too."""
     if not attribution or not attribution.get("project_id") or not isinstance(skill, dict):
         return
     try:
@@ -74,6 +77,10 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
             meta["parent_agent_name"] = parent_agent_name
         if skill_project_id:
             meta["skill_project_id"] = skill_project_id
+        if file_read:
+            meta["path"] = file_read["path"]
+            meta["bytes"] = file_read["bytes"]
+            skill_key = f"{skill_key}:{file_read['path']}{file_read.get('lines') or ''}"
         params = _row_params(
             attribution, f"skill:{_correlation(attribution)}:{source}:{skill_key}",
             {
@@ -82,7 +89,7 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
                 "entity_version_id": skill.get("skill_version_id"),
                 "entity_name": name,
             },
-            event_type=EVENT_TYPE_SKILL,
+            event_type=EVENT_TYPE_SKILL_FILE if file_read else EVENT_TYPE_SKILL,
             tool_name=None,
             duration_ms=None,
             is_error=False,
