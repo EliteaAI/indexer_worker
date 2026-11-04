@@ -53,13 +53,14 @@ LOAD_SKILL_TOOL_NAME = "load_skill"
 READ_SKILL_FILE_TOOL_NAME = "read_skill_file"
 LIST_SKILL_FILES_TOOL_NAME = "list_skill_files"
 RUN_SKILL_SCRIPT_TOOL_NAME = "run_skill_script"
-SKILL_TOOL_NAMES = (LOAD_SKILL_TOOL_NAME, READ_SKILL_FILE_TOOL_NAME, LIST_SKILL_FILES_TOOL_NAME, RUN_SKILL_SCRIPT_TOOL_NAME)
-_SCRIPT_EXIT_RE = re.compile(r"^Exit code (-?[0-9]+)")
-_SCRIPT_FILES_SHARED_RE = re.compile(r"^Files shared: (.*)$", re.MULTILINE)
-_SCRIPT_TIMED_OUT = "timed out"
 _UNKNOWN_SKILL_PREFIX = LOAD_SKILL_UNKNOWN.split("{name}", 1)[0]
 _SKILL_BODY_RE = re.compile(r'<skill name="[^"]*">\n(.*)\n</skill>', re.DOTALL)
 _SKILL_FILE_CONTENT_RE = re.compile(r'<skill_file path="[^"]*">\n(.*)\n</skill_file>\s*$', re.DOTALL)
+
+
+def is_skill_tool(tool_name):
+    """Whether a tool's results can carry a skill body, a skill file or a script run worth a usage row."""
+    return tool_name in (LOAD_SKILL_TOOL_NAME, READ_SKILL_FILE_TOOL_NAME, LIST_SKILL_FILES_TOOL_NAME, RUN_SKILL_SCRIPT_TOOL_NAME)
 
 
 def _split_auto_loaded(content):
@@ -95,7 +96,7 @@ class UsageSkillCallback(BaseCallbackHandler):
         try:
             serialized = args[0] if args and isinstance(args[0], dict) else {}
             tool_name = serialized.get("name") or kwargs.get("name")
-            if tool_name not in SKILL_TOOL_NAMES:
+            if not is_skill_tool(tool_name):
                 return
             self._open[str(run_id)] = {
                 "tool_name": tool_name,
@@ -181,11 +182,11 @@ class UsageSkillCallback(BaseCallbackHandler):
         content = getattr(output, "content", output)
         if not isinstance(content, str):
             return
-        exit_line = _SCRIPT_EXIT_RE.match(content)
+        exit_line = re.match(r"^Exit code (-?[0-9]+)", content)
         inputs = started.get("inputs") if isinstance(started.get("inputs"), dict) else {}
         if not exit_line or not isinstance(inputs.get("skill"), str):
             return
-        shared = _SCRIPT_FILES_SHARED_RE.search(content)
+        shared = re.search(r"^Files shared: (.*)$", content, re.MULTILINE)
         record_skill_script_run(
             self._attribution,
             self._registered_skill(started, inputs["skill"]),
@@ -195,7 +196,7 @@ class UsageSkillCallback(BaseCallbackHandler):
                 "duration_ms": int((time.monotonic() - started["started"]) * 1000),
                 "stdout_bytes": len(content.encode("utf-8")),
                 "output_files": len(shared.group(1).split(", ")) if shared else 0,
-                "timed_out": _SCRIPT_TIMED_OUT in content.splitlines()[0],
+                "timed_out": "timed out" in content.splitlines()[0],
                 "call_id": started["run_id"],
             },
             parent_agent_name=started.get("parent_agent_name") or self._child_agent_name(),

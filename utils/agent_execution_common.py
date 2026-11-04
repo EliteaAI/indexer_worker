@@ -507,14 +507,6 @@ def _child_event_metadata_overlay(task_meta: Dict[str, Any]) -> Optional[Dict[st
 # Thread ID Management
 # =============================================================================
 
-def attachment_bucket_of(tools: list) -> Optional[str]:
-    """The bucket the run's auto-injected Attachments toolkit reads, where skill scripts keep the conversation's files."""
-    for tool in tools or []:
-        if isinstance(tool, dict) and tool.get('name') == 'Attachments':
-            return (tool.get('settings') or {}).get('bucket') or None
-    return None
-
-
 def ensure_thread_id(thread_id: Optional[str], conversation_id: Optional[Any]) -> str:
     """
     Ensure thread_id is never None to prevent checkpointer state sharing.
