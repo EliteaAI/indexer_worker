@@ -49,6 +49,7 @@ from ..utils.checkpoint_utils import (
     delete_checkpoints_by_thread_ids,
 )
 from ..utils.agent_execution_common import (
+    attachment_bucket_of,
     setup_memory,
     create_memory_saver,
     setup_event_node,
@@ -585,6 +586,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             invoke_config['configurable']['invoked_skills'] = kwargs.get('invoked_skills') or []
             invoke_config['configurable']['attached_skills'] = kwargs.get('attached_skills') or []
             invoke_config['configurable']['project_skills'] = kwargs.get('project_skills') or []
+            invoke_config['configurable']['attachment_bucket'] = attachment_bucket_of(_all_tools)
+            invoke_config['configurable']['conversation_id'] = conversation_id
             # Segments the platform's input guardrail already inspected this turn (#6886)
             invoke_config['configurable'][INSPECTED_CONFIG_KEY] = inspected_segments(kwargs)
 
