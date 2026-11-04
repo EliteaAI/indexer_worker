@@ -56,8 +56,8 @@ def own_project_id(skill):
     return None
 
 
-def skill_key_of(skill, outcome=SKILL_OUTCOME_LOADED):
-    """The part of an idempotency key that names the skill: its project-qualified id, else its name."""
+def build_skill_key_segment(skill, outcome=SKILL_OUTCOME_LOADED):
+    """The idempotency-key segment that names the skill: its project-qualified id, else its name, after any non-loaded outcome."""
     name = skill.get("name")
     skill_key = skill.get("skill_id") or (name or "").strip().lower()
     skill_project_id = own_project_id(skill)
@@ -75,7 +75,7 @@ def record_skill_event(attribution, skill, source, outcome=SKILL_OUTCOME_LOADED,
         return
     try:
         name = skill.get("name")
-        skill_key = skill_key_of(skill, outcome)
+        skill_key = build_skill_key_segment(skill, outcome)
         skill_project_id = own_project_id(skill)
         meta = {
             "source": source,
@@ -131,7 +131,7 @@ def record_skill_script_run(attribution, skill, script, parent_agent_name=None):
             meta["skill_project_id"] = skill_project_id
         params = _row_params(
             attribution,
-            f"skill:{_correlation(attribution)}:{SKILL_SOURCE_RUN_SCRIPT}:{skill_key_of(skill)}:{script['path']}:{script['call_id']}",
+            f"skill:{_correlation(attribution)}:{SKILL_SOURCE_RUN_SCRIPT}:{build_skill_key_segment(skill)}:{script['path']}:{script['call_id']}",
             {
                 "entity_type": ENTITY_TYPE_SKILL,
                 "entity_id": skill.get("skill_id"),
