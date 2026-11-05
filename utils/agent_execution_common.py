@@ -1550,6 +1550,7 @@ def build_child_launch_payloads(
             'user_input': task_input.get('task') or '',
             'thread_id': spec.get('child_thread_id'),
             'conversation_id': parent_kwargs.get('conversation_id'),
+            'skill_scratch': parent_kwargs.get('skill_scratch'),
             'mcp_tokens': parent_kwargs.get('mcp_tokens') or {},
             'ignored_mcp_servers': parent_kwargs.get('ignored_mcp_servers') or [],
             'context_settings': {},
@@ -1626,7 +1627,7 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
     forced off so the re-invoke is a clean reconcile, not a continuation.
     """
     carry_keys = (
-        'llm', 'application', 'thread_id', 'conversation_id', 'user_input',
+        'llm', 'application', 'thread_id', 'conversation_id', 'skill_scratch', 'user_input',
         'chat_history', 'tools', 'internal_tools', 'mcp_tokens',
         'ignored_mcp_servers', 'persona', 'supports_vision', 'debug',
         'debug_mode', 'steps_limit', 'meta', 'context_settings',

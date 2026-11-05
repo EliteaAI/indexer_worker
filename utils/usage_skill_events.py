@@ -122,6 +122,7 @@ def record_skill_script_run(attribution, skill, script, parent_agent_name=None):
             "path": script["path"],
             "exit_code": script["exit_code"],
             "stdout_bytes": script["stdout_bytes"],
+            "stderr_bytes": script["stderr_bytes"],
             "output_files": script["output_files"],
             "timed_out": script["timed_out"],
         }

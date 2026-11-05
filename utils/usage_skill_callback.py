@@ -122,7 +122,7 @@ class UsageSkillCallback(BaseCallbackHandler):
             if loaded:
                 self._record_skill_load(started, loaded)
             if started["tool_name"] == RUN_SKILL_SCRIPT_TOOL_NAME:
-                self._record_skill_script_run(started, answer)
+                self._record_skill_script_run(started, output)
                 return
             self._record_skill_file_read(started, answer)
         except Exception as exc:  # pylint: disable=W0703
@@ -178,25 +178,23 @@ class UsageSkillCallback(BaseCallbackHandler):
         )
 
     def _record_skill_script_run(self, started, output):
-        """One row per script the sandbox ran; a refusal before the run (no "Exit code" line) writes nothing."""
-        content = getattr(output, "content", output)
-        if not isinstance(content, str):
-            return
-        exit_line = re.match(r"^Exit code (-?[0-9]+)", content)
+        """One row per script the sandbox ran, from the facts the run carries; a refusal before the run carries none
+        and writes nothing."""
+        facts = getattr(output, "artifact", None)
         inputs = started.get("inputs") if isinstance(started.get("inputs"), dict) else {}
-        if not exit_line or not isinstance(inputs.get("skill"), str):
+        if not isinstance(facts, dict) or not isinstance(inputs.get("skill"), str):
             return
-        shared = re.search(r"^Files shared: (.*)$", content, re.MULTILINE)
         record_skill_script_run(
             self._attribution,
             self._registered_skill(started, inputs["skill"]),
             {
                 "path": str(inputs.get("path") or ""),
-                "exit_code": int(exit_line.group(1)),
+                "exit_code": facts["exit_code"],
                 "duration_ms": int((time.monotonic() - started["started"]) * 1000),
-                "stdout_bytes": len(content.encode("utf-8")),
-                "output_files": len(shared.group(1).split(", ")) if shared else 0,
-                "timed_out": "timed out" in content.splitlines()[0],
+                "stdout_bytes": facts["stdout_bytes"],
+                "stderr_bytes": facts["stderr_bytes"],
+                "output_files": len(facts["shared"]),
+                "timed_out": facts["timed_out"],
                 "call_id": started["run_id"],
             },
             parent_agent_name=started.get("parent_agent_name") or self._child_agent_name(),
