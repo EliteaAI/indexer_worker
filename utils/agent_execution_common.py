@@ -200,6 +200,12 @@ def _is_user_message(message: Any) -> bool:
     return getattr(message, 'type', None) == 'human'
 
 
+def _replies(response: Dict[str, Any]) -> list:
+    """The messages of a response without the user's own, in order; empty when there is no messages list."""
+    messages = response.get('messages')
+    return [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+
+
 def extract_response_content(response: Dict[str, Any], response_format: str = 'messages') -> str:
     """
     Extract and normalize content from agent response.
@@ -222,8 +228,7 @@ def extract_response_content(response: Dict[str, Any], response_format: str = 'm
     # User messages are skipped: an SDK run that finished without an answer returns
     # output '' and messages ending in the user's input, which must not become the reply.
     if not content and "messages" in response:
-        messages = response.get("messages", [])
-        replies = [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+        replies = _replies(response)
         if replies:
             last_message = replies[-1]
             if hasattr(last_message, 'content'):
@@ -922,20 +927,33 @@ def tool_error_text(tool_error: Optional[Dict[str, Any]]) -> Optional[str]:
     return f"{step} could not be completed. Open the run log or ask an administrator for details."
 
 
+def _kind_and_text(message: Any) -> tuple:
+    if isinstance(message, dict):
+        kind, content = message.get('type') or message.get('role'), message.get('content')
+    else:
+        kind, content = getattr(message, 'type', None), getattr(message, 'content', None)
+    return kind, normalize_response_content(content).strip()
+
+
 def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
     """True when the run ended on a reply of the agent, not on empty text or a tool result.
 
     The SDK fills output from the last non-user message with text, and a tool message counts. After a
-    failed tool and an empty model reply, output is the tool error, so only the last reply decides.
+    failed tool and an empty model reply, output is the tool error, so the last reply decides. Without
+    a messages list nothing can be checked, so the run has no answer. Only an ai or assistant reply
+    counts; a tool, function or system message never does. A pipeline can end on a tool message and still
+    hold its real result in a declared output variable: that output differs from every tool message text.
     """
-    messages = response.get('messages')
-    replies = [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+    replies = [_kind_and_text(m) for m in _replies(response)]
     if not replies:
-        return bool(str(output.get('content') or '').strip())
-    last = replies[-1]
-    kind, content = (last.get('type') or last.get('role'), last.get('content')) if isinstance(last, dict) \
-        else (getattr(last, 'type', None), getattr(last, 'content', None))
-    return kind != 'tool' and bool(normalize_response_content(content).strip())
+        return False
+    kind, text = replies[-1]
+    if kind in ('ai', 'assistant'):
+        return bool(text)
+    if kind != 'tool':
+        return False
+    result = str(output.get('content') or '').strip()
+    return bool(result) and result not in {t for k, t in replies if k == 'tool'}
 
 
 def emit_response_events(

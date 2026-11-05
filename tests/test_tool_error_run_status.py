@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, FunctionMessage, HumanMessage, SystemMessage, ToolMessage
 
 source = Path(__file__).resolve().parents[1] / 'utils/agent_execution_common.py'
 tree = ast.parse(source.read_text())
@@ -20,6 +20,7 @@ tree.body = [
     n for n in tree.body
     if (isinstance(n, ast.FunctionDef) and n.name in (
         'tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer', '_is_user_message',
+        '_replies', '_kind_and_text',
         'normalize_response_content'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
@@ -92,7 +93,9 @@ ERROR_TEXT = ("The step 'create_issue' of github could not be completed. "
 
 
 def test_recovered_tool_error_keeps_the_run_successful():
-    meta = metadata(emit({'non_interactive': True}, MARKER, answer='The issue could not be created, here is why.'))
+    messages = [HumanMessage(content='create it'), AIMessage(content='The issue could not be created, here is why.')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='The issue could not be created, here is why.'))
 
     assert 'is_error' not in meta
     assert 'error' not in meta
@@ -121,6 +124,83 @@ def test_output_filled_from_the_tool_error_does_not_count_as_an_answer(last):
 
     assert meta['is_error'] is True
     assert meta['error'] == ERROR_TEXT
+
+
+def test_ai_reply_with_text_and_pending_tool_calls_counts_as_an_answer():
+    reply = AIMessage(content='Working on it, the issue is created.',
+                      tool_calls=[{'name': 'create_issue', 'args': {}, 'id': '2'}])
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Working on it, the issue is created.'))
+
+    assert 'is_error' not in meta
+
+
+@pytest.mark.parametrize('last', [
+    ToolMessage(content='HTTP 403', tool_call_id='1'),
+    {'type': 'tool', 'content': 'HTTP 403'},
+    {'role': 'tool', 'content': 'HTTP 403'},
+])
+def test_pipeline_ending_on_a_tool_message_with_a_different_output_counts_as_an_answer(last):
+    messages = [HumanMessage(content='run it'), last]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Report: 3 items synced.'))
+
+    assert 'is_error' not in meta
+    assert 'error' not in meta
+
+
+@pytest.mark.parametrize('answer', ['HTTP 403', '  HTTP 403\n', '', '   '])
+def test_output_equal_to_the_tool_text_or_blank_does_not_count_as_an_answer(answer):
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=answer))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+def test_an_output_equal_to_an_earlier_tool_text_does_not_count_as_an_answer():
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                ToolMessage(content='', tool_call_id='2')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer='HTTP 403'))
+
+    assert meta['is_error'] is True
+
+
+@pytest.mark.parametrize('response', [{}, {'messages': []}, {'messages': [HumanMessage(content='run it')]},
+                                      {'messages': 'not a list'}])
+def test_a_response_without_replies_has_no_answer_even_when_output_has_text(response):
+    meta = metadata(emit({'non_interactive': True}, MARKER, response=response, answer='HTTP 403'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('last', [
+    FunctionMessage(content='HTTP 403', name='create_issue'),
+    SystemMessage(content='The run was stopped.'),
+    {'type': 'function', 'content': 'HTTP 403'},
+    {'role': 'system', 'content': 'The run was stopped.'},
+    {'content': 'no type at all'},
+])
+def test_a_function_or_system_message_with_text_does_not_count_as_an_answer(last):
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer='Report: done.'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('last', [
+    {'role': 'assistant', 'content': 'Done, with a note.'},
+    {'type': 'ai', 'content': [{'type': 'text', 'text': 'Done, with a note.'}]},
+])
+def test_assistant_dict_replies_count_as_an_answer(last):
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Done, with a note.'))
+
+    assert 'is_error' not in meta
 
 
 @pytest.mark.parametrize('answer', ['', '   \n', None])

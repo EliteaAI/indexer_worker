@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 source = Path(__file__).resolve().parents[1]/'utils/agent_execution_common.py'
 tree = ast.parse(source.read_text())
 tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in
-             ('_is_user_message', 'normalize_response_content', 'extract_response_content')]
+             ('_is_user_message', '_replies', 'normalize_response_content', 'extract_response_content')]
 namespace = {'Dict': Dict, 'Any': Any, 'json': json, 'log': __import__('logging').getLogger('t')}
 exec(compile(tree, str(source), 'exec'), namespace)
 extract = namespace['extract_response_content']
