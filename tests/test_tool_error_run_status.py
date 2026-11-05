@@ -20,7 +20,7 @@ tree.body = [
     n for n in tree.body
     if (isinstance(n, ast.FunctionDef) and n.name in (
         'tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer', '_is_user_message',
-        '_replies', '_kind_and_text', '_is_unfinished_reply',
+        '_replies', '_kind_and_text', '_is_unfinished_reply', '_content_is_plain_text',
         'normalize_response_content'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
@@ -150,6 +150,126 @@ def test_ai_reply_tagged_as_a_model_error_does_not_count_as_an_answer(reply):
     messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
     meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
                          answer='Error: the model call failed'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+TAG = {'run_failure_notice': True}
+STEP_LIMIT_TEXT = 'Maximum tool execution iterations (25) reached. Stopping tool execution.'
+NODE_FAILURE_TEXT = "Tool input to the sync with value {} raised Exception: boom"
+
+
+@pytest.mark.parametrize('reply', [
+    AIMessage(content=NODE_FAILURE_TEXT, response_metadata=TAG),
+    {'type': 'ai', 'content': NODE_FAILURE_TEXT, 'response_metadata': TAG},
+    {'role': 'assistant', 'content': NODE_FAILURE_TEXT, 'response_metadata': TAG},
+], ids=['object', 'dict-type', 'dict-role'])
+def test_ai_reply_tagged_as_a_failure_notice_does_not_count_as_an_answer(reply):
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer=NODE_FAILURE_TEXT))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('notice', [NODE_FAILURE_TEXT, STEP_LIMIT_TEXT], ids=['failed-pipeline-node', 'llm-step-limit'])
+def test_a_failure_notice_as_the_last_ai_message_after_a_failed_tool_fails_the_run(notice):
+    messages = [HumanMessage(content='run it'), AIMessage(content='Starting.'),
+                ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content=notice, response_metadata=TAG)]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=notice))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+def test_an_untagged_failure_notice_from_an_older_sdk_still_counts_as_a_reply():
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content=STEP_LIMIT_TEXT)]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=STEP_LIMIT_TEXT))
+
+    assert 'is_error' not in meta
+
+
+@pytest.mark.parametrize('reply', [
+    AIMessage(content='I will call the tool.', invalid_tool_calls=[
+        {'name': 'create_issue', 'args': '{', 'id': '2', 'error': 'bad json'}]),
+    {'type': 'ai', 'content': 'I will call the tool.',
+     'invalid_tool_calls': [{'name': 'create_issue', 'args': '{', 'id': '2', 'error': 'bad json'}]},
+], ids=['object', 'dict'])
+def test_ai_reply_with_an_invalid_tool_call_does_not_count_as_an_answer(reply):
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='I will call the tool.'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('content', [
+    [{'text': 'a', 'score': 0.9}, {'text': 'b', 'score': 0.8}],
+    [{'id': 1, 'name': 'x'}],
+    [{'text': 'a'}],
+], ids=['text-records', 'other-records', 'untyped-block'])
+def test_a_tool_message_that_is_not_plain_text_leaves_no_safe_compare_and_fails_the_run(content):
+    messages = [HumanMessage(content='run it'), ToolMessage(content='Error: boom', tool_call_id='1'),
+                ToolMessage(content=content, tool_call_id='2')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer=json.dumps(content)))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+def test_a_dict_tool_message_with_a_record_as_content_fails_the_run():
+    messages = [HumanMessage(content='run it'), {'type': 'tool', 'content': {'id': 1, 'name': 'x'}}]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='{"id":1,"name":"x"}'))
+
+    assert meta['is_error'] is True
+
+
+def test_a_tool_message_with_typed_text_blocks_still_allows_the_compare():
+    messages = [HumanMessage(content='run it'),
+                ToolMessage(content=[{'type': 'text', 'text': 'HTTP 403'}], tool_call_id='1')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Report: 3 items synced.'))
+
+    assert 'is_error' not in meta
+
+
+@pytest.mark.parametrize('last', [AIMessage(content=''), AIMessage(content=[{'type': 'thinking', 'thinking': 'hm'}]),
+                                  {'type': 'ai', 'content': ''}], ids=['empty', 'thinking-only', 'dict'])
+def test_pipeline_ending_on_an_ai_message_without_text_counts_when_the_output_is_a_new_result(last):
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Report: 3 items synced.'))
+
+    assert 'is_error' not in meta
+    assert 'error' not in meta
+
+
+def test_an_ai_message_without_text_does_not_count_when_the_output_copies_an_earlier_ai_reply():
+    messages = [HumanMessage(content='run it'), AIMessage(content='Starting.'),
+                ToolMessage(content='HTTP 403', tool_call_id='1'), AIMessage(content='')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer='Starting.'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('last', [
+    AIMessage(content='', tool_calls=[{'name': 'create_issue', 'args': {}, 'id': '2'}]),
+    AIMessage(content='', response_metadata={'llm_node_error': True}),
+    AIMessage(content='', response_metadata=TAG),
+    AIMessage(content='', invalid_tool_calls=[{'name': 'x', 'args': '{', 'id': '2', 'error': 'bad'}]),
+], ids=['tool-calls', 'model-error', 'failure-notice', 'invalid-tool-call'])
+def test_an_unfinished_ai_message_without_text_never_counts_even_with_a_new_output(last):
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Report: 3 items synced.'))
 
     assert meta['is_error'] is True
     assert meta['error'] == ERROR_TEXT

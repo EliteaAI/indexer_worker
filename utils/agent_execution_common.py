@@ -936,28 +936,51 @@ def _kind_and_text(message: Any) -> tuple:
 
 
 def _is_unfinished_reply(message: Any) -> bool:
-    """True when an ai message is a tagged model error or still asks for a tool call that did not run."""
+    """True when an ai message is a tagged failure notice or still asks for a tool call that did not run.
+
+    The SDK tags the AI message of a model error (llm_node_error) and of every other failure notice
+    (run_failure_notice: a failed node, a blocked or stopped pipeline, a step limit). An SDK without the
+    run_failure_notice tag leaves those notices untagged, so they still count as a reply there.
+    """
     get = message.get if isinstance(message, dict) else lambda key: getattr(message, key, None)
     meta = get('response_metadata')
-    if (isinstance(meta, dict) and meta.get('llm_node_error')) or get('tool_calls'):
+    if isinstance(meta, dict) and (meta.get('llm_node_error') or meta.get('run_failure_notice')):
+        return True
+    # invalid_tool_calls holds a call the model made with arguments that did not parse: it never ran
+    if get('tool_calls') or get('invalid_tool_calls'):
         return True
     content = get('content')
     return isinstance(content, list) and any(
         isinstance(b, dict) and b.get('type') in ('tool_use', 'tool_call') for b in content)
 
 
+def _content_is_plain_text(content: Any) -> bool:
+    """True when the worker and the SDK read this message content as the same text.
+
+    A string, or a list of strings and typed text blocks. Records, untyped blocks and other types are
+    normalized differently by the SDK (JSON text) and by the worker (joined or empty text).
+    """
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and all(
+        isinstance(b, str) or (isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str))
+        for b in content)
+
+
 def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
-    """True when the run ended on a reply of the agent, not on empty text or a tool result.
+    """True when the run ended on a reply of the agent, not on a failure notice or a tool result.
 
     It fails closed: a doubt means no answer, so the failed tool keeps the run failed. The SDK fills output
     from the last non-user message with text, and a tool message counts. After a failed tool and an empty
     model reply, output is the tool error, so the last reply decides. Without a messages list nothing can
     be checked. Only an ai or assistant reply counts; a tool, function or system message never does. An ai
-    reply does not count when the SDK tagged it as a model error (the provider call failed and the error
-    text became the reply) or when it still holds a tool call that did not run. A pipeline can end on a
-    tool message and still hold its real result in a declared output variable: that output differs from
-    every tool message text. A run that hit the tool step limit has no answer in either case: its output
-    is the limit notice.
+    reply does not count when the SDK tagged it as a failure notice (see _is_unfinished_reply) or when it
+    still holds a tool call that did not run. A pipeline can end on a tool message, or on an ai message
+    without text, and still hold its real result in a declared output variable: that output differs from
+    the text of every message it could have been copied from. The compare uses the worker's own text of the
+    messages while the SDK builds output with its own normalizer, so a tool message that is not plain text
+    (for example a list of records) or has no text makes the compare unsafe and the run has no answer. A run
+    that hit the tool step limit has no answer in either case: its output is the limit notice.
     """
     if response.get('tool_execution_limit_reached'):
         return False
@@ -967,11 +990,21 @@ def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
         return False
     kind, text = replies[-1]
     if kind in ('ai', 'assistant'):
-        return bool(text) and not _is_unfinished_reply(messages[-1])
-    if kind != 'tool':
+        if _is_unfinished_reply(messages[-1]):
+            return False
+        if text:
+            return True
+    elif kind != 'tool':
         return False
+    tool_texts = {t for k, t in replies if k == 'tool'}
+    tool_contents = [m.get('content') if isinstance(m, dict) else getattr(m, 'content', None)
+                     for m, (k, _) in zip(messages, replies) if k == 'tool']
+    if '' in tool_texts or not all(_content_is_plain_text(c) for c in tool_contents):
+        return False
+    # After an ai message without text the output may be a copy of any earlier reply, not only of a tool result
+    copied_from = tool_texts if kind == 'tool' else {t for _, t in replies}
     result = str(output.get('content') or '').strip()
-    return bool(result) and result not in {t for k, t in replies if k == 'tool'}
+    return bool(result) and result not in copied_from
 
 
 def emit_response_events(
