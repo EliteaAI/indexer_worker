@@ -1,8 +1,8 @@
 """A failed tool fails a non-interactive run only when the agent gives no final answer.
 
 A scheduled or system run has no reader, so the stored run status must carry an
-unrecovered tool failure. A recovered one stays a note on the message. A chat run is unchanged. The module needs the pylon runtime to
-import, so the functions are loaded by source with small stand-ins.
+unrecovered tool failure. A recovered one leaves the run successful. A chat run is unchanged. The module needs the
+pylon runtime to import, so the functions are loaded by source with small stand-ins.
 """
 import ast
 import json
@@ -17,7 +17,7 @@ source = Path(__file__).resolve().parents[1] / 'utils/agent_execution_common.py'
 tree = ast.parse(source.read_text())
 tree.body = [
     n for n in tree.body
-    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer'))
+    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events', '_plain_name'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
 ]
@@ -88,13 +88,12 @@ ERROR_TEXT = ("The step 'create_issue' of github could not be completed. "
               'Open the run log or ask an administrator for details.')
 
 
-def test_recovered_tool_error_keeps_the_run_successful_and_leaves_a_note():
+def test_recovered_tool_error_keeps_the_run_successful():
     meta = metadata(emit({'non_interactive': True}, MARKER, answer='The issue could not be created, here is why.'))
 
     assert 'is_error' not in meta
     assert 'error' not in meta
-    assert meta['additional_response_meta']['tool_error'] == ERROR_TEXT
-    assert 'HTTP 403' not in meta['additional_response_meta']['tool_error']
+    assert 'tool_error' not in meta['additional_response_meta']
 
 
 @pytest.mark.parametrize('answer', ['', '   \n', None])
@@ -103,7 +102,8 @@ def test_unrecovered_tool_error_without_an_answer_fails_the_run(answer):
 
     assert meta['is_error'] is True
     assert meta['error'] == ERROR_TEXT
-    assert meta['additional_response_meta']['tool_error'] == ERROR_TEXT
+    assert 'HTTP 403' not in meta['error']
+    assert 'tool_error' not in meta['additional_response_meta']
 
 
 def test_marker_in_an_interactive_run_adds_neither_key():
