@@ -20,7 +20,7 @@ tree.body = [
     n for n in tree.body
     if (isinstance(n, ast.FunctionDef) and n.name in (
         'tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer', '_is_user_message',
-        '_replies', '_kind_and_text',
+        '_replies', '_kind_and_text', '_is_unfinished_reply',
         'normalize_response_content'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
@@ -126,14 +126,47 @@ def test_output_filled_from_the_tool_error_does_not_count_as_an_answer(last):
     assert meta['error'] == ERROR_TEXT
 
 
-def test_ai_reply_with_text_and_pending_tool_calls_counts_as_an_answer():
-    reply = AIMessage(content='Working on it, the issue is created.',
-                      tool_calls=[{'name': 'create_issue', 'args': {}, 'id': '2'}])
+@pytest.mark.parametrize('reply', [
+    AIMessage(content='Working on it, the issue is created.',
+              tool_calls=[{'name': 'create_issue', 'args': {}, 'id': '2'}]),
+    {'role': 'assistant', 'content': 'Working on it.', 'tool_calls': [{'name': 'create_issue', 'id': '2'}]},
+    AIMessage(content=[{'type': 'text', 'text': 'Working on it.'},
+                       {'type': 'tool_use', 'id': '2', 'name': 'create_issue', 'input': {}}]),
+], ids=['object-tool-calls', 'dict-tool-calls', 'tool-use-block'])
+def test_ai_reply_with_text_and_pending_tool_calls_does_not_count_as_an_answer(reply):
     messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
     meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
-                         answer='Working on it, the issue is created.'))
+                         answer='Working on it.'))
 
-    assert 'is_error' not in meta
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('reply', [
+    AIMessage(content='Error: the model call failed', response_metadata={'llm_node_error': True}),
+    {'type': 'ai', 'content': 'Error: the model call failed', 'response_metadata': {'llm_node_error': True}},
+], ids=['object', 'dict'])
+def test_ai_reply_tagged_as_a_model_error_does_not_count_as_an_answer(reply):
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Error: the model call failed'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('last', [
+    ToolMessage(content='HTTP 403', tool_call_id='1'),
+    AIMessage(content='Done, with a note.'),
+], ids=['tool-message', 'ai-message'])
+def test_a_run_stopped_at_the_step_limit_after_a_failed_tool_has_no_answer(last):
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
+    response = {'messages': messages, 'tool_execution_limit_reached': True}
+    meta = metadata(emit({'non_interactive': True}, MARKER, response=response,
+                         answer='Tool step limit 25 reached for this run.'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
 
 
 @pytest.mark.parametrize('last', [

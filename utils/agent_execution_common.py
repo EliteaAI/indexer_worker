@@ -935,21 +935,39 @@ def _kind_and_text(message: Any) -> tuple:
     return kind, normalize_response_content(content).strip()
 
 
+def _is_unfinished_reply(message: Any) -> bool:
+    """True when an ai message is a tagged model error or still asks for a tool call that did not run."""
+    get = message.get if isinstance(message, dict) else lambda key: getattr(message, key, None)
+    meta = get('response_metadata')
+    if (isinstance(meta, dict) and meta.get('llm_node_error')) or get('tool_calls'):
+        return True
+    content = get('content')
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get('type') in ('tool_use', 'tool_call') for b in content)
+
+
 def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
     """True when the run ended on a reply of the agent, not on empty text or a tool result.
 
-    The SDK fills output from the last non-user message with text, and a tool message counts. After a
-    failed tool and an empty model reply, output is the tool error, so the last reply decides. Without
-    a messages list nothing can be checked, so the run has no answer. Only an ai or assistant reply
-    counts; a tool, function or system message never does. A pipeline can end on a tool message and still
-    hold its real result in a declared output variable: that output differs from every tool message text.
+    It fails closed: a doubt means no answer, so the failed tool keeps the run failed. The SDK fills output
+    from the last non-user message with text, and a tool message counts. After a failed tool and an empty
+    model reply, output is the tool error, so the last reply decides. Without a messages list nothing can
+    be checked. Only an ai or assistant reply counts; a tool, function or system message never does. An ai
+    reply does not count when the SDK tagged it as a model error (the provider call failed and the error
+    text became the reply) or when it still holds a tool call that did not run. A pipeline can end on a
+    tool message and still hold its real result in a declared output variable: that output differs from
+    every tool message text. A run that hit the tool step limit has no answer in either case: its output
+    is the limit notice.
     """
-    replies = [_kind_and_text(m) for m in _replies(response)]
+    if response.get('tool_execution_limit_reached'):
+        return False
+    messages = _replies(response)
+    replies = [_kind_and_text(m) for m in messages]
     if not replies:
         return False
     kind, text = replies[-1]
     if kind in ('ai', 'assistant'):
-        return bool(text)
+        return bool(text) and not _is_unfinished_reply(messages[-1])
     if kind != 'tool':
         return False
     result = str(output.get('content') or '').strip()
