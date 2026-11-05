@@ -914,12 +914,28 @@ def tool_error_text(tool_error: Optional[Dict[str, Any]]) -> Optional[str]:
     tool_error = (tool_error or {}).get('error')
     if not tool_error:
         return None
-    log.warning('A tool failed in a non-interactive run: toolkit=%r tool=%r reason=%r',
+    log.warning('A tool call failed during the run: toolkit=%r tool=%r reason=%r',
                 tool_error.get('toolkit'), tool_error.get('tool'), tool_error.get('reason'))
     toolkit, tool = _plain_name(tool_error.get('toolkit')), _plain_name(tool_error.get('tool'))
     # A failure without a tool name is still a failure: the run must not look successful
     step = f"The step '{tool}' of {toolkit}" if tool and toolkit else f"The step '{tool}'" if tool else 'A step'
     return f"{step} could not be completed. Open the run log or ask an administrator for details."
+
+
+def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
+    """True when the run ended on a reply of the agent, not on empty text or a tool result.
+
+    The SDK fills output from the last non-user message with text, and a tool message counts. After a
+    failed tool and an empty model reply, output is the tool error, so only the last reply decides.
+    """
+    messages = response.get('messages')
+    replies = [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+    if not replies:
+        return bool(str(output.get('content') or '').strip())
+    last = replies[-1]
+    kind, content = (last.get('type') or last.get('role'), last.get('content')) if isinstance(last, dict) \
+        else (getattr(last, 'type', None), getattr(last, 'content', None))
+    return kind != 'tool' and bool(normalize_response_content(content).strip())
 
 
 def emit_response_events(
@@ -1107,11 +1123,11 @@ def emit_response_events(
 
         # A scheduled or system run has no reader to see a failed tool. A tool error the agent
         # recovered from (it still gave an answer) leaves the run successful. The run fails only
-        # when the agent has no answer. A chat run shows the failure itself.
+        # when the last reply of the agent is not an answer. A chat run shows the failure itself.
         # The holder lives inside one executor call. A parked fan-out parent and the run after a
         # human decision start with an empty holder, so an error from before that point is not seen.
         tool_error_line = tool_error_text(tool_error)
-        if tool_error_line and task_meta.get("non_interactive") and not str(output.get('content') or '').strip():
+        if tool_error_line and task_meta.get("non_interactive") and not _has_final_answer(response, output):
             full_message_metadata['is_error'] = True
             full_message_metadata['error'] = tool_error_line
 

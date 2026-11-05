@@ -12,12 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 source = Path(__file__).resolve().parents[1] / 'utils/agent_execution_common.py'
 tree = ast.parse(source.read_text())
 tree.body = [
     n for n in tree.body
-    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events', '_plain_name'))
+    if (isinstance(n, ast.FunctionDef) and n.name in (
+        'tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer', '_is_user_message',
+        'normalize_response_content'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
 ]
@@ -95,6 +98,31 @@ def test_recovered_tool_error_keeps_the_run_successful():
     assert 'error' not in meta
 
 
+def test_recovered_run_with_an_ai_answer_as_last_message_stays_successful():
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content='The issue could not be created, here is why.')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='The issue could not be created, here is why.'))
+
+    assert 'is_error' not in meta
+    assert 'error' not in meta
+
+
+@pytest.mark.parametrize('last', [
+    AIMessage(content=''),
+    AIMessage(content=[]),
+    AIMessage(content=[{'type': 'tool_use', 'id': '1', 'name': 'create_issue', 'input': {}}]),
+    ToolMessage(content='HTTP 403', tool_call_id='1'),
+    {'type': 'tool', 'content': 'HTTP 403'},
+])
+def test_output_filled_from_the_tool_error_does_not_count_as_an_answer(last):
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer='HTTP 403'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
 @pytest.mark.parametrize('answer', ['', '   \n', None])
 def test_unrecovered_tool_error_without_an_answer_fails_the_run(answer):
     meta = metadata(emit({'non_interactive': True}, MARKER, answer=answer))
@@ -105,7 +133,7 @@ def test_unrecovered_tool_error_without_an_answer_fails_the_run(answer):
 
 
 def test_marker_in_an_interactive_run_adds_neither_key():
-    meta = metadata(emit({}, MARKER))
+    meta = metadata(emit({}, MARKER, answer=''))
 
     assert 'is_error' not in meta
     assert 'error' not in meta
