@@ -922,6 +922,12 @@ def tool_error_text(tool_error: Optional[Dict[str, Any]]) -> Optional[str]:
     return f"{step} could not be completed. Open the run log or ask an administrator for details."
 
 
+def _has_final_answer(content: Any) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    return bool(content)
+
+
 def emit_response_events(
     node_interface: NodeEventInterface,
     response: Dict[str, Any],
@@ -1104,14 +1110,18 @@ def emit_response_events(
             ),
         }
 
-        # A scheduled or system run has no reader to see a failed tool, so the
-        # stored run status must carry it. A chat run shows the failure itself.
+        # A scheduled or system run has no reader to see a failed tool. A tool error the agent
+        # recovered from (it still gave an answer) stays a note on the message and the run
+        # succeeds. The run fails only when the agent has no answer. A chat run shows the failure itself.
         # The holder lives inside one executor call. A parked fan-out parent and the run after a
         # human decision start with an empty holder, so an error from before that point is not seen.
         tool_error_line = tool_error_text(tool_error)
         if tool_error_line and task_meta.get("non_interactive"):
-            full_message_metadata['is_error'] = True
-            full_message_metadata['error'] = tool_error_line
+            # A bare response_metadata key is dropped by elitea_core's whitelist; this one is stored
+            full_message_metadata['additional_response_meta']['tool_error'] = tool_error_line
+            if not _has_final_answer(output.get('content')):
+                full_message_metadata['is_error'] = True
+                full_message_metadata['error'] = tool_error_line
 
         msg_event_node = NodeEvent(
             type=EventTypes.full_message,

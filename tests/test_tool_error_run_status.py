@@ -1,7 +1,7 @@
-"""A failed tool marks a non-interactive run as failed in the final message.
+"""A failed tool fails a non-interactive run only when the agent gives no final answer.
 
-A scheduled or system run has no reader, so the stored run status must carry the
-tool failure. A chat run is unchanged. The module needs the pylon runtime to
+A scheduled or system run has no reader, so the stored run status must carry an
+unrecovered tool failure. A recovered one stays a note on the message. A chat run is unchanged. The module needs the pylon runtime to
 import, so the functions are loaded by source with small stand-ins.
 """
 import ast
@@ -17,19 +17,19 @@ source = Path(__file__).resolve().parents[1] / 'utils/agent_execution_common.py'
 tree = ast.parse(source.read_text())
 tree.body = [
     n for n in tree.body
-    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events', '_plain_name'))
+    if (isinstance(n, ast.FunctionDef) and n.name in ('tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
 ]
 
 
 class FakeNodeEvent:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+    def __init__(self, type, stream_id, message_id, response_metadata, content):
+        self.response_metadata = response_metadata
+        self.content = content
 
     def model_dump_json(self):
-        return json.dumps({'response_metadata': self.kwargs['response_metadata'],
-                           'content': self.kwargs['content']})
+        return json.dumps({'response_metadata': self.response_metadata, 'content': self.content})
 
 
 class FakeInterface:
@@ -41,8 +41,8 @@ class FakeInterface:
         self.full_messages = []
         self.event_node = SimpleNamespace(emit=lambda name, payload: self.full_messages.append(payload))
 
-    def emit(self, **kwargs):
-        self.emitted.append(kwargs)
+    def emit(self, type, content, response_metadata):
+        self.emitted.append({'type': type, 'content': content, 'response_metadata': response_metadata})
 
 
 namespace = {
@@ -64,14 +64,14 @@ exec(compile(tree, str(source), "exec"), namespace)  # noqa: S102 -- the module 
 tool_error_text = namespace['tool_error_text']
 
 
-def emit(task_meta, tool_error, response=None):
+def emit(task_meta, tool_error, response=None, answer='answer'):
     callback = SimpleNamespace(tokens_in=1, tokens_out=2, llm_start_timestamp=None, created_entities=None,
                                tool_calls=[], usage_run_id=None)
     custom = SimpleNamespace(tokens_in=0, tokens_out=0, additional_response_meta={}, modified_files=[],
                              index_statuses=[])
     interface = FakeInterface()
     namespace['emit_response_events'](
-        interface, response or {}, {'content': 'answer'}, 'thread', 'message', callback, custom,
+        interface, response or {}, {'content': answer}, 'thread', 'message', callback, custom,
         task_meta, {}, [], SimpleNamespace(content='question'), tool_error=tool_error)
     return interface
 
@@ -84,13 +84,26 @@ def metadata(interface):
 MARKER = {'error': {'toolkit': 'github', 'tool': 'create_issue', 'reason': 'HTTP 403'}}
 
 
-def test_marker_in_a_non_interactive_run_sets_is_error_and_error_text():
-    meta = metadata(emit({'non_interactive': True}, MARKER))
+ERROR_TEXT = ("The step 'create_issue' of github could not be completed. "
+              'Open the run log or ask an administrator for details.')
+
+
+def test_recovered_tool_error_keeps_the_run_successful_and_leaves_a_note():
+    meta = metadata(emit({'non_interactive': True}, MARKER, answer='The issue could not be created, here is why.'))
+
+    assert 'is_error' not in meta
+    assert 'error' not in meta
+    assert meta['additional_response_meta']['tool_error'] == ERROR_TEXT
+    assert 'HTTP 403' not in meta['additional_response_meta']['tool_error']
+
+
+@pytest.mark.parametrize('answer', ['', '   \n', None])
+def test_unrecovered_tool_error_without_an_answer_fails_the_run(answer):
+    meta = metadata(emit({'non_interactive': True}, MARKER, answer=answer))
 
     assert meta['is_error'] is True
-    assert meta['error'] == ("The step 'create_issue' of github could not be completed. "
-                             'Open the run log or ask an administrator for details.')
-    assert 'HTTP 403' not in meta['error']
+    assert meta['error'] == ERROR_TEXT
+    assert meta['additional_response_meta']['tool_error'] == ERROR_TEXT
 
 
 def test_marker_in_an_interactive_run_adds_neither_key():
@@ -98,14 +111,16 @@ def test_marker_in_an_interactive_run_adds_neither_key():
 
     assert 'is_error' not in meta
     assert 'error' not in meta
+    assert 'tool_error' not in meta['additional_response_meta']
 
 
 @pytest.mark.parametrize('empty', [None, {}])
 def test_no_marker_adds_neither_key(empty):
-    meta = metadata(emit({'non_interactive': True}, empty))
+    meta = metadata(emit({'non_interactive': True}, empty, answer=''))
 
     assert 'is_error' not in meta
     assert 'error' not in meta
+    assert 'tool_error' not in meta['additional_response_meta']
 
 
 def test_hitl_pause_emits_no_full_message():
@@ -145,9 +160,9 @@ def test_empty_toolkit_names_the_step_only():
 
 
 @pytest.mark.parametrize('marker', [{'error': {'toolkit': 'github', 'tool': '', 'reason': 'boom'}}, {'error': {'toolkit': 'github'}}])
-def test_a_failure_without_a_tool_name_still_fails_the_run(marker):
+def test_a_failure_without_a_tool_name_still_fails_a_run_without_an_answer(marker):
     assert tool_error_text(marker).startswith('A step could not be completed.')
-    meta = metadata(emit({'non_interactive': True}, marker))
+    meta = metadata(emit({'non_interactive': True}, marker, answer=''))
     assert meta['is_error'] is True
 
 
