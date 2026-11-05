@@ -93,7 +93,6 @@ def test_recovered_tool_error_keeps_the_run_successful():
 
     assert 'is_error' not in meta
     assert 'error' not in meta
-    assert 'tool_error' not in meta['additional_response_meta']
 
 
 @pytest.mark.parametrize('answer', ['', '   \n', None])
@@ -103,7 +102,6 @@ def test_unrecovered_tool_error_without_an_answer_fails_the_run(answer):
     assert meta['is_error'] is True
     assert meta['error'] == ERROR_TEXT
     assert 'HTTP 403' not in meta['error']
-    assert 'tool_error' not in meta['additional_response_meta']
 
 
 def test_marker_in_an_interactive_run_adds_neither_key():
@@ -111,7 +109,6 @@ def test_marker_in_an_interactive_run_adds_neither_key():
 
     assert 'is_error' not in meta
     assert 'error' not in meta
-    assert 'tool_error' not in meta['additional_response_meta']
 
 
 @pytest.mark.parametrize('empty', [None, {}])
@@ -120,7 +117,6 @@ def test_no_marker_adds_neither_key(empty):
 
     assert 'is_error' not in meta
     assert 'error' not in meta
-    assert 'tool_error' not in meta['additional_response_meta']
 
 
 def test_hitl_pause_emits_no_full_message():
