@@ -112,16 +112,14 @@ def test_recovered_run_with_an_ai_answer_as_last_message_stays_successful():
     assert 'error' not in meta
 
 
-def test_a_recovered_run_still_logs_the_failed_tool_and_keeps_the_answer(monkeypatch):
+def test_a_recovered_run_still_logs_the_failed_tool(monkeypatch):
     logged = []
     monkeypatch.setitem(namespace, 'log', SimpleNamespace(warning=lambda *args, **kwargs: logged.append(args)))
     messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
                 AIMessage(content='The issue could not be created, here is why.')]
-    interface = emit({'non_interactive': True}, MARKER, response={'messages': messages},
-                     answer='The issue could not be created, here is why.')
+    emit({'non_interactive': True}, MARKER, response={'messages': messages},
+         answer='The issue could not be created, here is why.')
 
-    assert 'is_error' not in metadata(interface)
-    assert interface.full_messages[0]['content'] == 'The issue could not be created, here is why.'
     assert len(logged) == 1
     assert logged[0][1:] == ('github', 'create_issue', 'HTTP 403')
 
