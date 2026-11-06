@@ -903,6 +903,12 @@ except ImportError:  # older SDK: runs behave as before, no tool error is report
     def run_error_flag():
         yield {}
 
+try:
+    from elitea_sdk.runtime.tool_outcome import RUN_FAILURE_NOTICE_KEY
+except ImportError:  # older SDK: its failure notices carry no tag, so a reply cannot be told from a notice
+    RUN_FAILURE_NOTICE_KEY = None
+    log.warning('The installed elitea_sdk does not tag failure notices: a failed tool always fails a scheduled run')
+
 
 def _plain_name(value: Any) -> str:
     cleaned = _PLAIN_NAME.sub(' ', _CONTROL_CHARS.sub(' ', str(value or '')))
@@ -939,12 +945,12 @@ def _is_unfinished_reply(message: Any) -> bool:
     """True when an ai message is a tagged failure notice or still asks for a tool call that did not run.
 
     The SDK tags the AI message of a model error (llm_node_error) and of every other failure notice
-    (run_failure_notice: a failed node, a blocked or stopped pipeline, a step limit). An SDK without the
-    run_failure_notice tag leaves those notices untagged, so they still count as a reply there.
+    (RUN_FAILURE_NOTICE_KEY: a failed node, a blocked or stopped pipeline, a step limit).
     """
     get = message.get if isinstance(message, dict) else lambda key: getattr(message, key, None)
     meta = get('response_metadata')
-    if isinstance(meta, dict) and (meta.get('llm_node_error') or meta.get('run_failure_notice')):
+    if isinstance(meta, dict) and (
+            meta.get('llm_node_error') or (RUN_FAILURE_NOTICE_KEY and meta.get(RUN_FAILURE_NOTICE_KEY))):
         return True
     # invalid_tool_calls holds a call the model made with arguments that did not parse: it never ran
     if get('tool_calls') or get('invalid_tool_calls'):
@@ -968,43 +974,30 @@ def _content_is_plain_text(content: Any) -> bool:
 
 
 def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
-    """True when the run ended on a reply of the agent, not on a failure notice or a tool result.
+    """True only when the run ended on a clean reply of the agent that is also the run output.
 
-    It fails closed: a doubt means no answer, so the failed tool keeps the run failed. The SDK fills output
-    from the last non-user message with text, and a tool message counts. After a failed tool and an empty
-    model reply, output is the tool error, so the last reply decides. Without a messages list nothing can
-    be checked. Only an ai or assistant reply counts; a tool, function or system message never does. An ai
-    reply does not count when the SDK tagged it as a failure notice (see _is_unfinished_reply) or when it
-    still holds a tool call that did not run. A pipeline can end on a tool message, or on an ai message
-    without text, and still hold its real result in a declared output variable: that output differs from
-    the text of every message it could have been copied from. The compare uses the worker's own text of the
-    messages while the SDK builds output with its own normalizer, so a tool message that is not plain text
-    (for example a list of records) or has no text makes the compare unsafe and the run has no answer. A run
-    that hit the tool step limit has no answer in either case: its output is the limit notice.
+    It fails closed: a doubt means no answer, so the failed tool keeps the run failed. The reply is the last
+    non-user message and must be an ai or assistant message with plain text, with no failure tag
+    (see _is_unfinished_reply) and no tool call that did not run. The output must equal that text. A pipeline
+    can fill output from a declared variable that holds the error of a later failed node, and a clean reply
+    before it must not hide that. A run that ended on a tool message, on a message without text, on a blocked
+    pipeline or at the tool step limit has no answer. An SDK that cannot tag failure notices gives no answer.
     """
-    if response.get('tool_execution_limit_reached'):
+    if RUN_FAILURE_NOTICE_KEY is None:
+        return False
+    if response.get('tool_execution_limit_reached') or response.get('_pipeline_blocked'):
         return False
     messages = _replies(response)
-    replies = [_kind_and_text(m) for m in messages]
-    if not replies:
+    if not messages:
         return False
-    kind, text = replies[-1]
-    if kind in ('ai', 'assistant'):
-        if _is_unfinished_reply(messages[-1]):
-            return False
-        if text:
-            return True
-    elif kind != 'tool':
+    last = messages[-1]
+    kind, text = _kind_and_text(last)
+    if kind not in ('ai', 'assistant') or _is_unfinished_reply(last):
         return False
-    tool_texts = {t for k, t in replies if k == 'tool'}
-    tool_contents = [m.get('content') if isinstance(m, dict) else getattr(m, 'content', None)
-                     for m, (k, _) in zip(messages, replies) if k == 'tool']
-    if '' in tool_texts or not all(_content_is_plain_text(c) for c in tool_contents):
+    content = last.get('content') if isinstance(last, dict) else getattr(last, 'content', None)
+    if not text or not _content_is_plain_text(content):
         return False
-    # After an ai message without text the output may be a copy of any earlier reply, not only of a tool result
-    copied_from = tool_texts if kind == 'tool' else {t for _, t in replies}
-    result = str(output.get('content') or '').strip()
-    return bool(result) and result not in copied_from
+    return str(output.get('content') or '').strip() == text
 
 
 def emit_response_events(
@@ -1191,8 +1184,9 @@ def emit_response_events(
         }
 
         # A scheduled or system run has no reader to see a failed tool. A tool error the agent
-        # recovered from (it still gave an answer) leaves the run successful. The run fails only
-        # when the last reply of the agent is not an answer. A chat run shows the failure itself.
+        # recovered from leaves the run successful only when the last message is a clean ai text
+        # and the run output is that same text. Anything else fails the run. A chat run shows the
+        # failure itself.
         # The holder lives inside one executor call. A parked fan-out parent and the run after a
         # human decision start with an empty holder, so an error from before that point is not seen.
         tool_error_line = tool_error_text(tool_error)

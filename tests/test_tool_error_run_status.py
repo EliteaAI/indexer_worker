@@ -63,6 +63,7 @@ namespace = {
     'split_mcp_auth_interrupts': lambda hitl, hitls: ([], hitl, hitls or []),
     '_merge_usage_by_model': lambda callbacks: {},
     '_collect_applied_skills': lambda applied, attached, calls: [],
+    'RUN_FAILURE_NOTICE_KEY': 'run_failure_notice',
 }
 exec(compile(tree, str(source), "exec"), namespace)  # noqa: S102 -- the module pulls in heavy imports, so only the helpers under test are run
 tool_error_text = namespace['tool_error_text']
@@ -185,12 +186,41 @@ def test_a_failure_notice_as_the_last_ai_message_after_a_failed_tool_fails_the_r
     assert meta['error'] == ERROR_TEXT
 
 
-def test_an_untagged_failure_notice_from_an_older_sdk_still_counts_as_a_reply():
+def test_an_sdk_without_the_failure_notice_key_never_counts_a_reply_after_a_failed_tool(monkeypatch):
+    monkeypatch.setitem(namespace, 'RUN_FAILURE_NOTICE_KEY', None)
     messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
                 AIMessage(content=STEP_LIMIT_TEXT)]
     meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=STEP_LIMIT_TEXT))
 
-    assert 'is_error' not in meta
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+def test_a_clean_ai_reply_with_a_different_output_fails_the_run():
+    messages = [HumanMessage(content='run it'), AIMessage(content='Done.')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Error: HTTP 403 from github'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+def test_a_blocked_pipeline_fails_the_run_even_after_a_clean_reply():
+    messages = [HumanMessage(content='run it'), AIMessage(content='All steps done.')]
+    response = {'messages': messages, '_pipeline_blocked': 'The pipeline is blocked.'}
+    meta = metadata(emit({'non_interactive': True}, MARKER, response=response, answer='All steps done.'))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+def test_a_nested_child_failure_copied_to_the_parent_fails_the_run():
+    child_notice = {'role': 'assistant', 'content': NODE_FAILURE_TEXT, 'response_metadata': dict(TAG)}
+    messages = [HumanMessage(content='run it'), child_notice]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=NODE_FAILURE_TEXT))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
 
 
 @pytest.mark.parametrize('reply', [
@@ -231,24 +261,15 @@ def test_a_dict_tool_message_with_a_record_as_content_fails_the_run():
     assert meta['is_error'] is True
 
 
-def test_a_tool_message_with_typed_text_blocks_still_allows_the_compare():
-    messages = [HumanMessage(content='run it'),
-                ToolMessage(content=[{'type': 'text', 'text': 'HTTP 403'}], tool_call_id='1')]
-    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
-                         answer='Report: 3 items synced.'))
-
-    assert 'is_error' not in meta
-
-
 @pytest.mark.parametrize('last', [AIMessage(content=''), AIMessage(content=[{'type': 'thinking', 'thinking': 'hm'}]),
                                   {'type': 'ai', 'content': ''}], ids=['empty', 'thinking-only', 'dict'])
-def test_pipeline_ending_on_an_ai_message_without_text_counts_when_the_output_is_a_new_result(last):
+def test_an_ai_message_without_text_fails_the_run_even_with_a_new_output(last):
     messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'), last]
     meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
                          answer='Report: 3 items synced.'))
 
-    assert 'is_error' not in meta
-    assert 'error' not in meta
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
 
 
 def test_an_ai_message_without_text_does_not_count_when_the_output_copies_an_earlier_ai_reply():
@@ -294,13 +315,13 @@ def test_a_run_stopped_at_the_step_limit_after_a_failed_tool_has_no_answer(last)
     {'type': 'tool', 'content': 'HTTP 403'},
     {'role': 'tool', 'content': 'HTTP 403'},
 ])
-def test_pipeline_ending_on_a_tool_message_with_a_different_output_counts_as_an_answer(last):
+def test_a_run_ending_on_a_tool_message_fails_whatever_the_output(last):
     messages = [HumanMessage(content='run it'), last]
     meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
                          answer='Report: 3 items synced.'))
 
-    assert 'is_error' not in meta
-    assert 'error' not in meta
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
 
 
 @pytest.mark.parametrize('answer', ['HTTP 403', '  HTTP 403\n', '', '   '])
@@ -459,3 +480,21 @@ def test_without_run_error_flag_in_the_sdk_the_worker_runs_as_before_and_says_so
 
     assert holder == {}
     assert warned and 'run_error_flag' in warned[0][0]
+
+
+def test_the_failure_notice_key_falls_back_to_none_without_the_sdk_name():
+    common = Path(__file__).resolve().parents[1] / 'utils' / 'agent_execution_common.py'
+    tree = ast.parse(common.read_text())
+    guards = [n for n in tree.body if isinstance(n, ast.Try)
+              and any(isinstance(h.type, ast.Name) and h.type.id == 'ImportError' for h in n.handlers)
+              and 'RUN_FAILURE_NOTICE_KEY' in ast.unparse(n)]
+    assert len(guards) == 1
+    guard = guards[0]
+    warned = []
+    fallback = ast.Module(body=list(guard.handlers[0].body), type_ignores=[])
+    scope = {'log': SimpleNamespace(warning=lambda *a: warned.append(a))}
+    exec(compile(ast.fix_missing_locations(fallback), 'fallback', 'exec'), scope)  # noqa: S102 -- only the fallback branch runs
+
+    assert scope['RUN_FAILURE_NOTICE_KEY'] is None
+    assert warned and 'always fails' in warned[0][0]
+    assert 'run_error_flag' not in warned[0][0]
