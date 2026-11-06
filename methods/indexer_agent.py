@@ -550,13 +550,12 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             application = kwargs.get('application') or {}
             version_details = application.get('version_details') or {}
             _all_tools = kwargs.get('tools') or version_details.get('tools') or []
+            attachments_toolkit = next((t for t in _all_tools if t.get('name') == 'Attachments'), None)
             invoke_input = prepare_invoke_input(
                 chat_history,
                 user_message,
                 conversation_id,
-                include_attachment_system_message=any(
-                    t.get('name') == 'Attachments' for t in _all_tools
-                ),
+                include_attachment_system_message=attachments_toolkit is not None,
                 model_name=client_args.get('model', ''),
                 supports_vision=supports_vision,
                 routing_projection=projection if (client_args.get('selection') or {}).get('mode') == 'auto' else None,
@@ -585,6 +584,9 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             invoke_config['configurable']['invoked_skills'] = kwargs.get('invoked_skills') or []
             invoke_config['configurable']['attached_skills'] = kwargs.get('attached_skills') or []
             invoke_config['configurable']['project_skills'] = kwargs.get('project_skills') or []
+            invoke_config['configurable']['attachment_bucket'] = ((attachments_toolkit or {}).get('settings') or {}).get('bucket')
+            invoke_config['configurable']['conversation_id'] = conversation_id
+            invoke_config['configurable']['skill_scratch'] = kwargs.get('skill_scratch')
             # Segments the platform's input guardrail already inspected this turn (#6886)
             invoke_config['configurable'][INSPECTED_CONFIG_KEY] = inspected_segments(kwargs)
 

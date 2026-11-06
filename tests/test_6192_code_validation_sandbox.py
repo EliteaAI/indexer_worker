@@ -8,10 +8,8 @@ whole eval run:
   * successful execution   -> the CodeExecutionResult is flattened to the plain dict shape
                               pylon_main's map_execution_result consumes,
 and the security posture the default factory must construct: the release-blocking
-denials stay hard-off (allow_net=False, allow_run/ffi=False, no elitea_client, base
-SyncPyodideSandbox engine), while env/read/write are scoped ONLY to the offline Pyodide
-cache dirs the deployed main.js needs to boot (allow_env=['SANDBOX_BASE'],
-allow_write=[tmp, deno_cache]) — never True, never the filesystem root.
+denials stay hard-off (allow_net=False, no elitea_client, base SyncPyodideSandbox
+engine), with every other grant the SDK's shared local sandbox permissions.
 
 The module keeps every SDK/Deno import lazy inside its functions, so it loads by source
 here and runs with injected stub factory/probe/limits — no SDK, no Deno binary needed.
@@ -323,79 +321,18 @@ def test_memory_pressure_probe_returning_none_fails_open():
 # Security posture the default factory must construct (EVAL-E2E-14)
 # ---------------------------------------------------------------------------
 
-def test_default_factory_is_deny_by_default_no_client(monkeypatch):
-    """The default factory must build a base SyncPyodideSandbox with every allow_*
-    denied and NO elitea_client. We stub the SDK class to capture the kwargs rather
-    than boot a real WASM image."""
-    captured = {}
-
-    class _StubSyncPyodideSandbox:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
+def test_the_default_sandbox_is_offline_with_the_sdks_local_permissions(monkeypatch):
     import sys
     import types
+    constructed = []
+    permissions = {'allow_write': False, 'allow_read': ['/sandbox/pyodide'], 'allow_remote_modules': False}
+    engine = types.ModuleType('elitea_sdk.runtime.langchain.pyodide_sandbox')
+    engine.SyncPyodideSandbox = lambda **kwargs: constructed.append(kwargs) or 'sandbox'
+    tools = types.ModuleType('elitea_sdk.runtime.tools.sandbox')
+    tools.local_sandbox_permissions = lambda: dict(permissions)
+    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.langchain.pyodide_sandbox', engine)
+    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.tools.sandbox', tools)
 
-    pkg = types.ModuleType('elitea_sdk')
-    runtime = types.ModuleType('elitea_sdk.runtime')
-    langchain = types.ModuleType('elitea_sdk.runtime.langchain')
-    pyo = types.ModuleType('elitea_sdk.runtime.langchain.pyodide_sandbox')
-    pyo.SyncPyodideSandbox = _StubSyncPyodideSandbox
-    monkeypatch.setitem(sys.modules, 'elitea_sdk', pkg)
-    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime', runtime)
-    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.langchain', langchain)
-    monkeypatch.setitem(sys.modules, 'elitea_sdk.runtime.langchain.pyodide_sandbox', pyo)
-    monkeypatch.setenv('SANDBOX_BASE', '/tmp/sbx')
-    monkeypatch.setenv('DENO_DIR', '/tmp/deno')
-
-    box = sandbox._default_sandbox_factory()
-    assert isinstance(box, _StubSyncPyodideSandbox)
-
-    # release-blocking denials: network, run, ffi hard-off (never relaxed)
-    assert captured['allow_net'] is False
-    assert captured['allow_run'] is False
-    assert captured['allow_ffi'] is False
-    assert captured['stateful'] is False
-    # env scoped to the single cache-locator var main.js reads — NOT True/unbounded
-    assert captured['allow_env'] == ['SANDBOX_BASE']
-    # read/write granted ONLY over the offline Pyodide cache dirs (base, its tmp, deno
-    # cache) — data dirs, nothing user-controlled, never the filesystem root
-    assert captured['allow_read'] == ['/tmp/sbx', '/tmp/sbx/tmp', '/tmp/deno']
-    assert captured['allow_write'] == ['/tmp/sbx/tmp', '/tmp/deno']
-    # no elitea_client anywhere in the constructor kwargs
-    assert not any('client' in k for k in captured)
-
-
-def test_default_factory_uses_sdk_default_dirs_when_env_unset(monkeypatch):
-    """When SANDBOX_BASE/DENO_DIR are unset, mirror the SDK's own air-gapped tool-path
-    defaults (~/.cache/pyodide, ~/.cache/deno) rather than collapsing to allow_read=False —
-    the latter made every validation fail with an opaque Deno permission error in any
-    deployment that never set these vars (this repo's centry/ included)."""
-    captured = {}
-
-    class _StubSyncPyodideSandbox:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    import sys
-    import types
-    import os
-
-    for name in ('elitea_sdk', 'elitea_sdk.runtime',
-                 'elitea_sdk.runtime.langchain',
-                 'elitea_sdk.runtime.langchain.pyodide_sandbox'):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    sys.modules['elitea_sdk.runtime.langchain.pyodide_sandbox'].SyncPyodideSandbox = \
-        _StubSyncPyodideSandbox
-    monkeypatch.delenv('SANDBOX_BASE', raising=False)
-    monkeypatch.delenv('DENO_DIR', raising=False)
-
-    sandbox._default_sandbox_factory()
-
-    default_base = os.path.expanduser('~/.cache/pyodide')
-    default_tmp = os.path.join(default_base, 'tmp')
-    default_deno = os.path.expanduser('~/.cache/deno')
-    assert captured['allow_read'] == [default_base, default_tmp, default_deno]
-    assert captured['allow_write'] == [default_tmp, default_deno]
-    # allow_env stays scoped to the single var regardless (harmless if the var is unset)
-    assert captured['allow_env'] == ['SANDBOX_BASE']
+    assert sandbox._default_sandbox_factory() == 'sandbox'
+    assert constructed == [{'stateful': False, 'allow_net': False, **permissions}]
+    assert not any('client' in key for key in constructed[0])
