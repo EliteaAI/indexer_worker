@@ -187,3 +187,21 @@ def test_without_run_error_flag_in_the_sdk_the_worker_runs_as_before_and_says_so
 
     assert holder == {}
     assert warned and 'run_error_flag' in warned[0][0]
+
+
+def test_aggregate_pause_is_forwarded_as_a_flat_list_with_interrupt_ids():
+    items = [
+        {'interrupt_id': 'hitl_a', 'tool_call_id': 'c1', 'guardrail_type': 'sensitive_tool',
+         'toolkit_name': 'Artifact', 'tool_name': 'create_file'},
+        {'interrupt_id': 'hitl_b', 'tool_call_id': 'c2', 'guardrail_type': 'sensitive_tool',
+         'toolkit_name': 'Artifact', 'tool_name': 'delete_file'},
+    ]
+    interface = emit({'non_interactive': True}, None,
+                     response={'output': 'wait', 'hitl_interrupt': items[0], 'hitl_interrupts': items})
+
+    events = [e for e in interface.emitted if e['type'] == 'hitl']
+    assert len(events) == 1, interface.emitted
+    meta = events[0]['response_metadata']
+    assert [i['interrupt_id'] for i in meta['hitl_interrupts']] == ['hitl_a', 'hitl_b']
+    assert all('pending' not in i for i in meta['hitl_interrupts'])
+    assert meta['hitl_interrupt']['interrupt_id'] == 'hitl_a'

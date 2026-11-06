@@ -435,7 +435,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 step_limit=steps_limit,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
-                **batch_approval_sdk_kwargs(kwargs),
+                **batch_approval_sdk_kwargs(kwargs, client.predict_agent),
                 user_declined_mcp_servers=kwargs.get("user_declined_mcp_servers") or [],
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # parallel_subagent_dispatch is enabled — an ad-hoc predict parent

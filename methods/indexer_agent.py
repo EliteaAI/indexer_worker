@@ -441,7 +441,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 user_declined_mcp_servers=user_declined,
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
-                **batch_approval_sdk_kwargs(kwargs),
+                **batch_approval_sdk_kwargs(kwargs, client.application),
                 openai_compatible=client_args.get('openai_compatible', False),
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # the operator enabled parallel_subagent_dispatch — switches the

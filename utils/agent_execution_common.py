@@ -22,6 +22,7 @@ This module provides shared utilities for both indexer_agent.py and indexer_pred
 to reduce code duplication and ensure consistent behavior.
 """
 
+import inspect
 import json
 import re
 import threading
@@ -1604,14 +1605,23 @@ def build_child_launch_payloads(
     return enriched
 
 
-def batch_approval_sdk_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def batch_approval_sdk_kwargs(kwargs: Dict[str, Any], sdk_method: Any) -> Dict[str, Any]:
     """SDK keyword arguments for batching sensitive-tool approvals into one pause.
 
-    The flag is passed only when it is set, so a worker on an SDK build that does
-    not know the parameter keeps working: that call is the same as before.
+    The keyword is passed only when the flag is set and the SDK method knows it, so a
+    worker on an older SDK build keeps the one-pause-per-tool behavior instead of
+    failing the call with an unexpected keyword.
     """
-    if kwargs.get('batch_sensitive_approvals') is True:
+    if kwargs.get('batch_sensitive_approvals') is not True:
+        return {}
+    try:
+        parameters = inspect.signature(sdk_method).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if 'batch_sensitive_approvals' in parameters or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return {'batch_sensitive_approvals': True}
+    log.warning('The SDK does not accept batch_sensitive_approvals; approvals stay one pause per tool call')
     return {}
 
 
