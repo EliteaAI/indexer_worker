@@ -69,6 +69,7 @@ from ..utils.agent_execution_common import (
     maybe_emit_next_input_suggestion,
     create_summarization_callbacks,
     get_child_dispatcher,
+    batch_approval_sdk_kwargs,
     detect_parked_dispatch,
     build_parked_result,
     build_child_launch_payloads,
@@ -434,6 +435,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 context_settings=context_settings,
                 step_limit=steps_limit,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
+                **batch_approval_sdk_kwargs(kwargs),
                 user_declined_mcp_servers=kwargs.get("user_declined_mcp_servers") or [],
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # parallel_subagent_dispatch is enabled — an ad-hoc predict parent

@@ -71,6 +71,7 @@ from ..utils.agent_execution_common import (
     build_output_message,
     create_summarization_callbacks,
     get_child_dispatcher,
+    batch_approval_sdk_kwargs,
     detect_parked_dispatch,
     build_parked_result,
     build_child_launch_payloads,
@@ -440,6 +441,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 user_declined_mcp_servers=user_declined,
                 context_settings=context_settings,
                 auto_approve_sensitive_actions=kwargs.get("auto_approve_sensitive_actions", False),
+                **batch_approval_sdk_kwargs(kwargs),
                 openai_compatible=client_args.get('openai_compatible', False),
                 # Parallel sub-agent dispatch seam (#4993 Track 2): non-None when
                 # the operator enabled parallel_subagent_dispatch — switches the

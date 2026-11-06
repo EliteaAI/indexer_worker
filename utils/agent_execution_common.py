@@ -1604,6 +1604,17 @@ def build_child_launch_payloads(
     return enriched
 
 
+def batch_approval_sdk_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """SDK keyword arguments for batching sensitive-tool approvals into one pause.
+
+    The flag is passed only when it is set, so a worker on an SDK build that does
+    not know the parameter keeps working: that call is the same as before.
+    """
+    if kwargs.get('batch_sensitive_approvals') is True:
+        return {'batch_sensitive_approvals': True}
+    return {}
+
+
 def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Build the self-contained payload to re-invoke a parked parent for reconcile.
 
@@ -1631,6 +1642,8 @@ def build_parent_reconcile_payload(parent_kwargs: Dict[str, Any]) -> Dict[str, A
         'ignored_mcp_servers', 'persona', 'supports_vision', 'debug',
         'debug_mode', 'steps_limit', 'meta', 'context_settings',
         'auto_approve_sensitive_actions',
+        # A scheduled run keeps one pause for all its sensitive tools after the re-start
+        'batch_sensitive_approvals',
         'return_chat_history',
         'execution_generation',
         'attached_skills', 'project_skills', 'invoked_skills', 'project_context',
