@@ -112,6 +112,41 @@ def test_recovered_run_with_an_ai_answer_as_last_message_stays_successful():
     assert 'error' not in meta
 
 
+def test_a_recovered_run_still_logs_the_failed_tool_and_keeps_the_answer(monkeypatch):
+    logged = []
+    monkeypatch.setitem(namespace, 'log', SimpleNamespace(warning=lambda *args, **kwargs: logged.append(args)))
+    messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content='The issue could not be created, here is why.')]
+    interface = emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                     answer='The issue could not be created, here is why.')
+
+    assert 'is_error' not in metadata(interface)
+    assert interface.full_messages[0]['content'] == 'The issue could not be created, here is why.'
+    assert len(logged) == 1
+    assert logged[0][1:] == ('github', 'create_issue', 'HTTP 403')
+
+
+def test_a_clean_reply_after_an_earlier_failure_notice_keeps_the_run_successful():
+    messages = [HumanMessage(content='run it'),
+                AIMessage(content=NODE_FAILURE_TEXT, response_metadata=TAG),
+                ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content='Retried by hand, the sync is done.')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='Retried by hand, the sync is done.'))
+
+    assert 'is_error' not in meta
+    assert 'error' not in meta
+
+
+def test_an_output_with_extra_whitespace_still_equals_the_clean_reply():
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content='Done, with a note.')]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages},
+                         answer='  Done, with a note.\n'))
+
+    assert 'is_error' not in meta
+
+
 @pytest.mark.parametrize('last', [
     AIMessage(content=''),
     AIMessage(content=[]),
