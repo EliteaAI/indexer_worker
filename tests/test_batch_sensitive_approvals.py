@@ -6,7 +6,6 @@ SDK build without it keeps the one-pause-per-tool behavior. The module needs the
 pylon runtime to import, so the functions are loaded by source.
 """
 import ast
-import importlib.util
 import inspect
 import typing
 from pathlib import Path
