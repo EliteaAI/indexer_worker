@@ -200,6 +200,12 @@ def _is_user_message(message: Any) -> bool:
     return getattr(message, 'type', None) == 'human'
 
 
+def _replies(response: Dict[str, Any]) -> list:
+    """The messages of a response without the user's own, in order; empty when there is no messages list."""
+    messages = response.get('messages')
+    return [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+
+
 def extract_response_content(response: Dict[str, Any], response_format: str = 'messages') -> str:
     """
     Extract and normalize content from agent response.
@@ -222,8 +228,7 @@ def extract_response_content(response: Dict[str, Any], response_format: str = 'm
     # User messages are skipped: an SDK run that finished without an answer returns
     # output '' and messages ending in the user's input, which must not become the reply.
     if not content and "messages" in response:
-        messages = response.get("messages", [])
-        replies = [m for m in messages if not _is_user_message(m)] if isinstance(messages, list) else []
+        replies = _replies(response)
         if replies:
             last_message = replies[-1]
             if hasattr(last_message, 'content'):
@@ -898,6 +903,12 @@ except ImportError:  # older SDK: runs behave as before, no tool error is report
     def run_error_flag():
         yield {}
 
+try:
+    from elitea_sdk.runtime.tool_outcome import RUN_FAILURE_NOTICE_KEY
+except ImportError:  # older SDK: its failure notices carry no tag, so a reply cannot be told from a notice
+    RUN_FAILURE_NOTICE_KEY = None
+    log.warning('The installed elitea_sdk does not tag failure notices: a failed tool always fails a scheduled run')
+
 
 def _plain_name(value: Any) -> str:
     cleaned = _PLAIN_NAME.sub(' ', _CONTROL_CHARS.sub(' ', str(value or '')))
@@ -914,12 +925,79 @@ def tool_error_text(tool_error: Optional[Dict[str, Any]]) -> Optional[str]:
     tool_error = (tool_error or {}).get('error')
     if not tool_error:
         return None
-    log.warning('A tool failed in a non-interactive run: toolkit=%r tool=%r reason=%r',
+    log.warning('A tool call failed during the run: toolkit=%r tool=%r reason=%r',
                 tool_error.get('toolkit'), tool_error.get('tool'), tool_error.get('reason'))
     toolkit, tool = _plain_name(tool_error.get('toolkit')), _plain_name(tool_error.get('tool'))
     # A failure without a tool name is still a failure: the run must not look successful
     step = f"The step '{tool}' of {toolkit}" if tool and toolkit else f"The step '{tool}'" if tool else 'A step'
     return f"{step} could not be completed. Open the run log or ask an administrator for details."
+
+
+def _kind_and_text(message: Any) -> tuple:
+    if isinstance(message, dict):
+        kind, content = message.get('type') or message.get('role'), message.get('content')
+    else:
+        kind, content = getattr(message, 'type', None), getattr(message, 'content', None)
+    return kind, normalize_response_content(content).strip()
+
+
+def _is_unfinished_reply(message: Any) -> bool:
+    """True when an ai message is a tagged failure notice or still asks for a tool call that did not run.
+
+    The SDK tags the AI message of a model error (llm_node_error) and of every other failure notice
+    (RUN_FAILURE_NOTICE_KEY: a failed node, a blocked or stopped pipeline, a step limit).
+    """
+    get = message.get if isinstance(message, dict) else lambda key: getattr(message, key, None)
+    meta = get('response_metadata')
+    if isinstance(meta, dict) and (
+            meta.get('llm_node_error') or (RUN_FAILURE_NOTICE_KEY and meta.get(RUN_FAILURE_NOTICE_KEY))):
+        return True
+    # invalid_tool_calls holds a call the model made with arguments that did not parse: it never ran
+    if get('tool_calls') or get('invalid_tool_calls'):
+        return True
+    content = get('content')
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get('type') in ('tool_use', 'tool_call') for b in content)
+
+
+def _content_is_plain_text(content: Any) -> bool:
+    """True when the worker and the SDK read this message content as the same text.
+
+    A string, or a list of strings and typed text blocks. Records, untyped blocks and other types are
+    normalized differently by the SDK (JSON text) and by the worker (joined or empty text).
+    """
+    if isinstance(content, str):
+        return True
+    return isinstance(content, list) and all(
+        isinstance(b, str) or (isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str))
+        for b in content)
+
+
+def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
+    """True only when the run ended on a clean reply of the agent that is also the run output.
+
+    It fails closed: a doubt means no answer, so the failed tool keeps the run failed. The reply is the last
+    non-user message and must be an ai or assistant message with plain text, with no failure tag
+    (see _is_unfinished_reply) and no tool call that did not run. The output must equal that text. A pipeline
+    can fill output from a declared variable that holds the error of a later failed node, and a clean reply
+    before it must not hide that. A run that ended on a tool message, on a message without text, on a blocked
+    pipeline or at the tool step limit has no answer. An SDK that cannot tag failure notices gives no answer.
+    """
+    if RUN_FAILURE_NOTICE_KEY is None:
+        return False
+    if response.get('tool_execution_limit_reached') or response.get('_pipeline_blocked'):
+        return False
+    messages = _replies(response)
+    if not messages:
+        return False
+    last = messages[-1]
+    kind, text = _kind_and_text(last)
+    if kind not in ('ai', 'assistant') or _is_unfinished_reply(last):
+        return False
+    content = last.get('content') if isinstance(last, dict) else getattr(last, 'content', None)
+    if not text or not _content_is_plain_text(content):
+        return False
+    return str(output.get('content') or '').strip() == text
 
 
 def emit_response_events(
@@ -963,6 +1041,7 @@ def emit_response_events(
         should_continue: Whether this was a continuation
         context_info: Context info with message/token counts and summarization details if summarization occurred
         tool_error: Holder yielded by run_error_flag; a tool failure marks a non-interactive run as failed
+            only when the agent gives no final answer
     """
     thread_id_response = response.get('thread_id', thread_id)
 
@@ -1104,12 +1183,14 @@ def emit_response_events(
             ),
         }
 
-        # A scheduled or system run has no reader to see a failed tool, so the
-        # stored run status must carry it. A chat run shows the failure itself.
+        # A scheduled or system run has no reader to see a failed tool. A tool error the agent
+        # recovered from leaves the run successful only when the last message is a clean ai text
+        # and the run output is that same text. Anything else fails the run. A chat run shows the
+        # failure itself.
         # The holder lives inside one executor call. A parked fan-out parent and the run after a
         # human decision start with an empty holder, so an error from before that point is not seen.
         tool_error_line = tool_error_text(tool_error)
-        if tool_error_line and task_meta.get("non_interactive"):
+        if tool_error_line and task_meta.get("non_interactive") and not _has_final_answer(response, output):
             full_message_metadata['is_error'] = True
             full_message_metadata['error'] = tool_error_line
 
