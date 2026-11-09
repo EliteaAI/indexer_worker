@@ -79,6 +79,18 @@ def test_block_maps_to_curated_error():
     assert error['rules'] == ['credentials.github_token']
 
 
+def test_mixed_block_names_both_categories():
+    # #7346: the key was the first category only, so the card showed "a credential"
+    error = funcs['build_input_guardrail_error'](
+        InputGuardrailBlocked(
+            ['credentials', 'personal_data'], ['credentials.github_token', 'personal_data.email'], ['user_input'],
+        ),
+    )
+
+    assert error['message_key'] == 'input_guardrail.blocked.credentials_and_personal_data'
+    assert 'a credential and personal data' in error['user_message']
+
+
 def test_instructions_block_asks_the_agent_owner():
     error = funcs['build_input_guardrail_error'](
         InputGuardrailBlocked(['credentials'], ['credentials.github_token'], ['instructions']),
