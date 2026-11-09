@@ -304,7 +304,8 @@ def build_input_guardrail_error(exc: Exception) -> Optional[Dict[str, Any]]:
             f"Your message appears to contain {' and '.join(labels)}. It was not sent to the model. "
             "Remove it, or store it as a project secret and reference it instead."
         )
-        message_key = f"input_guardrail.blocked.{categories[0]}"
+        # A key per category set, not the first category: a mixed block names both (#7346)
+        message_key = f"input_guardrail.blocked.{'_and_'.join(sorted(categories))}"
     else:
         # fail_closed on a detector error: nothing was detected, the check could not run
         message = "Your message could not be checked by the input guardrail, so it was not sent to the model."
