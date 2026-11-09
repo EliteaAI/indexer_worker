@@ -18,6 +18,7 @@
 """usage_event rows for skill activations (#6926)"""
 
 import re
+import time
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler  # pylint: disable=E0401
@@ -44,15 +45,22 @@ from .usage_skill_events import (
     SKILL_SOURCE_READ_FILE,
     record_skill_event,
     record_skill_mention,
+    record_skill_script_run,
 )
 from .usage_tool_events import ENTITY_TYPE_APPLICATION
 
 LOAD_SKILL_TOOL_NAME = "load_skill"
 READ_SKILL_FILE_TOOL_NAME = "read_skill_file"
 LIST_SKILL_FILES_TOOL_NAME = "list_skill_files"
+RUN_SKILL_SCRIPT_TOOL_NAME = "run_skill_script"
 _UNKNOWN_SKILL_PREFIX = LOAD_SKILL_UNKNOWN.split("{name}", 1)[0]
 _SKILL_BODY_RE = re.compile(r'<skill name="[^"]*">\n(.*)\n</skill>', re.DOTALL)
 _SKILL_FILE_CONTENT_RE = re.compile(r'<skill_file path="[^"]*">\n(.*)\n</skill_file>\s*$', re.DOTALL)
+
+
+def is_skill_tool(tool_name):
+    """Whether a tool's results can carry a skill body, a skill file or a script run worth a usage row."""
+    return tool_name in (LOAD_SKILL_TOOL_NAME, READ_SKILL_FILE_TOOL_NAME, LIST_SKILL_FILES_TOOL_NAME, RUN_SKILL_SCRIPT_TOOL_NAME)
 
 
 def _split_auto_loaded(content):
@@ -88,12 +96,14 @@ class UsageSkillCallback(BaseCallbackHandler):
         try:
             serialized = args[0] if args and isinstance(args[0], dict) else {}
             tool_name = serialized.get("name") or kwargs.get("name")
-            if tool_name not in (LOAD_SKILL_TOOL_NAME, READ_SKILL_FILE_TOOL_NAME, LIST_SKILL_FILES_TOOL_NAME):
+            if not is_skill_tool(tool_name):
                 return
             self._open[str(run_id)] = {
                 "tool_name": tool_name,
                 "parent_agent_name": (kwargs.get("metadata") or {}).get("parent_agent_name"),
                 "inputs": kwargs.get("inputs"),
+                "started": time.monotonic(),
+                "run_id": str(run_id),
             }
         except Exception as exc:  # pylint: disable=W0703
             log.debug("usage: skill load start capture failed: %s", exc)
@@ -111,6 +121,9 @@ class UsageSkillCallback(BaseCallbackHandler):
             loaded, answer = _split_auto_loaded(getattr(output, "content", output))
             if loaded:
                 self._record_skill_load(started, loaded)
+            if started["tool_name"] == RUN_SKILL_SCRIPT_TOOL_NAME:
+                self._record_skill_script_run(started, output)
+                return
             self._record_skill_file_read(started, answer)
         except Exception as exc:  # pylint: disable=W0703
             log.debug("usage: skill load capture failed: %s", exc)
@@ -162,6 +175,29 @@ class UsageSkillCallback(BaseCallbackHandler):
                 "lines": read.group(3),
                 "bytes": len(file_content.group(1).encode("utf-8")) if file_content else 0,
             },
+        )
+
+    def _record_skill_script_run(self, started, output):
+        """One row per script the sandbox ran, from the facts the run carries; a refusal before the run carries none
+        and writes nothing."""
+        facts = getattr(output, "artifact", None)
+        inputs = started.get("inputs") if isinstance(started.get("inputs"), dict) else {}
+        if not isinstance(facts, dict) or not isinstance(inputs.get("skill"), str):
+            return
+        record_skill_script_run(
+            self._attribution,
+            self._registered_skill(started, inputs["skill"]),
+            {
+                "path": str(inputs.get("path") or ""),
+                "exit_code": facts["exit_code"],
+                "duration_ms": int((time.monotonic() - started["started"]) * 1000),
+                "stdout_bytes": facts["stdout_bytes"],
+                "stderr_bytes": facts["stderr_bytes"],
+                "output_files": len(facts["shared"]),
+                "timed_out": facts["timed_out"],
+                "call_id": started["run_id"],
+            },
+            parent_agent_name=started.get("parent_agent_name") or self._child_agent_name(),
         )
 
     def _registered_skill(self, started, name):

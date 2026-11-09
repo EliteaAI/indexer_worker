@@ -11,7 +11,7 @@ Security contract (the release-blocking half of EVAL-E2E-14):
     inject an ``elitea_client`` with the caller's auth token (sandbox.py:234). A code
     validation is a pure verdict function; it must reach neither the network nor the client.
   * All Deno permission flags are deny-by-default: ``allow_net=False`` (network-denied),
-    ``allow_run/ffi/write/env=False``. No ``elitea_client`` is constructed or injected, so
+    ``allow_run/ffi/write=False``, env scoped to SANDBOX_BASE, reads to the Pyodide assets. No ``elitea_client`` is constructed or injected, so
     the name is **undefined** in the prelude — a script that references it gets a NameError
     surfaced as an error verdict, not a silent capability.
   * Resource limits come from ``_read_sandbox_limits_from_env`` (sandbox.py) which returns a
@@ -31,7 +31,6 @@ importable — and the mapping / degradation / limit logic is unit-testable — 
 ``sandbox_factory`` and ``deno_probe``, without the SDK or a Deno binary present.
 """
 import logging
-import os
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -71,42 +70,19 @@ def _default_memory_pressure_pct() -> Optional[float]:
 def _default_sandbox_factory():
     """Construct the locked-down sandbox. Deny-by-default, no client, base engine.
 
-    The security-critical denials stay hard-off: ``allow_net=False`` (network-denied),
-    ``allow_run/ffi=False``, and no ``elitea_client`` is ever constructed, so the name is
-    undefined in the prelude. The only capabilities granted are the minimal ones the
-    deployed Pyodide entrypoint (``main.js``) needs to *boot the WASM image offline* — the
-    same scoped grants the SDK's own air-gapped tool path uses (sandbox.py):
-
-      * ``allow_env=['SANDBOX_BASE']`` — ``main.js`` reads ``Deno.env.get("SANDBOX_BASE")``
-        to locate its warm module/package cache. Scoped to that single var, NOT ``True``.
-      * ``allow_read`` — the package cache + deno dir it loads the image from (data dirs,
-        nothing user-controlled).
-      * ``allow_write=[sandbox_tmp, deno_cache]`` — Pyodide's worker runner needs a writable
-        scratch dir under the cache to unpack; scoped to those dirs only, never the root.
-
-    Granting env/read/write ONLY over the non-network cache dirs does not let untrusted code
-    reach the network or the client — the release-blocking half of EVAL-E2E-14 (14a/14b) is
-    preserved by ``allow_net=False`` + the absent client, independent of these boot grants.
+    The security-critical denials stay hard-off: ``allow_net=False`` (network-denied), no
+    ``elitea_client`` is ever constructed, so the name is undefined in the prelude. Every other
+    Deno grant is the SDK's shared ``local_sandbox_permissions`` (sandbox.py): the SANDBOX_BASE
+    variable and the Pyodide assets readable, nothing on the host writable, no fetched module,
+    no subprocesses, no FFI.
     """
     from elitea_sdk.runtime.langchain.pyodide_sandbox import SyncPyodideSandbox  # pylint: disable=C0415,E0401
-
-    # Mirror the SDK's own defaults (sandbox.py) rather than collapsing to no-access when
-    # unset: an unset SANDBOX_BASE/DENO_DIR does not mean "no cache dir exists", it means
-    # "use the same default the SDK's air-gapped tool path boots from". Collapsing to
-    # allow_read=False here made every validation fail with an opaque Deno permission
-    # error in any deployment that never set these vars (this repo's centry/ included).
-    sandbox_base = os.environ.get('SANDBOX_BASE') or os.path.expanduser('~/.cache/pyodide')
-    sandbox_tmp = os.path.join(sandbox_base, 'tmp')
-    deno_cache = os.environ.get('DENO_DIR') or os.path.expanduser('~/.cache/deno')
+    from elitea_sdk.runtime.tools.sandbox import local_sandbox_permissions  # pylint: disable=C0415,E0401
 
     return SyncPyodideSandbox(
         stateful=False,
-        allow_env=['SANDBOX_BASE'],     # scoped: only the cache-locator var main.js reads
-        allow_read=[sandbox_base, sandbox_tmp, deno_cache],
-        allow_write=[sandbox_tmp, deno_cache],  # scoped: only the Pyodide scratch/cache dirs
         allow_net=False,   # EVAL-E2E-14 (14a): network-denied
-        allow_run=False,
-        allow_ffi=False,
+        **local_sandbox_permissions(),
     )
 
 

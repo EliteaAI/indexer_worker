@@ -6,6 +6,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { join as joinPath, resolve as resolvePath, isAbsolute } from "node:path";
 
 const processStartMs = performance.now();
+
+function removeStorageEveryRunShares() {
+  for (const name of ["localStorage", "sessionStorage", "caches"]) {
+    try {
+      delete globalThis[name];
+    } catch (_error) {
+    }
+  }
+}
+removeStorageEveryRunShares();
+
 const timings = {};
 function markTiming(name, sinceMs) {
   timings[name] = Math.round(performance.now() - sinceMs);
@@ -26,10 +37,6 @@ if (!globalThis.__dirname) {
 }
 
 const pkgVersion = "0.0.7";
-
-function ensureTrailingSlash(path) {
-  return path.endsWith("/") ? path : `${path}/`;
-}
 
 function toPosixPath(path) {
   return path.replace(/\\/g, "/");
@@ -98,30 +105,17 @@ const defaultBasePath = resolvePath(
 const envBase = Deno.env.get("SANDBOX_BASE");
 const baseFsPath = resolvePath(envBase ?? defaultBasePath);
 
-ensureDirExists(
-  baseFsPath,
-  envBase ? "SANDBOX_BASE directory" : "default sandbox base directory",
-);
-
 const pyodideDir = joinPath(baseFsPath, "pyodide");
 ensureDirExists(pyodideDir, "pyodide directory");
 
 const pyodideModulePath = joinPath(pyodideDir, "pyodide.mjs");
 ensureFileExists(pyodideModulePath, "pyodide.mjs");
 
-const tempRootDir = joinPath(baseFsPath, "tmp", "pyodide_worker_runner");
-await Deno.mkdir(tempRootDir, { recursive: true });
-const tempDirFs = await Deno.makeTempDir({
-  dir: tempRootDir,
-  prefix: "run-",
-});
-
 const runtimePaths = {
   baseFsPath,
   pyodideDir,
   pyodideDirPosix: toPosixPath(pyodideDir),
-  tempDirFs,
-  tempDirPosix: ensureTrailingSlash(toPosixPath(tempDirFs)),
+  tempDirPosix: "/tmp/pyodide_worker_runner/",
 };
 
 const localWheelUriMap = buildLocalWheelUriMap(runtimePaths.pyodideDir);
@@ -660,116 +654,108 @@ OPTIONS:
 }
 
 async function main() {
+  let flags;
   try {
-    let flags;
+    flags = parseCliArgs(Deno.args);
+  } catch (error) {
+    console.error(error.message);
+    Deno.exit(1);
+    return;
+  }
+
+  if (flags.help) {
+    printHelp();
+    return;
+  }
+
+  if (flags.version) {
+    console.log(pkgVersion);
+    return;
+  }
+
+  if (!flags.code && !flags.file && !flags.stdin) {
+    console.error(
+      "Error: You must provide Python code using -c/--code, -f/--file, or --stdin option.\nUse --help for usage information.",
+    );
+    Deno.exit(1);
+    return;
+  }
+
+  const options = {
+    code: flags.code,
+    file: flags.file,
+    stdin: flags.stdin,
+    stateful: flags.stateful,
+    sessionBytes: flags["session-bytes"],
+    sessionMetadata: flags["session-metadata"],
+  };
+
+  let pythonCode = "";
+
+  if (options.file) {
     try {
-      flags = parseCliArgs(Deno.args);
+      const filePath = isAbsolute(options.file)
+        ? options.file
+        : resolvePath(Deno.cwd(), options.file);
+      pythonCode = await Deno.readTextFile(filePath);
     } catch (error) {
-      console.error(error.message);
+      console.error(`Error reading file ${options.file}:`, error.message);
       Deno.exit(1);
       return;
     }
-
-    if (flags.help) {
-      printHelp();
-      return;
-    }
-
-    if (flags.version) {
-      console.log(pkgVersion);
-      return;
-    }
-
-    if (!flags.code && !flags.file && !flags.stdin) {
-      console.error(
-        "Error: You must provide Python code using -c/--code, -f/--file, or --stdin option.\nUse --help for usage information.",
-      );
-      Deno.exit(1);
-      return;
-    }
-
-    const options = {
-      code: flags.code,
-      file: flags.file,
-      stdin: flags.stdin,
-      stateful: flags.stateful,
-      sessionBytes: flags["session-bytes"],
-      sessionMetadata: flags["session-metadata"],
-    };
-
-    let pythonCode = "";
-
-    if (options.file) {
-      try {
-        const filePath = isAbsolute(options.file)
-          ? options.file
-          : resolvePath(Deno.cwd(), options.file);
-        pythonCode = await Deno.readTextFile(filePath);
-      } catch (error) {
-        console.error(`Error reading file ${options.file}:`, error.message);
-        Deno.exit(1);
-        return;
-      }
-    } else if (options.stdin) {
-      // Read code from stdin - avoids Linux kernel's MAX_ARG_STRLEN 128KB limit
-      // on individual CLI arguments when passing large code payloads
-      const stdinTimeoutMs = 30000;
-      const stdinPromise = new Response(Deno.stdin.readable).text();
-      let stdinTimer;
-      const timeoutPromise = new Promise((_, reject) => {
-        stdinTimer = setTimeout(() => reject(new Error(`stdin read timeout after ${stdinTimeoutMs}ms`)), stdinTimeoutMs);
-      });
-
-      try {
-        pythonCode = await Promise.race([stdinPromise, timeoutPromise]);
-      } catch (err) {
-        console.error(`Error: Failed to read code from stdin: ${err.message}`);
-        Deno.exit(1);
-        return;
-      } finally {
-        // A pending timer keeps the event loop alive, so the process would not
-        // exit until it fires — the caller waits for exit, adding 30s per run.
-        clearTimeout(stdinTimer);
-      }
-
-      if (!pythonCode || !pythonCode.trim()) {
-        console.error("Error: No code received from stdin (empty input).");
-        Deno.exit(1);
-        return;
-      }
-    } else if (options.code) {
-      pythonCode = options.code;
-    }
-
-    const result = await runPython(pythonCode, {
-      stateful: options.stateful,
-      sessionBytes: options.sessionBytes,
-      sessionMetadata: options.sessionMetadata,
+  } else if (options.stdin) {
+    // Read code from stdin - avoids Linux kernel's MAX_ARG_STRLEN 128KB limit
+    // on individual CLI arguments when passing large code payloads
+    const stdinTimeoutMs = 30000;
+    const stdinPromise = new Response(Deno.stdin.readable).text();
+    let stdinTimer;
+    const timeoutPromise = new Promise((_, reject) => {
+      stdinTimer = setTimeout(() => reject(new Error(`stdin read timeout after ${stdinTimeoutMs}ms`)), stdinTimeoutMs);
     });
 
-    const outputJson = {
-      stdout: result.stdout?.join("") || null,
-      stderr: result.success
-        ? (result.stderr?.join("") || null)
-        : result.error || null,
-      result: result.success ? JSON.parse(result.jsonResult || "null") : null,
-      success: result.success,
-      sessionBytes: result.sessionBytes,
-      sessionMetadata: result.sessionMetadata,
-      timings: { ...timings, total_ms: Math.round(performance.now() - processStartMs) },
-    };
-
-    console.log(JSON.stringify(outputJson));
-
-    if (!result.success) {
-      Deno.exit(1);
-    }
-  } finally {
     try {
-      await Deno.remove(runtimePaths.tempDirFs, { recursive: true });
-    } catch (_error) {
-      // Directory might already be gone; ignore.
+      pythonCode = await Promise.race([stdinPromise, timeoutPromise]);
+    } catch (err) {
+      console.error(`Error: Failed to read code from stdin: ${err.message}`);
+      Deno.exit(1);
+      return;
+    } finally {
+      // A pending timer keeps the event loop alive, so the process would not
+      // exit until it fires — the caller waits for exit, adding 30s per run.
+      clearTimeout(stdinTimer);
     }
+
+    if (!pythonCode || !pythonCode.trim()) {
+      console.error("Error: No code received from stdin (empty input).");
+      Deno.exit(1);
+      return;
+    }
+  } else if (options.code) {
+    pythonCode = options.code;
+  }
+
+  const result = await runPython(pythonCode, {
+    stateful: options.stateful,
+    sessionBytes: options.sessionBytes,
+    sessionMetadata: options.sessionMetadata,
+  });
+
+  const outputJson = {
+    stdout: result.stdout?.join("") || null,
+    stderr: result.success
+      ? (result.stderr?.join("") || null)
+      : result.error || null,
+    result: result.success ? JSON.parse(result.jsonResult || "null") : null,
+    success: result.success,
+    sessionBytes: result.sessionBytes,
+    sessionMetadata: result.sessionMetadata,
+    timings: { ...timings, total_ms: Math.round(performance.now() - processStartMs) },
+  };
+
+  console.log(JSON.stringify(outputJson));
+
+  if (!result.success) {
+    Deno.exit(1);
   }
 }
 
