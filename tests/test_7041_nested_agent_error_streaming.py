@@ -13,7 +13,7 @@ pylon runtime:
    the parameters, so ``is_error`` is true in run history for failed children.
 
 4. indexer_agent detects the terminal LLM error by scanning the response messages
-   for ``llm_node_error`` (same logic as _raise_if_llm_node_error), NOT from
+   for the model error tag (_is_model_error_reply), NOT from
    elitea_callback.llm_error which never clears and would flag recovered runs.
 """
 
@@ -116,11 +116,12 @@ def _indexer_agent_source():
     return (pathlib.Path(__file__).resolve().parents[1] / 'methods' / 'indexer_agent.py').read_text()
 
 
-def test_indexer_agent_scans_messages_for_llm_node_error():
-    """chip finish_reason must come from llm_node_error in messages, not elitea_callback.llm_error."""
+def test_indexer_agent_scans_messages_for_the_model_error_tag():
+    """chip finish_reason must come from the model error tag in messages, not elitea_callback.llm_error."""
     source = _indexer_agent_source()
-    # Must scan response messages for llm_node_error tag
-    assert 'llm_node_error' in source
+    # The one failure tag is read through the shared helper; the old tag name is not read here
+    assert '_is_model_error_reply' in source
+    assert 'llm_node_error' not in source
     assert 'response.get(\'messages\'' in source or 'response.get("messages"' in source
 
 

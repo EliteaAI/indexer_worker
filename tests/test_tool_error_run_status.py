@@ -20,7 +20,8 @@ tree.body = [
     n for n in tree.body
     if (isinstance(n, ast.FunctionDef) and n.name in (
         'tool_error_text', 'emit_response_events', '_plain_name', '_has_final_answer', '_is_user_message',
-        '_replies', '_kind_and_text', '_is_unfinished_reply', '_content_is_plain_text',
+        '_replies', '_kind_and_text', '_is_unfinished_reply', '_is_model_error_reply', '_reply_metadata',
+        '_content_is_plain_text',
         'normalize_response_content'))
     or (isinstance(n, ast.Assign) and any(
         isinstance(t, ast.Name) and t.id in ('_TOOL_NAME_MAX_LEN', '_CONTROL_CHARS', '_PLAIN_NAME') for t in n.targets))
@@ -91,6 +92,9 @@ MARKER = {'error': {'toolkit': 'github', 'tool': 'create_issue', 'reason': 'HTTP
 
 ERROR_TEXT = ("The step 'create_issue' of github could not be completed. "
               'Open the run log or ask an administrator for details.')
+
+
+MODEL_ERROR_TAGS = {'run_failure_notice': True, 'llm_node_exception_type': 'BadRequestError'}
 
 
 def test_recovered_tool_error_keeps_the_run_successful():
@@ -177,8 +181,8 @@ def test_ai_reply_with_text_and_pending_tool_calls_does_not_count_as_an_answer(r
 
 
 @pytest.mark.parametrize('reply', [
-    AIMessage(content='Error: the model call failed', response_metadata={'llm_node_error': True}),
-    {'type': 'ai', 'content': 'Error: the model call failed', 'response_metadata': {'llm_node_error': True}},
+    AIMessage(content='Error: the model call failed', response_metadata=MODEL_ERROR_TAGS),
+    {'type': 'ai', 'content': 'Error: the model call failed', 'response_metadata': MODEL_ERROR_TAGS},
 ], ids=['object', 'dict'])
 def test_ai_reply_tagged_as_a_model_error_does_not_count_as_an_answer(reply):
     messages = [HumanMessage(content='create it'), ToolMessage(content='HTTP 403', tool_call_id='1'), reply]
@@ -227,6 +231,52 @@ def test_an_sdk_without_the_failure_notice_key_never_counts_a_reply_after_a_fail
 
     assert meta['is_error'] is True
     assert meta['error'] == ERROR_TEXT
+
+
+def test_a_model_error_the_agent_recovered_from_keeps_the_run_successful():
+    fallback = 'The model was not available, so here is a short answer from the data I have.'
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content='Error: the model call failed', response_metadata=MODEL_ERROR_TAGS),
+                AIMessage(content=fallback)]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=fallback))
+
+    assert 'is_error' not in meta
+    assert 'error' not in meta
+
+
+def test_a_model_error_as_the_last_message_still_fails_the_run():
+    notice = 'Error: the model call failed'
+    messages = [HumanMessage(content='run it'), ToolMessage(content='HTTP 403', tool_call_id='1'),
+                AIMessage(content=notice, response_metadata=MODEL_ERROR_TAGS)]
+    meta = metadata(emit({'non_interactive': True}, MARKER, response={'messages': messages}, answer=notice))
+
+    assert meta['is_error'] is True
+    assert meta['error'] == ERROR_TEXT
+
+
+@pytest.mark.parametrize('metadata_in, expected', [
+    (MODEL_ERROR_TAGS, True),
+    ({'run_failure_notice': True}, False),
+    ({'llm_node_exception_type': 'BadRequestError'}, False),
+    ({'llm_node_error': True}, False),
+    ({}, False),
+    (None, False),
+], ids=['both-keys', 'tag-only', 'exception-type-only', 'old-tag-ignored', 'no-tags', 'no-metadata'])
+def test_is_model_error_reply_reads_the_failure_tag_and_the_exception_type(metadata_in, expected):
+    is_model_error = namespace['_is_model_error_reply']
+
+    assert is_model_error(AIMessage(content='x', response_metadata=metadata_in or {})) is expected
+    assert is_model_error({'type': 'ai', 'content': 'x', 'response_metadata': metadata_in}) is expected
+
+
+def test_is_model_error_reply_falls_back_to_the_old_tag_when_the_sdk_has_no_tag_key(monkeypatch):
+    monkeypatch.setitem(namespace, 'RUN_FAILURE_NOTICE_KEY', None)
+    is_model_error = namespace['_is_model_error_reply']
+
+    assert is_model_error(AIMessage(content='x', response_metadata={'llm_node_error': True})) is True
+    assert is_model_error({'type': 'ai', 'response_metadata': {'llm_node_error': True}}) is True
+    assert is_model_error(AIMessage(content='x', response_metadata={'run_failure_notice': True})) is False
+    assert is_model_error(AIMessage(content='x')) is False
 
 
 def test_a_clean_ai_reply_with_a_different_output_fails_the_run():
@@ -316,7 +366,7 @@ def test_an_ai_message_without_text_does_not_count_when_the_output_copies_an_ear
 
 @pytest.mark.parametrize('last', [
     AIMessage(content='', tool_calls=[{'name': 'create_issue', 'args': {}, 'id': '2'}]),
-    AIMessage(content='', response_metadata={'llm_node_error': True}),
+    AIMessage(content='', response_metadata=MODEL_ERROR_TAGS),
     AIMessage(content='', response_metadata=TAG),
     AIMessage(content='', invalid_tool_calls=[{'name': 'x', 'args': '{', 'id': '2', 'error': 'bad'}]),
 ], ids=['tool-calls', 'model-error', 'failure-notice', 'invalid-tool-call'])

@@ -941,16 +941,34 @@ def _kind_and_text(message: Any) -> tuple:
     return kind, normalize_response_content(content).strip()
 
 
+def _reply_metadata(message: Any) -> Dict[str, Any]:
+    get = message.get if isinstance(message, dict) else lambda key: getattr(message, key, None)
+    meta = get('response_metadata')
+    return meta if isinstance(meta, dict) else {}
+
+
+def _is_model_error_reply(message: Any) -> bool:
+    """True when an ai message is the notice of a failed model call.
+
+    The SDK writes one failure tag (RUN_FAILURE_NOTICE_KEY) on every failure notice. A model error also carries
+    the exception type under llm_node_exception_type. An SDK without the tag key only knows the old
+    llm_node_error name, so that name is the fallback and nothing else reads it.
+    """
+    meta = _reply_metadata(message)
+    if RUN_FAILURE_NOTICE_KEY is None:
+        return bool(meta.get('llm_node_error'))
+    return bool(meta.get(RUN_FAILURE_NOTICE_KEY)) and 'llm_node_exception_type' in meta
+
+
 def _is_unfinished_reply(message: Any) -> bool:
     """True when an ai message is a tagged failure notice or still asks for a tool call that did not run.
 
-    The SDK tags the AI message of a model error (llm_node_error) and of every other failure notice
-    (RUN_FAILURE_NOTICE_KEY: a failed node, a blocked or stopped pipeline, a step limit).
+    The SDK tags the AI message of every failure notice with RUN_FAILURE_NOTICE_KEY: a model error, a failed
+    node, a blocked or stopped pipeline, a step limit.
     """
     get = message.get if isinstance(message, dict) else lambda key: getattr(message, key, None)
-    meta = get('response_metadata')
-    if isinstance(meta, dict) and (
-            meta.get('llm_node_error') or (RUN_FAILURE_NOTICE_KEY and meta.get(RUN_FAILURE_NOTICE_KEY))):
+    meta = _reply_metadata(message)
+    if _is_model_error_reply(message) or (RUN_FAILURE_NOTICE_KEY and meta.get(RUN_FAILURE_NOTICE_KEY)):
         return True
     # invalid_tool_calls holds a call the model made with arguments that did not parse: it never ran
     if get('tool_calls') or get('invalid_tool_calls'):
@@ -976,7 +994,8 @@ def _content_is_plain_text(content: Any) -> bool:
 def _has_final_answer(response: Dict[str, Any], output: Dict[str, Any]) -> bool:
     """True only when the run ended on a clean reply of the agent that is also the run output.
 
-    It fails closed: a doubt means no answer, so the failed tool keeps the run failed. The reply is the last
+    It fails closed: a doubt means no answer, so the failed tool keeps the run failed. A model error that the
+    agent recovers from does not fail the run: a clean reply after the notice is the answer. The reply is the last
     non-user message and must be an ai or assistant message with plain text, with no failure tag
     (see _is_unfinished_reply) and no tool call that did not run. The output must equal that text. A pipeline
     can fill output from a declared variable that holds the error of a later failed node, and a clean reply
