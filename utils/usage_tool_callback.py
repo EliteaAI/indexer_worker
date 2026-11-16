@@ -52,11 +52,16 @@ class UsageToolCallback(BaseCallbackHandler):
             # nested config: identifies the in-process sub-agent this tool ran
             # inside. Recorded in meta, never in entity_name — entity_* must stay
             # internally consistent with the ids the run payload actually carries.
-            parent_agent_name = tool_meta.get("parent_agent_name")
+            meta = {
+                key: tool_meta[key]
+                # toolkit_type feeds the per-tool complexity weight lookup (#7553)
+                for key in ("parent_agent_name", "toolkit_type")
+                if isinstance(tool_meta.get(key), str) and tool_meta.get(key)
+            }
             self._open[str(run_id)] = {
                 "name": name,
                 "started": monotonic(),
-                "meta": {"parent_agent_name": parent_agent_name} if parent_agent_name else None,
+                "meta": meta or None,
             }
         except Exception as exc:  # pylint: disable=W0703
             log.debug("usage: tool start capture failed: %s", exc)
