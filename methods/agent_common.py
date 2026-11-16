@@ -298,6 +298,7 @@ def build_mcp_auth_required_result(
 ) -> dict:
     """Emit mcp_authorization_required with normalized metadata and return stop payload."""
     auth_metadata = _mcp_auth_error_to_metadata(exc)
+    auth_metadata.setdefault("tool_run_id", str(uuid4()))
     provided_settings = getattr(exc, 'provided_settings', None)
     if provided_settings:
         auth_metadata['provided_settings'] = provided_settings
@@ -1289,7 +1290,7 @@ class EliteACallback(BaseCallbackHandler):
 
     def on_tool_end(self, *args, run_id: UUID, **kwargs):
         """Callback"""
-        if self._is_mcp_auth_paused():
+        if self._is_mcp_auth_paused() and str(run_id) not in self.tool_calls:
             return
         if self.debug:
             log.debug("on_tool_end(%s, %s)", args, kwargs)
