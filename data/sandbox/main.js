@@ -652,6 +652,7 @@ async function runPython(pythonCode, options) {
 }
 
 // --bridge: line-delimited JSON over stdin/stdout so a running program can call tools in the worker (#7578).
+// Source of truth for the protocol; elitea-sdk infra/data/sandbox/main.ts mirrors this block.
 const DEFAULT_BRIDGE_MAX_LINE_BYTES = 4 * 1024 * 1024;
 const BRIDGE_FIRST_LINE_TIMEOUT_MS = 30000;
 const bridgeEncoder = new TextEncoder();
