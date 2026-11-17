@@ -374,6 +374,7 @@ function parseCliArgs(args) {
     version: false,
     stateful: false,
     stdin: false,
+    bridge: false,
   };
 
   const takeValue = (index, flag) => {
@@ -436,6 +437,20 @@ function parseCliArgs(args) {
         }
         case "--stdin": {
           flags.stdin = true;
+          break;
+        }
+        case "--bridge": {
+          flags.bridge = true;
+          break;
+        }
+        case "--max-line-bytes": {
+          if (value !== undefined) {
+            flags["max-line-bytes"] = value;
+          } else {
+            const [next, newIndex] = takeValue(i, "--max-line-bytes");
+            flags["max-line-bytes"] = next;
+            i = newIndex;
+          }
           break;
         }
         case "--help": {
@@ -636,6 +651,181 @@ async function runPython(pythonCode, options) {
   }
 }
 
+// --bridge: line-delimited JSON over stdin/stdout so a running program can call tools in the worker (#7578).
+// Source of truth for the protocol; elitea-sdk infra/data/sandbox/main.ts mirrors this block.
+const DEFAULT_BRIDGE_MAX_LINE_BYTES = 4 * 1024 * 1024;
+const BRIDGE_FIRST_LINE_TIMEOUT_MS = 30000;
+const bridgeEncoder = new TextEncoder();
+
+function writeBridgeLine(message, maxLineBytes) {
+  const bytes = bridgeEncoder.encode(JSON.stringify(message) + "\n");
+  if (bytes.length - 1 > maxLineBytes) {
+    return false;
+  }
+  // Sync writes, so output printed by synchronous Python code streams instead of waiting for the next await.
+  let offset = 0;
+  while (offset < bytes.length) {
+    offset += Deno.stdout.writeSync(bytes.subarray(offset));
+  }
+  return true;
+}
+
+function writeBridgeText(type, text, maxLineBytes) {
+  if (!writeBridgeLine({ type, text }, maxLineBytes)) {
+    const keep = Math.floor(maxLineBytes / 8);
+    writeBridgeLine({ type, text: `${text.slice(0, keep)}... [truncated: line over ${maxLineBytes} bytes]\n` }, maxLineBytes);
+  }
+}
+
+async function* readBridgeLines(stream) {
+  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  let scanFrom = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      if (buffer) {
+        yield buffer;
+      }
+      return;
+    }
+    buffer += value;
+    let index;
+    while ((index = buffer.indexOf("\n", scanFrom)) >= 0) {
+      yield buffer.slice(0, index);
+      buffer = buffer.slice(index + 1);
+      scanFrom = 0;
+    }
+    scanFrom = buffer.length;
+  }
+}
+
+function classifyBridgeError(error) {
+  const message = String(error?.message ?? error);
+  if (error?.type === "MemoryError" || error instanceof RangeError ||
+      /MemoryError|out of memory|memory access out of bounds/i.test(message)) {
+    return "out_of_memory";
+  }
+  if (error?.type || error?.constructor?.name === "PythonError") {
+    return "python_exception";
+  }
+  return "sandbox_crashed";
+}
+
+async function runBridge(maxLineBytes) {
+  let finalSent = false;
+  const sendFinal = (fields) => {
+    if (finalSent) {
+      return;
+    }
+    finalSent = true;
+    const message = { type: "final", success: false, result: null, error: null, error_type: null, ...fields };
+    if (!writeBridgeLine(message, maxLineBytes)) {
+      writeBridgeLine({
+        type: "final", success: false, result: null,
+        error: `The program result is over the ${maxLineBytes}-byte message limit.`,
+        error_type: "result_too_large",
+      }, maxLineBytes);
+    }
+  };
+  // Anything logged by JS must not corrupt the protocol on stdout.
+  console.log = (...args) => console.error(...args);
+
+  try {
+    const lines = readBridgeLines(Deno.stdin.readable);
+    let timer;
+    const first = await Promise.race([
+      lines.next(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`stdin read timeout after ${BRIDGE_FIRST_LINE_TIMEOUT_MS}ms`)), BRIDGE_FIRST_LINE_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    const codeMessage = first.done ? null : JSON.parse(first.value);
+    if (!codeMessage || codeMessage.type !== "code" || typeof codeMessage.code !== "string" || !codeMessage.code.trim()) {
+      throw new Error("The first bridge message must be {\"type\": \"code\", \"code\": \"...\"}.");
+    }
+    const pythonCode = codeMessage.code;
+
+    let phaseStart = performance.now();
+    const pyodide = await loadPyodide({
+      stdout: (msg) => writeBridgeText("stdout", `${msg}\n`, maxLineBytes),
+      stderr: (msg) => writeBridgeText("stderr", `${msg}\n`, maxLineBytes),
+    });
+    markTiming("load_pyodide_ms", phaseStart);
+    await initPyodide(pyodide);
+
+    const pending = new Map();
+    let nextId = 1;
+    let closed = false;
+    pyodide.registerJsModule("elitea_bridge", {
+      call: (name, argsJson) => {
+        if (closed) {
+          return Promise.reject(new Error("bridge closed"));
+        }
+        const id = nextId++;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          if (!writeBridgeLine({ type: "call", id, name: String(name), args: String(argsJson ?? "{}") }, maxLineBytes)) {
+            pending.delete(id);
+            reject(new Error(`Tool call arguments are over the ${maxLineBytes}-byte message limit.`));
+          }
+        });
+      },
+    });
+
+    (async () => {
+      for await (const line of lines) {
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch (_error) {
+          continue;
+        }
+        const waiter = message?.type === "result" ? pending.get(message.id) : undefined;
+        if (!waiter) {
+          continue;
+        }
+        pending.delete(message.id);
+        if (message.ok) {
+          waiter.resolve(typeof message.value === "string" ? message.value : JSON.stringify(message.value ?? null));
+        } else {
+          waiter.reject(new Error(String(message.error ?? "tool call failed")));
+        }
+      }
+      closed = true;
+      for (const waiter of pending.values()) {
+        waiter.reject(new Error("bridge closed"));
+      }
+      pending.clear();
+    })().catch((error) => console.error("bridge reader failed:", error?.message ?? error));
+
+    const prepareEnv = pyodide.pyimport("prepare_env");
+    const installErrors = [];
+    phaseStart = performance.now();
+    await prepareEnv.install_imports(pythonCode, [], (eventType, data) => {
+      if (eventType === "failed") {
+        installErrors.push(data);
+      }
+    });
+    markTiming("install_imports_ms", phaseStart);
+    if (installErrors.length > 0) {
+      sendFinal({
+        error: `Failed to install required Python packages: ${installErrors.join(", ")}.`,
+        error_type: "python_exception",
+      });
+    } else {
+      phaseStart = performance.now();
+      const rawValue = await pyodide.runPythonAsync(pythonCode);
+      markTiming("user_code_ms", phaseStart);
+      const jsonValue = await prepareEnv.dumps(rawValue);
+      sendFinal({ success: true, result: JSON.parse(jsonValue), timings });
+    }
+  } catch (error) {
+    sendFinal({ error: String(error?.message ?? error), error_type: classifyBridgeError(error), timings });
+  }
+  Deno.exit(0);
+}
+
 function printHelp() {
   console.log(`
 pyodide-sandbox ${pkgVersion}
@@ -645,6 +835,8 @@ OPTIONS:
   -c, --code <code>            Python code to execute
   -f, --file <path>            Path to Python file to execute
       --stdin                  Read Python code from stdin
+      --bridge                 Line-delimited JSON protocol with tool calls over stdin/stdout
+      --max-line-bytes <n>     Per-line size cap in --bridge mode
   -s, --stateful <bool>        Use a stateful session
   -b, --session-bytes <bytes>  Session bytes
   -m, --session-metadata       Session metadata
@@ -670,6 +862,11 @@ async function main() {
 
   if (flags.version) {
     console.log(pkgVersion);
+    return;
+  }
+
+  if (flags.bridge) {
+    await runBridge(Number(flags["max-line-bytes"]) || DEFAULT_BRIDGE_MAX_LINE_BYTES);
     return;
   }
 
