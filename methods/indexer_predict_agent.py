@@ -380,6 +380,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             adhoc_tools = unsecret_mcp_tools(adhoc_tools, client)
         internal_tools = kwargs.get("internal_tools", [])
         lazy_tools_mode = 'lazy_tools_mode' in internal_tools
+        code_mode = 'code_mode' in internal_tools
 
         log.debug(f'adhoc_tools count={len(adhoc_tools)}, internal_tools "{internal_tools}"')
 
@@ -430,6 +431,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 ignored_mcp_servers=kwargs.get("ignored_mcp_servers", None),
                 persona=kwargs.get("persona", "generic"),
                 lazy_tools_mode=lazy_tools_mode,
+                code_mode=code_mode,
                 internal_tools=internal_tools,
                 context_settings=context_settings,
                 step_limit=steps_limit,
