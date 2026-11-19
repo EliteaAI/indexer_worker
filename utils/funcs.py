@@ -809,10 +809,7 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
         if isinstance(toolkit_name, str) and toolkit_name.strip():
             return toolkit_name
 
-        tool_name = metadata.get("tool_name")
-        if isinstance(tool_name, str) and tool_name.strip() and not _is_http_url(tool_name):
-            return tool_name
-
+        # Never fall back to ``tool_name``: it is the invoked tool, not the toolkit (#7469).
         resource_metadata = metadata.get("resource_metadata")
         if isinstance(resource_metadata, dict):
             resource_name = resource_metadata.get("resource_name")
@@ -916,8 +913,6 @@ def _mcp_auth_error_to_metadata(exc: Exception) -> dict:
             }
     toolkit_name = getattr(exc, "toolkit_name", None)
     tool_name = getattr(exc, "tool_name", None)
-    if not toolkit_name and isinstance(tool_name, str) and tool_name and not _is_http_url(tool_name):
-        toolkit_name = tool_name
     if not toolkit_name and isinstance(resource_metadata, dict):
         resource_name = resource_metadata.get("resource_name")
         if isinstance(resource_name, str) and resource_name:
