@@ -1384,7 +1384,8 @@ class EliteACallback(BaseCallbackHandler):
             "post_elitea_core_tools",
             "put_project_context_project-context",
         })
-        if _tool_name_for_entity == "post_elitea_core_builder_apply":
+        if str(_tool_name_for_entity or "").endswith(("post_elitea_core_builder_apply",
+                                                      "post_elitea_core_builder_propose")):
             # Elitea Builder (#7383): the platform returns the chip of what it applied
             try:
                 _resp = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
