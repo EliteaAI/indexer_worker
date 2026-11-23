@@ -88,7 +88,9 @@ def agent_task_approver(descriptor_config):
     """ Arbiter task approver that warms the cache before fork; always approves """
     # Arbiter also calls approvers from on_start_request while holding start_task_rlock,
     # so this must stay non-blocking (request_warm only does put_nowait) or it gates the pool.
-    from ..methods.agent_common import pgvector_connstr_needed  # pylint: disable=C0415
+    from ..methods.agent_common import (  # pylint: disable=C0415
+        PGVECTOR_CONNSTR_KWARG, _pgvector_connstr_cache, pgvector_connstr_needed,
+    )
     #
     def _approver(event_name, event_payload):
         _ = event_name
@@ -99,6 +101,12 @@ def agent_task_approver(descriptor_config):
             #
             kwargs = event_payload.get("kwargs") or {}
             client_args = (kwargs.get("llm") or {}).get("kwargs") or {}
+            # Main answered pre-fork: a warm-up would only put parent DNS in flight at the fork (#7660).
+            # Kept in the parent cache so the tasks Main sends without it (fan-out children, pipelines) inherit it.
+            if PGVECTOR_CONNSTR_KWARG in kwargs:
+                if client_args.get("project_id") is not None:
+                    _pgvector_connstr_cache[client_args["project_id"]] = kwargs[PGVECTOR_CONNSTR_KWARG]
+                return True
             api_token = kwargs.get("api_token", client_args.get("api_key"))
             if not api_token and not client_args.get("auth_session"):
                 return True   # nothing to fetch with (#7229: a governed run's only bearer is its run token)

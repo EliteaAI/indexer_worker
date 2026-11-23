@@ -45,9 +45,9 @@ class Method:
         """
         self.indexer_enable_logging()
 
-        log.debug(f'indexer_empty_agent_state start {payload=}')
         days_to_retain = payload.get("days_to_retain", 1)
         pgvector_connstr = payload.get("pgvector_connstr")
+        log.debug('indexer_empty_agent_state start days_to_retain=%s has_connstr=%s', days_to_retain, bool(pgvector_connstr))
         cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_to_retain)).isoformat()
 
         try:

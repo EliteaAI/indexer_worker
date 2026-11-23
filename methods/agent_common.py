@@ -179,6 +179,7 @@ BUDGET_EXCEEDED_MESSAGES = {
 
 # Secret name for project PostgreSQL connection string
 PGVECTOR_PROJECT_CONNSTR_SECRET = "pgvector_project_connstr"
+PGVECTOR_CONNSTR_KWARG = "pgvector_connstr"
 
 # Per-worker cache: project_id -> connstr (immutable after project creation, safe to hold forever)
 _pgvector_connstr_cache: dict = {}
@@ -404,8 +405,9 @@ def _fetch_pgvector_connstr_with_retry(
                     "%s secret not found or empty in project vault for project_id=%s",
                     PGVECTOR_PROJECT_CONNSTR_SECRET, project_id
                 )
+                # setdefault: an answer Main sent meanwhile (via the task approver) outranks this slower lookup (#7660)
                 if project_id is not None:
-                    _pgvector_connstr_cache[project_id] = None
+                    return _pgvector_connstr_cache.setdefault(project_id, None)
                 return None
         except Exception as e:  # pylint: disable=W0718
             last_error = e
@@ -418,8 +420,7 @@ def _fetch_pgvector_connstr_with_retry(
                 time.sleep(delay)
             else:
                 log.warning(
-                    "All %d attempts to fetch %s failed. Last error: %s. "
-                    "Planning toolkit will use filesystem storage.",
+                    "All %d attempts to fetch %s failed, leaving it uncached for a later retry. Last error: %s",
                     max_retries, PGVECTOR_PROJECT_CONNSTR_SECRET, last_error
                 )
     return None
@@ -432,17 +433,17 @@ def pgvector_connstr_needed(descriptor_config: dict) -> bool:
 
 
 def resolve_pgvector_connstr(
-    descriptor_config: dict, client_args: dict, api_token: str, api_extra_headers: dict,
-    prefetched: Optional[str] = None,
+    descriptor_config: dict, client_args: dict, api_token: str, api_extra_headers: dict, task_kwargs: dict,
 ) -> Optional[str]:
     """ Resolve the pgvector connstr, avoiding post-fork DNS where possible """
-    # Cheapest first: not-postgres, then parent-resolved, then inherited cache.
+    # Cheapest first: not-postgres, then Main's pre-fork answer, then inherited cache.
     # The vault call is last because post-fork getaddrinfo can hang forever (#6245).
+    # Main's None is an answer too (the project has no secret, #7660): asking again post-fork cannot change it.
     if not pgvector_connstr_needed(descriptor_config):
         return None
 
-    if prefetched is not None:
-        return prefetched
+    if PGVECTOR_CONNSTR_KWARG in task_kwargs:
+        return task_kwargs[PGVECTOR_CONNSTR_KWARG]
 
     project_id = client_args.get("project_id")
     if project_id is not None and project_id in _pgvector_connstr_cache:
