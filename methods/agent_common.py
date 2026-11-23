@@ -405,8 +405,9 @@ def _fetch_pgvector_connstr_with_retry(
                     "%s secret not found or empty in project vault for project_id=%s",
                     PGVECTOR_PROJECT_CONNSTR_SECRET, project_id
                 )
+                # setdefault: an answer Main sent meanwhile (via the task approver) outranks this slower lookup (#7660)
                 if project_id is not None:
-                    _pgvector_connstr_cache[project_id] = None
+                    return _pgvector_connstr_cache.setdefault(project_id, None)
                 return None
         except Exception as e:  # pylint: disable=W0718
             last_error = e

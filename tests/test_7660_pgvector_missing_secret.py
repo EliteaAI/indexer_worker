@@ -103,3 +103,16 @@ def test_warm_up_still_runs_for_a_task_main_did_not_prefetch():
     approver, cache = _approver(asked)
     approver("start", _start_event())
     assert [args[0] for args in asked] == [64] and cache == {}
+
+
+def test_a_slower_warm_up_never_overwrites_mains_answer():
+    from test_6246_pgvector_timeout_retry import _load_retry_fn
+    fetch, cache = _load_retry_fn()
+    cache.clear()
+
+    def withheld(name):   # 404, or a default key withheld with a 400; Main's dispatch lands while it is in flight
+        cache[64] = PREFETCHED
+        return None
+
+    assert fetch(types.SimpleNamespace(unsecret=withheld), project_id=64) == PREFETCHED
+    assert cache == {64: PREFETCHED}
