@@ -456,6 +456,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                     "parallel_hitl_max_concurrency", 8,
                 ),
                 project_context=kwargs.get("project_context"),
+                builder=kwargs.get("builder"),
                 routing_instructions=(kwargs.get("routing_projection") or {}).get("instructions"),
             )
 

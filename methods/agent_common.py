@@ -1384,7 +1384,27 @@ class EliteACallback(BaseCallbackHandler):
             "post_elitea_core_tools",
             "put_project_context_project-context",
         })
-        if _tool_name_for_entity in _ENTITY_TOOL_NAMES:
+        if str(_tool_name_for_entity or "").endswith(("post_elitea_core_builder_apply",
+                                                      "post_elitea_core_builder_propose")):
+            # Elitea Builder (#7383): the platform returns the chip of what it applied
+            try:
+                _resp = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                _chip = (_resp or {}).get("chip") if isinstance(_resp, dict) else None
+                if _resp.get("status") == "applied" and _chip and _chip.get("id"):
+                    _entity_payload = {
+                        "entity_type": _chip.get("type"),
+                        "entity_id": _chip.get("id"),
+                        "version_id": _chip.get("version_id"),
+                        "entity_name": _chip.get("name") or "",
+                    }
+                    self.node_interface.emit(
+                        type=EventTypes.agent_entity_created,
+                        response_metadata=_entity_payload,
+                    )
+                    self.created_entities.append(_entity_payload)
+            except Exception as _exc:
+                log.debug("[ENTITY_CREATED] Could not parse Builder chip: %s", _exc)
+        elif _tool_name_for_entity in _ENTITY_TOOL_NAMES:
             try:
                 _resp = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
                 _entity_id = _resp.get("id")
