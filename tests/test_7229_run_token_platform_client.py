@@ -75,8 +75,12 @@ def _warm_module(asked):
     recording what it is asked."""
     source = (PLUGIN_ROOT / "utils" / "pgvector_warm.py").read_text()
     source = source.replace("from pylon.core.tools import log  # pylint: disable=E0611,E0401", "")
-    source = source.replace("from ..methods.agent_common import pgvector_connstr_needed  # pylint: disable=C0415",
-                            "pgvector_connstr_needed = lambda config: True")
+    source = source.replace(
+        "from ..methods.agent_common import (  # pylint: disable=C0415\n"
+        "        PGVECTOR_CONNSTR_KWARG, _pgvector_connstr_cache, pgvector_connstr_needed,\n"
+        "    )",
+        "PGVECTOR_CONNSTR_KWARG = 'pgvector_connstr'; _pgvector_connstr_cache = {}; "
+        "pgvector_connstr_needed = lambda config: True")
     namespace = {"log": types.SimpleNamespace(warning=lambda *a, **k: None)}
     exec(compile(source, "pgvector_warm.py", "exec"), namespace)  # pylint: disable=W0122
     namespace["request_warm"] = lambda *args: asked.append(args)
@@ -232,7 +236,7 @@ def test_without_an_sdk_that_keeps_the_token_out_of_the_sandbox_the_run_token_is
 def test_both_agent_tasks_give_the_pgvector_fallback_the_run_bearer(path):
     text = (PLUGIN_ROOT / path).read_text()
     call = text[text.index("pgvector_connstr = resolve_pgvector_connstr("):]
-    call = call[:call.index(")", call.index("prefetched="))]
+    call = call[:call.index(")", call.index("task_kwargs="))]
     assert "platform_bearer(api_token, client_args)" in call and "api_token, api_extra_headers" not in call
 
 

@@ -167,7 +167,7 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             # No-op unless memory is postgres; prefers the parent-resolved value (#6245)
             pgvector_connstr = resolve_pgvector_connstr(
                 self.descriptor.config, client_args, platform_bearer(api_token, client_args), api_extra_headers,
-                prefetched=kwargs.get("pgvector_connstr"),
+                task_kwargs=kwargs,
             )
 
             # Setup memory configuration
