@@ -1289,6 +1289,21 @@ class EliteACallback(BaseCallbackHandler):
                     })
         return applied
 
+    def _record_created_entity(self, payload: dict) -> bool:
+        """Emit one chip per entity per run; a repeat (e.g. create, then save) only refreshes the stored entry."""
+        for idx, existing in enumerate(self.created_entities):
+            if (existing.get("entity_type"), existing.get("entity_id")) == (
+                payload.get("entity_type"), payload.get("entity_id"),
+            ):
+                self.created_entities[idx] = payload
+                return False
+        self.node_interface.emit(
+            type=EventTypes.agent_entity_created,
+            response_metadata=payload,
+        )
+        self.created_entities.append(payload)
+        return True
+
     def on_tool_end(self, *args, run_id: UUID, **kwargs):
         """Callback"""
         if self._is_mcp_auth_paused() and str(run_id) not in self.tool_calls:
@@ -1398,11 +1413,7 @@ class EliteACallback(BaseCallbackHandler):
                         "version_id": _chip.get("version_id"),
                         "entity_name": _chip.get("name") or "",
                     }
-                    self.node_interface.emit(
-                        type=EventTypes.agent_entity_created,
-                        response_metadata=_entity_payload,
-                    )
-                    self.created_entities.append(_entity_payload)
+                    self._record_created_entity(_entity_payload)
             except Exception as _exc:
                 log.debug("[ENTITY_CREATED] Could not parse Builder chip: %s", _exc)
         elif _tool_name_for_entity in _ENTITY_TOOL_NAMES:
@@ -1475,12 +1486,7 @@ class EliteACallback(BaseCallbackHandler):
                             "entity_name": "Project Context",
                         }
 
-                if _entity_payload:
-                    self.node_interface.emit(
-                        type=EventTypes.agent_entity_created,
-                        response_metadata=_entity_payload,
-                    )
-                    self.created_entities.append(_entity_payload)
+                if _entity_payload and self._record_created_entity(_entity_payload):
                     log.info(
                         "[ENTITY_CREATED] Detected %s creation via MCP tool: id=%s version_id=%s name=%r",
                         _entity_payload["entity_type"], _entity_payload["entity_id"],
