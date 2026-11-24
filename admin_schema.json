@@ -77,7 +77,7 @@
     "sandbox_client_bridge": {
       "type": "boolean",
       "title": "Credential-free Sandbox Client",
-      "description": "Python sandbox code gets an elitea_client without the user's token: every platform call is made by the worker through the sandbox bridge, secret reads are audited and their values masked in the output, and only pipeline code nodes may read secrets. Applies to stateless local sandboxes; stateful and remote sandboxes keep the old client. Off = the old client that carries the token.",
+      "description": "Python sandbox code gets an elitea_client without the user's token: every platform call is made by the worker through the sandbox bridge, secret reads are audited, and only pipeline code nodes may read secrets. Secret values are replaced with *** in printed output and error text only; the code node's returned result is not masked, because later pipeline nodes may need the value. Platform requests stop at the run's time limit, but a write already sent when a run times out may still complete. Applies to stateless local sandboxes; stateful and remote sandboxes keep the old client. Off = the old client that carries the token.",
       "path": "sandbox_client_bridge",
       "section": "runtime",
       "default": true,
