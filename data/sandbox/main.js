@@ -123,6 +123,46 @@ const localWheelUriMap = buildLocalWheelUriMap(runtimePaths.pyodideDir);
 const { loadPyodide } = await import(pathToFileURL(pyodideModulePath).href);
 markTiming("startup_ms", processStartMs);
 
+// Modules imported before the snapshot is taken, so a snapshot run does not pay for them (#6718).
+const SNAPSHOT_PRELOAD = "import datetime, importlib, json, re, sys, typing, random";
+let snapshotPath = null;
+
+async function buildSnapshot(target) {
+  const pyodide = await loadPyodide({ indexURL: `${runtimePaths.pyodideDirPosix}/`, _makeSnapshot: true });
+  pyodide.runPython(SNAPSHOT_PRELOAD);
+  const temporary = `${target}.tmp`;
+  await Deno.writeFile(temporary, pyodide.makeMemorySnapshot());
+  await Deno.rename(temporary, target);
+}
+
+// A damaged snapshot aborts the wasm start instead of throwing, so check it before loading.
+async function verifySnapshot(snapshot) {
+  const expected = /-([0-9a-f]{64})\.bin$/.exec(snapshotPath)?.[1];
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", snapshot));
+  const actual = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (actual !== expected) {
+    throw new Error("snapshot checksum mismatch");
+  }
+}
+
+// Falls back to a cold load when the snapshot is missing or unusable, so a bad file never fails a run.
+async function loadPyodideForRun(io) {
+  if (snapshotPath) {
+    try {
+      const snapshot = await Deno.readFile(snapshotPath);
+      await verifySnapshot(snapshot);
+      const pyodide = await loadPyodide({ indexURL: `${runtimePaths.pyodideDirPosix}/`, _loadSnapshot: snapshot, ...io });
+      pyodide.runPython("import random as _r; _r.seed(); del _r");
+      timings.snapshot = "loaded";
+      return pyodide;
+    } catch (error) {
+      timings.snapshot = "fallback";
+      timings.snapshot_error = String(error?.message ?? error).slice(0, 200);
+    }
+  }
+  return await loadPyodide(io);
+}
+
 const prepareEnvCodeTemplate = `
 import datetime
 import importlib
@@ -453,6 +493,17 @@ function parseCliArgs(args) {
           }
           break;
         }
+        case "--snapshot":
+        case "--build-snapshot": {
+          if (value !== undefined) {
+            flags[name.slice(2)] = value;
+          } else {
+            const [next, newIndex] = takeValue(i, name);
+            flags[name.slice(2)] = next;
+            i = newIndex;
+          }
+          break;
+        }
         case "--help": {
           flags.help = true;
           break;
@@ -542,7 +593,7 @@ async function runPython(pythonCode, options) {
 
   try {
     let phaseStart = performance.now();
-    const pyodide = await loadPyodide({
+    const pyodide = await loadPyodideForRun({
       stdout: (msg) => output.push(msg),
       stderr: (msg) => errOutput.push(msg),
     });
@@ -747,7 +798,7 @@ async function runBridge(maxLineBytes) {
     const pythonCode = codeMessage.code;
 
     let phaseStart = performance.now();
-    const pyodide = await loadPyodide({
+    const pyodide = await loadPyodideForRun({
       stdout: (msg) => writeBridgeText("stdout", `${msg}\n`, maxLineBytes),
       stderr: (msg) => writeBridgeText("stderr", `${msg}\n`, maxLineBytes),
     });
@@ -837,6 +888,8 @@ OPTIONS:
       --stdin                  Read Python code from stdin
       --bridge                 Line-delimited JSON protocol with tool calls over stdin/stdout
       --max-line-bytes <n>     Per-line size cap in --bridge mode
+      --snapshot <path>        Start from a Pyodide memory snapshot (cold load if unusable)
+      --build-snapshot <path>  Build a memory snapshot at <path> and exit
   -s, --stateful <bool>        Use a stateful session
   -b, --session-bytes <bytes>  Session bytes
   -m, --session-metadata       Session metadata
@@ -864,6 +917,13 @@ async function main() {
     console.log(pkgVersion);
     return;
   }
+
+  if (flags["build-snapshot"]) {
+    await buildSnapshot(flags["build-snapshot"]);
+    console.log(JSON.stringify({ success: true, timings: { total_ms: Math.round(performance.now() - processStartMs) } }));
+    Deno.exit(0);
+  }
+  snapshotPath = flags.snapshot || null;
 
   if (flags.bridge) {
     await runBridge(Number(flags["max-line-bytes"]) || DEFAULT_BRIDGE_MAX_LINE_BYTES);

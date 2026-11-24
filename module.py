@@ -286,6 +286,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         # Pyodide sandbox - set entrypoint via environment variable
         sandbox_entrypoint = os.path.join(self.descriptor.path, "data", "sandbox", "main.js")
         os.environ["PYODIDE_SANDBOX_PKG"] = sandbox_entrypoint
+        self._sandbox_base = sandbox_base
+        self._sandbox_entrypoint = sandbox_entrypoint
         # Indexer: spaCy model sits next to the sandbox on the data volume by default
         spacy_target = self.descriptor.config.get("spacy_data", None) or os.path.join(
             os.path.dirname(self.descriptor.config.get("nltk_data", "/tmp/nltk_data")),
@@ -295,6 +297,8 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         #
         for key, value in self.descriptor.config.get("env_vars", {}).items():
             os.environ[key] = value
+        #
+        self._apply_pyodide_snapshot()
         #
         try:
             from langchain_core.globals import set_verbose  # pylint: disable=C0415,E0401
@@ -569,6 +573,16 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             except Exception:  # pylint: disable=W0718
                 log.exception("Failed to disable tool result bounds")
 
+    def _apply_pyodide_snapshot(self):
+        try:
+            from .utils.pyodide_snapshot import apply_pyodide_snapshot  # pylint: disable=C0415
+            apply_pyodide_snapshot(
+                bool(self.descriptor.config.get("sandbox_snapshot", True)),
+                self._sandbox_base, self._sandbox_entrypoint,
+            )
+        except Exception:  # pylint: disable=W0718
+            log.exception("Failed to apply the Pyodide snapshot setting - sandboxes keep the cold load")
+
     def _configure_mcp_discovery_cache(self):
         try:
             from .utils.mcp_discovery_cache import configure_mcp_discovery_cache  # pylint: disable=C0415
@@ -666,6 +680,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         if not getattr(self, "_tracing_redactor_registered", False):
             self._register_tracing_redactor()
         self._apply_tool_result_limits()
+        self._apply_pyodide_snapshot()
         self._reload_mcp_servers()
 
     def _reload_mcp_servers(self):
