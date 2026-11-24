@@ -50,6 +50,8 @@ mcp_response_max_bytes: 52428800   # 50 MiB
 
 # Start Python sandboxes from a Pyodide memory snapshot built at worker start (#6718); false = cold load.
 sandbox_snapshot: true
+# Sandbox code gets a credential-free platform client whose calls the worker makes (#7719); false = the old client that carries the token.
+sandbox_client_bridge: true
 # Several workers sharing one snapshot volume: give each a distinct env SANDBOX_SNAPSHOT_OWNER (default "default").
 
 # Pyodide code-node sandbox resource limits. Set into os.environ at plugin init
