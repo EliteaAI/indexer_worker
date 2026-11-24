@@ -65,6 +65,15 @@
       "minimum": 1048576,
       "requires_restart": false
     },
+    "sandbox_snapshot": {
+      "type": "boolean",
+      "title": "Fast Sandbox Start (Pyodide snapshot)",
+      "description": "The worker builds a Pyodide memory snapshot at start and Python sandboxes start from it (about 1.5s faster per run). A missing or broken snapshot falls back to the normal start. The snapshot is rebuilt on every worker start. Disable to always cold-load.",
+      "path": "sandbox_snapshot",
+      "section": "runtime",
+      "default": true,
+      "requires_restart": false
+    },
     "mcp_servers": {
       "type": "object",
       "title": "MCP Server Definitions",
