@@ -13,6 +13,7 @@ Run: cd tests && python3 -m pytest test_6718_pyodide_snapshot.py
 """
 import hashlib
 import importlib.util
+import logging
 import os
 import pathlib
 import stat
@@ -26,15 +27,23 @@ MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / 'utils' / 'pyodide_s
 
 
 def _load():
-    pylon = types.ModuleType('pylon')
-    core = types.ModuleType('pylon.core')
+    # The pylon stub is only in place while the helper imports, so other test files see the real one.
+    names = ('pylon', 'pylon.core', 'pylon.core.tools')
+    saved = {name: sys.modules.get(name) for name in names}
     tools = types.ModuleType('pylon.core.tools')
-    tools.log = types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None,
-                                      exception=lambda *a, **k: None)
-    sys.modules.update({'pylon': pylon, 'pylon.core': core, 'pylon.core.tools': tools})
-    spec = importlib.util.spec_from_file_location('pyodide_snapshot', MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    tools.log = logging.getLogger('test_6718')
+    sys.modules.update({'pylon': types.ModuleType('pylon'), 'pylon.core': types.ModuleType('pylon.core'),
+                        'pylon.core.tools': tools})
+    try:
+        spec = importlib.util.spec_from_file_location('pyodide_snapshot', MODULE_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return module
 
 
