@@ -125,6 +125,7 @@ markTiming("startup_ms", processStartMs);
 
 // Modules imported before the snapshot is taken, so a snapshot run does not pay for them (#6718).
 const SNAPSHOT_PRELOAD = "import datetime, importlib, json, re, sys, typing, random";
+// The string hash seed stays fixed until the next worker start: accepted, the worst case is a slowed run (timeout-bound).
 let snapshotPath = null;
 
 async function buildSnapshot(target) {

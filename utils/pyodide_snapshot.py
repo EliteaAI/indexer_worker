@@ -10,8 +10,9 @@ import uuid
 from pylon.core.tools import log  # pylint: disable=E0611,E0401
 
 SNAPSHOT_ENV = "SANDBOX_SNAPSHOT_PATH"
+OWNER_ENV = "SANDBOX_SNAPSHOT_OWNER"
 _BUILD_TIMEOUT_SECONDS = 120
-_STALE_AFTER_SECONDS = 24 * 3600
+_ORPHAN_GRACE_SECONDS = 3600
 _lock = threading.Lock()
 _state = {"enabled": False}
 
@@ -27,19 +28,45 @@ def _remove(path):
         pass
 
 
-def _remove_stale(sandbox_base, keep):
-    # The directory may be shared by other workers, so only long-unused files are removed.
-    cutoff = time.time() - _STALE_AFTER_SECONDS
-    for path in glob.glob(os.path.join(_snapshot_dir(sandbox_base), "*")):
+def _marker(sandbox_base):
+    # Names the live snapshot; a file some marker names is never removed. Set a distinct owner per worker on a shared volume.
+    owner = os.environ.get(OWNER_ENV) or "default"
+    return os.path.join(_snapshot_dir(sandbox_base), f"owner-{owner}.txt")
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _set_marker(sandbox_base, name):
+    marker = _marker(sandbox_base)
+    if not name:
+        _remove(marker)
+        return
+    with open(marker + ".tmp", "w", encoding="utf-8") as handle:
+        handle.write(name)
+    os.replace(marker + ".tmp", marker)
+
+
+def _remove_unreferenced(sandbox_base):
+    # The grace period covers another worker between publishing its file and writing its marker.
+    folder = _snapshot_dir(sandbox_base)
+    live = {_read(path) for path in glob.glob(os.path.join(folder, "owner-*.txt"))}
+    cutoff = time.time() - _ORPHAN_GRACE_SECONDS
+    for path in glob.glob(os.path.join(folder, "*.bin")):
         try:
-            if path != keep and os.path.getmtime(path) < cutoff:
+            if os.path.basename(path) not in live and os.path.getmtime(path) < cutoff:
                 os.remove(path)
         except OSError:
             pass
 
 
 def _build(sandbox_base, entrypoint):
-    # A random name per start: a fresh hash seed, and no clash with another worker sharing the directory.
+    # Rebuilt on every start; a unique name keeps workers sharing the directory apart.
     target = os.path.join(_snapshot_dir(sandbox_base), f"{uuid.uuid4().hex}.bin")
     os.makedirs(_snapshot_dir(sandbox_base), mode=0o700, exist_ok=True)
     pyodide_dir = os.path.join(sandbox_base, "pyodide")
@@ -63,7 +90,11 @@ def _build(sandbox_base, entrypoint):
         if not _state["enabled"]:
             _remove(final)
             return
-        _remove_stale(sandbox_base, final)
+        previous = _read(_marker(sandbox_base))
+        _set_marker(sandbox_base, os.path.basename(final))
+        if previous and previous != os.path.basename(final):
+            _remove(os.path.join(_snapshot_dir(sandbox_base), previous))
+        _remove_unreferenced(sandbox_base)
         os.environ[SNAPSHOT_ENV] = final
         log.info("Pyodide snapshot ready: %s (%d bytes)", final, os.path.getsize(final))
     finally:
@@ -90,6 +121,7 @@ def apply_pyodide_snapshot(enabled, sandbox_base, entrypoint):
         os.environ.pop(SNAPSHOT_ENV, None)
         if current:
             _remove(current)
+            _set_marker(sandbox_base, "")
         return
     if os.path.isfile(current):
         return
