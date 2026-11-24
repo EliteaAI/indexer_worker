@@ -299,6 +299,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             os.environ[key] = value
         #
         self._apply_pyodide_snapshot()
+        self._apply_sandbox_client_bridge()
         #
         try:
             from langchain_core.globals import set_verbose  # pylint: disable=C0415,E0401
@@ -583,6 +584,13 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         except Exception:  # pylint: disable=W0718
             log.exception("Failed to apply the Pyodide snapshot setting - sandboxes keep the cold load")
 
+    def _apply_sandbox_client_bridge(self):
+        # Sandbox code reaches the platform through the bridge instead of holding the user's token (#7719)
+        if self.descriptor.config.get("sandbox_client_bridge", True):
+            os.environ["SANDBOX_CLIENT_BRIDGE"] = "1"
+        else:
+            os.environ.pop("SANDBOX_CLIENT_BRIDGE", None)
+
     def _configure_mcp_discovery_cache(self):
         try:
             from .utils.mcp_discovery_cache import configure_mcp_discovery_cache  # pylint: disable=C0415
@@ -681,6 +689,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
             self._register_tracing_redactor()
         self._apply_tool_result_limits()
         self._apply_pyodide_snapshot()
+        self._apply_sandbox_client_bridge()
         self._reload_mcp_servers()
 
     def _reload_mcp_servers(self):
