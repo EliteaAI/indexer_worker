@@ -53,6 +53,8 @@ sandbox_snapshot: true
 # Sandbox code gets a credential-free platform client whose calls the worker makes (#7719); false = the old client that carries the token.
 # Secret values are masked in printed output and errors only, not in a code node's returned result (pipeline state).
 sandbox_client_bridge: true
+# Extra exact host[:port] entries local sandboxes may reach; package hosts are always allowed (#7728). No wildcards or paths.
+sandbox_allowed_hosts: []   # e.g. [api.github.com, dev.azure.com]
 # Several workers sharing one snapshot volume: give each a distinct env SANDBOX_SNAPSHOT_OWNER (default "default").
 
 # Pyodide code-node sandbox resource limits. Set into os.environ at plugin init
