@@ -83,6 +83,18 @@
       "default": true,
       "requires_restart": false
     },
+    "sandbox_allowed_hosts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "title": "Sandbox Allowed Hosts",
+      "description": "Extra hosts local Python sandboxes may reach, besides the package hosts (pypi.org, files.pythonhosted.org, cdn.jsdelivr.net) that are always allowed. Exact host or host:port only, e.g. api.github.com or dev.azure.com; wildcards, paths and URLs are ignored. Every listed host can receive data from sandbox code, so add only hosts you trust.",
+      "path": "sandbox_allowed_hosts",
+      "section": "runtime",
+      "default": [],
+      "requires_restart": false
+    },
     "mcp_servers": {
       "type": "object",
       "title": "MCP Server Definitions",

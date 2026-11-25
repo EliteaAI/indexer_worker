@@ -300,6 +300,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         #
         self._apply_pyodide_snapshot()
         self._apply_sandbox_client_bridge()
+        self._apply_sandbox_allowed_hosts()
         #
         try:
             from langchain_core.globals import set_verbose  # pylint: disable=C0415,E0401
@@ -591,6 +592,17 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         else:
             os.environ.pop("SANDBOX_CLIENT_BRIDGE", None)
 
+    def _apply_sandbox_allowed_hosts(self):
+        # Extra hosts local sandboxes may reach beyond the package hosts; the SDK validates each entry (#7728)
+        hosts = self.descriptor.config.get("sandbox_allowed_hosts") or []
+        if isinstance(hosts, str):
+            hosts = hosts.split(",")
+        value = ",".join(str(h).strip() for h in hosts if str(h).strip())
+        if value:
+            os.environ["SANDBOX_ALLOWED_HOSTS"] = value
+        else:
+            os.environ.pop("SANDBOX_ALLOWED_HOSTS", None)
+
     def _configure_mcp_discovery_cache(self):
         try:
             from .utils.mcp_discovery_cache import configure_mcp_discovery_cache  # pylint: disable=C0415
@@ -690,6 +702,7 @@ class Module(module.ModuleModel):  # pylint: disable=R0902
         self._apply_tool_result_limits()
         self._apply_pyodide_snapshot()
         self._apply_sandbox_client_bridge()
+        self._apply_sandbox_allowed_hosts()
         self._reload_mcp_servers()
 
     def _reload_mcp_servers(self):
