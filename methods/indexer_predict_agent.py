@@ -458,6 +458,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
                 ),
                 project_context=kwargs.get("project_context"),
                 builder=kwargs.get("builder"),
+                # EL-7679: AI-assist drafts get one structured answer instead of an agent run
+                output_schema=kwargs.get("output_schema"),
             )
 
             # Create callbacks
@@ -603,7 +605,8 @@ class Method:  # pylint: disable=E1101,R0903,W0201
             if pause_result:
                 return pause_result
 
-            if elitea_callback.llm_error:
+            # A structured run (EL-7679) can recover from a rejected call that set llm_error
+            if elitea_callback.llm_error and not response.get("structured_ok"):
                 raise elitea_callback.llm_error
 
             # Parallel sub-agent park (#4993 Track 2): the parent fanned out to
